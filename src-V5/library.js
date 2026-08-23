@@ -45495,38 +45495,17 @@ function MCPV5Create_living_meters() {
       return engineInfo[property];
     }
   });
-/// <reference no-default-lib="true"/>
-/// <reference lib="es2022"/>
 
 // SPDX-License-Identifier: MIT
 
 /* ============================================================================
- * LIVING METERS v1.2.0: a resource framework for AI Dungeon
+ * LIVING METERS v1.2.0
  *
  * Copyright (c) 2026 Oratorian. MIT licensed; see the LICENSE file.
  * You may bundle this into your own script. Keeping this notice is all that
  * is asked.
- * ----------------------------------------------------------------------------
- * Tracks any set of numeric resources (health, hunger, ammo, fuel, sanity,
- * gold, reputation...), drifts them each turn, reacts to what the story says,
- * and tells the AI how the character should feel and behave.
  *
- * The meters are "living" because they move on their own: each one drifts every
- * turn, reacts to what the story says, and is handed to the AI as behaviour to
- * play rather than a number to recite.
- *
- * THREE LAYERS OF CONFIGURATION
- *   1. RM_CONFIG below                 the scenario creator edits this.
- *   2. RM_PRESETS                      ready-made resource sets to start from.
- *   3. The "Living Meters" story card  the PLAYER edits this in-game; it
- *                                      overrides the creator's numbers.
- *
- * The RM_ prefix is the original working name and is kept deliberately: it is
- * short, it collides with nothing, and renaming it would break nobody's saves
- * for no gain.
- *
- * INSTALL: paste this whole file into the Library tab, then paste the three
- * companion files into Input / Context / Output. See README.md.
+ * Configured from the RM_CONFIG block below.
  * ==========================================================================*/
 
 // Some globals are not defined in every hook. Establish them before use.
@@ -45765,6 +45744,11 @@ const RM_CONFIG = {
   //   "none"        — track only, never tell the AI.
   inject: "context",
 
+  // Take this module's own command answers back out of the context window.
+  // They are delivered as story output, so they land in the history and would
+  // otherwise be read back to the model on every turn that follows.
+  hideAnswersFromAI: true,
+
   // Prefix for the injected block. Keep it bracketed and in complete sentences:
   // an unterminated fragment invites the AI to finish it.
   injectLabel: "Ship and crew status",
@@ -45772,27 +45756,12 @@ const RM_CONFIG = {
   // Show a toast to the player when a resource crosses into a new band.
   announceBandChanges: true,
 
-  // What separates rows inside a toast. The client collapses whitespace, so a
-  // newline is only a space and a padded block turns into one wrapped
-  // paragraph. A visible marker survives that. If you find a break that does
-  // work in your client, put it here: "\n\n" and "<br>" are the two worth trying.
-  toastSeparator: "   \u00b7   ",
-
-  // Show the full status toast every N turns. 0 disables.
-  statusEvery: 0,
-
   // Maintain a "Living Meters" story card the player can read and edit.
   playerCard: true,
   playerCardTitle: "⚙️ Living Meters",
 
   // Command prefix. Players type "/status", "/hp +10", etc.
   commandPrefix: "/",
-
-  // Commands need the turn to stop before the AI runs. AI Dungeon has no clean
-  // way to do that: halting shows a "the AI is stumped" banner. Set false to
-  // let commands fall through to the AI instead (no banner, costs a
-  // generation). See README "Why does a command show an error banner?".
-  haltOnCommand: true,
 
   // Ignore a trigger word sitting inside a negated clause, so "you do not
   // eat" no longer feeds the character. A negator only reaches back to the
@@ -45812,7 +45781,7 @@ const RM_CONFIG = {
 };
 
 /* ============================================================================
- * 2. PRESETS
+ * 2. PRESETS — ready-made resource sets RM_CONFIG.preset can start from.
  * ==========================================================================*/
 
 const RM_PRESETS = {
@@ -46167,7 +46136,7 @@ const RM_PRESETS = {
 };
 
 /* ============================================================================
- * 3. FRAMEWORK — you should not need to edit below this line.
+ * 2. FRAMEWORK — you should not need to edit below this line.
  * ==========================================================================*/
 
 const RM = (function () {
@@ -46416,14 +46385,22 @@ const RM = (function () {
       res: res,
       band: {},        // id -> last announced band name
       turn: 0,         // our own turn counter, not info.actionCount
-      hlen: 0,         // history.length at the last counted turn
+      // How much of history has been read for turn counting. It starts at the
+      // current length, never at zero: an adventure can already have a long
+      // history behind it when this script is first enabled, and that past is
+      // not drift this run owes.
+      hlen: Array.isArray(history) ? history.length : 0,
+      hac: Number.isInteger(info?.actionCount) ? Math.abs(info.actionCount) : 0,
+      owed: 0,         // generations charged before their AI action landed
+      inflight: false, // this generation has already been charged for
       outHash: 0,      // hash of the last output we scanned
-      msgPrev: "",     // last toast we wrote, for cooperative state.message
-      msgOpen: false,  // a flush already happened this generation; add to it
       cardOK: true,    // false once we detect story cards are unavailable
       warned: false,
-      pendingStop: false, // a command ran in Input; Context executes the halt
-      cfgWarned: false,   // config problems have been shown once
+      reply: "",          // a command answer waiting to leave as the output
+      replyGen: 0,        // generations it has waited; more than one is late
+      cmdTurn: false,     // this generation answers a command, so it will not tick
+      pend: [],           // notices waiting for the next command answer
+      cfgWarned: false,   // config problems have been noticed once
       fired: {},          // trigger keys already counted this turn
       over: {},        // player overrides parsed from the story card
       overWarn: "",    // unknown card keys we have already flagged
@@ -46446,12 +46423,18 @@ const RM = (function () {
     if (raw.band && typeof raw.band === "object") s.band = raw.band;
     if (isNum(raw.turn)) s.turn = raw.turn;
     if (isNum(raw.hlen)) s.hlen = raw.hlen;
+    if (isNum(raw.hac)) s.hac = raw.hac;
+    if (isNum(raw.owed)) s.owed = clamp(raw.owed, 0, 1);
+    if (typeof raw.inflight === "boolean") s.inflight = raw.inflight;
     if (isNum(raw.outHash)) s.outHash = raw.outHash;
-    if (typeof raw.msgPrev === "string") s.msgPrev = raw.msgPrev;
-    if (typeof raw.msgOpen === "boolean") s.msgOpen = raw.msgOpen;
     if (typeof raw.cardOK === "boolean") s.cardOK = raw.cardOK;
     if (typeof raw.warned === "boolean") s.warned = raw.warned;
-    if (typeof raw.pendingStop === "boolean") s.pendingStop = raw.pendingStop;
+    if (typeof raw.reply === "string") s.reply = raw.reply;
+    if (isNum(raw.replyGen)) s.replyGen = raw.replyGen;
+    if (typeof raw.cmdTurn === "boolean") s.cmdTurn = raw.cmdTurn;
+    if (Array.isArray(raw.pend)) {
+      s.pend = raw.pend.filter((n) => typeof n === "string").slice(-PEND_MAX);
+    }
     if (typeof raw.cfgWarned === "boolean") s.cfgWarned = raw.cfgWarned;
     if (raw.fired && typeof raw.fired === "object") s.fired = raw.fired;
     if (raw.over && typeof raw.over === "object") s.over = raw.over;
@@ -46503,10 +46486,9 @@ const RM = (function () {
   }
 
   // Every key the card can actually set. parseOverrides accepts any
-  // "key = value" line, so without this a typo, or a creator-only setting like
-  // statusEvery, is stored forever and silently ignored. That is how a player
-  // ends up convinced the card does nothing.
-  const OVER_GLOBALS = ["difficulty", "statusEvery"];
+  // "key = value" line, so without this a typo is stored forever and silently
+  // ignored. That is how a player ends up convinced the card does nothing.
+  const OVER_GLOBALS = ["difficulty"];
   const OVER_FIELDS = ["min", "max", "start", "perTurn", "visible", "enabled"];
 
   function isOverrideKey(key) {
@@ -46529,7 +46511,7 @@ const RM = (function () {
     if (sig === s.overWarn) return;
     s.overWarn = sig;
     if (!bad.length) return;
-    toast(s, "Living Meters card: " + bad.map((k) => '"' + k + '"').join(", ") +
+    notice(s, "Living Meters card: " + bad.map((k) => '"' + k + '"').join(", ") +
       (bad.length > 1 ? " are not settings." : " is not a setting.") +
       " See the notes at the top of the card.");
   }
@@ -46594,36 +46576,119 @@ const RM = (function () {
   // ---- turn detection -----------------------------------------------------
 
   // There is no "the turn advanced" API, and info.actionCount is not a clean
-  // counter: it increments twice on a Do/Say/Story turn, once on a Continue,
-  // and has been observed to decrement on a Retry and to go negative.
-  // history.length is the more honest signal until the platform truncates it,
-  // so use it first and fall back to actionCount once it plateaus.
-  function turnAdvanced(s) {
+  // counter: it moves twice on a Do/Say/Story turn, once on a Continue, and a
+  // Retry can move it backwards, or negative.
+  //
+  // What history does say honestly is how MANY generations have passed, not
+  // merely that one has: each generation appends exactly one AI action to it,
+  // whatever the player did to provoke that generation. Counting those in the
+  // stretch not yet read means a hook that is skipped for a generation, or for
+  // ten, costs no drift, and it cannot double count, because the stretch is
+  // consumed as it is read.
+  //
+  // This module may NOT assume any particular hook runs every generation. This
+  // host hands the whole Context tab, and the whole Output tab, to a single
+  // module whenever a transaction is active, and Story Arc generation, an
+  // Auto-Cards model task and Inner Self thought formation are all ordinary
+  // play. A Continue never runs Input either. Counting from history is what
+  // makes the drift survive all of that.
+  //
+  // history excludes the in-flight action, so counting it alone would pay for
+  // a generation only once the NEXT one starts. The generation being lived
+  // through is therefore charged on credit, and settled when its AI action
+  // finally shows up, so drift lands on the turn that earned it.
+  const AI_ACTION = "continue";
+
+  // A pathological jump (an adventure imported with a long history behind it,
+  // every hook silent for a very long time) must not dump an hour of drift
+  // into a single turn.
+  const TICK_MAX = 20;
+
+  function turnsPassed(s, hook) {
     const hl = Array.isArray(history) ? history.length : 0;
     const ac = Number.isInteger(info?.actionCount) ? Math.abs(info.actionCount) : 0;
 
-    if (Math.abs(hl - ac) < 2) {
-      // history is intact — trust it. A retry re-generates without growing it.
-      if (hl > s.hlen) { s.hlen = hl; return true; }
+    // Undone actions, or the front trimmed harder than the back grew: take the
+    // new length as the anchor and count nothing this time.
+    if (hl < s.hlen) { s.hlen = hl; s.hac = ac; return 0; }
+
+    if (hl > s.hlen) {
+      // Input runs because a player action is about to be appended, so being
+      // there is itself proof a generation has begun. Elsewhere the proof is a
+      // player action already sitting in the stretch being read.
+      let started = hook === "input";
+      let done = 0;
+      for (let i = s.hlen; i < hl; i++) {
+        const a = history[i];
+        if (!a) continue;
+        if (a.type === AI_ACTION) done++;
+        else started = true;
+      }
       s.hlen = hl;
-      return false;
+      s.hac = ac;           // keep the fallback's baseline current
+
+      // Generations already charged on credit are settled here, not charged a
+      // second time.
+      const settled = Math.min(done, s.owed);
+      s.owed -= settled;
+      if (settled > 0) s.inflight = false;
+      let n = done - settled;
+
+      // Nothing has been charged for the generation being lived through, so
+      // charge it now and remember the debt. Without the `started` proof this
+      // would also charge for hooks that run outside any generation, and the
+      // real next turn would then find its drift already spent.
+      if (started && !s.inflight) {
+        s.inflight = true;
+        s.owed += 1;
+        // A command's own generation exists only to carry the answer back, and
+        // asking a question should not cost the character a turn of hunger. It
+        // is still claimed and still owed, so no later hook charges for it and
+        // the settle stays balanced. It simply costs nothing.
+        if (s.cmdTurn) s.cmdTurn = false;
+        else n += 1;
+      }
+      return n;
     }
-    // history has been truncated; fall back to the action counter.
-    if (ac > s.turn) return true;
-    return false;
+
+    // history has stopped growing, so it is being truncated and its tail no
+    // longer says anything new. actionCount is what is left. Context and
+    // Output see the settled value; Input sees the intermediate one and would
+    // have Context count the same turn again, so Input stops here. Credit
+    // cannot be settled against a history that is not growing, so the ledger
+    // is closed while we are down here.
+    if (hook === "input") return 0;
+    if (ac > s.hac) { s.hac = ac; s.owed = 0; s.inflight = false; return 1; }
+    return 0;
   }
 
   // ---- per-turn drift -----------------------------------------------------
 
-  function tick(s) {
+  function tick(s, times) {
+    const want = Math.floor(times) || 1;
+    const n = Math.max(1, Math.min(TICK_MAX, want));
+    if (want > TICK_MAX) dbg("drift catch-up capped at", TICK_MAX, "of", want);
     const changes = [];
     for (const e of activeDefs(s)) {
       if (!e.perTurn) continue;
-      const r = addVal(s, e.id, e.perTurn);
+      // One clamped move of n turns rather than n moves: the same result
+      // against the bounds, and it stays cheap when there is ground to make up.
+      const r = addVal(s, e.id, e.perTurn * n);
       if (r && r.before !== r.after) changes.push(r);
     }
-    s.turn += 1;
+    s.turn += n;
     return changes;
+  }
+
+  // Apply whatever drift is owed, from wherever we happen to be standing. Any
+  // hook may call this: whichever one runs first for a generation does the
+  // work, and the others find nothing owed and return.
+  function catchUp(s, hook) {
+    const n = turnsPassed(s, hook);
+    if (n <= 0) return 0;
+    tick(s, n);
+    announce(s);
+    return n;
   }
 
   // ---- triggers -----------------------------------------------------------
@@ -46673,44 +46738,25 @@ const RM = (function () {
     return parts.join("  ·  ");
   }
 
+  // A space that survives whitespace collapsing.
+  const NB = "\u00a0";
+
   function statusBlock(s) {
     const rows = [];
     for (const e of activeDefs(s)) {
       if (!e.visible) continue;
       const v = s.res[e.id];
       const b = bandOf(e, v);
+      // Padded with U+00A0, not spaces. The story card keeps whitespace, but
+      // the answer also leaves as story output, and a run of ordinary spaces
+      // does not survive every output filter a host may run over it.
       rows.push(
-        `${e.icon || "•"} ${e.label.padEnd(10)} ${bar(v, e.min, e.max)} ` +
-        `${String(Math.round(v)).padStart(4)}/${Math.round(e.max)}` +
-        (b.name ? `  (${b.name})` : "")
+        `${e.icon || "•"} ${e.label.padEnd(10, NB)}${NB}${bar(v, e.min, e.max)}${NB}` +
+        `${String(Math.round(v)).padStart(4, NB)}/${Math.round(e.max)}` +
+        (b.name ? `${NB}${NB}(${b.name})` : "")
       );
     }
     return rows.join("\n");
-  }
-
-  // statusBlock is for the story card, which keeps its whitespace. A toast does
-  // not, so padEnd there is wasted and the columns never line up. This is the
-  // same information laid out to survive being wrapped at any width.
-  function statusToast(s) {
-    const parts = [];
-    for (const e of activeDefs(s)) {
-      if (!e.visible) continue;
-      const v = s.res[e.id];
-      const b = bandOf(e, v);
-      // Non-breaking spaces inside a row, ordinary ones only around the
-      // separator, so a wrap can land BETWEEN rows and never inside one. That
-      // is what stops a short label being stranded from its bar, which is a
-      // single unbreakable token. U+00A0 also survives whitespace collapsing,
-      // unlike the padding this used to rely on.
-      const NB = "\u00a0";
-      parts.push([
-        e.icon || "\u2022",
-        e.label.replace(/ /g, NB),    // NBSP: a wrap must not split it
-        bar(v, e.min, e.max),
-        `${Math.round(v)}/${Math.round(e.max)}` + (b.name ? `${NB}(${b.name})` : ""),
-      ].join(NB));
-    }
-    return parts.join(RM_CONFIG.toastSeparator || "   \u00b7   ");
   }
 
   // What the AI is told. Complete sentences only: an unterminated fragment in
@@ -46735,51 +46781,39 @@ const RM = (function () {
     return out;
   }
 
-  // ---- toasts -------------------------------------------------------------
+  // ---- notices ------------------------------------------------------------
 
-  // Collected during a hook and written once. The Library re-executes on every
-  // hook, so this buffer resets by itself each time.
-  let TOASTS = [];
+  // Anything worth telling the player that is NOT an answer to a command: a
+  // band crossing, an unrecognised card key, a config problem.
+  //
+  // These used to be toasts written to state.message. That is a single slot
+  // shared by every script on the scenario, and sharing it cooperatively does
+  // not work: whoever writes last wins, the loser's message is gone, and a
+  // module that politely yields to a value it does not recognise can end up
+  // mute for the rest of the adventure. So this module no longer writes that
+  // slot at all. A notice waits in state until a command asks for it and
+  // rides out with the answer. Nothing is pushed at the player unasked.
+  const PEND_MAX = 12;
 
-  // A toast cannot hold a line break. The client collapses whitespace, so a
-  // newline renders as a space and the padded status block became one wrapped
-  // paragraph; worse, a bar is a single unbreakable token, so each row's icon
-  // and label fitted at the end of the previous visual line while the bar
-  // wrapped. Rows are separated by a visible marker instead, which survives
-  // wrapping whatever the renderer turns out to be.
-  const BREAK = RM_CONFIG.toastSeparator || "   \u00b7   ";
+  // How many generations an undelivered answer may wait for an Output hook.
+  const REPLY_MAX_GEN = 3;
 
-  function toast(s, msg) {
-    if (msg && TOASTS.indexOf(msg) === -1) TOASTS.push(msg);
+  function notice(s, msg) {
+    if (!s || !msg) return;
+    // Only an immediate repeat is collapsed. The buffer outlives the hook now,
+    // so treating it as a set would drop a meter's SECOND crossing back into a
+    // band it has been in before, and leave the digest reading as though it had
+    // stayed where it was.
+    if (s.pend[s.pend.length - 1] === msg) return;
+    s.pend.push(msg);
+    while (s.pend.length > PEND_MAX) s.pend.shift();
   }
 
-  // state.message is a single slot any script can write. Only overwrite what we
-  // put there ourselves, so we never clobber another script's toast.
-  function flushToast(s) {
-    if (!TOASTS.length) return;
-    // Every newline has to become a hard break, including ones inside a single
-    // queued message such as the status block or the /help list.
-    const msg = TOASTS.join("\n").split("\n").join(BREAK);
-    TOASTS = [];
-    const current = typeof state.message === "string" ? state.message : "";
-    if (current && current !== s.msgPrev) return; // somebody else owns the slot
-
-    // The Library re-executes per hook, so every hook flushes its own buffer.
-    // Within one generation, ADD to what we already wrote rather than replacing
-    // it: a card warning raised in Input, a status block queued in Context and a
-    // band announcement from Output all belong to the same moment, and whichever
-    // flushed first should not disappear.
-    let out;
-    if (current && s.msgOpen) {
-      if (current.indexOf(msg) !== -1) return;   // already on screen
-      out = current + BREAK + msg;
-    } else {
-      // The client suppresses a toast identical to the previous one; perturb it.
-      out = current === msg ? msg + " " : msg;
-    }
-    state.message = out;
-    s.msgPrev = out;
-    s.msgOpen = true;
+  // Everything that has happened since the last answer, then the answer itself.
+  function compose(s, reply) {
+    const notes = s.pend.slice();
+    s.pend = [];
+    return notes.length ? notes.join("\n") + "\n\n" + reply : reply;
   }
 
   // ---- story card ---------------------------------------------------------
@@ -46788,10 +46822,9 @@ const RM = (function () {
     "# Living Meters settings. Edit the lines below, then close this card.",
     "# Lines starting with # are ignored. Delete a line to use the default.",
     "#",
-    "# Or use the /set command, e.g.  /set statusEvery 5",
+    "# Or use the /set command, e.g.  /set difficulty hard",
     "#",
     "#   difficulty  = easy | normal | hard",
-    "#   statusEvery = 5              show the full status every N turns, 0 = off",
     "#   <resource>.perTurn = -2      how much it drifts each turn",
     "#   <resource>.max     = 120     raise or lower the ceiling",
     "#   <resource>.min     = 10      raise or lower the floor",
@@ -46844,7 +46877,7 @@ const RM = (function () {
     if (!card) {
       if (!s.warned) {
         s.warned = true;
-        toast(s, "Living Meters: story cards are unavailable. Enable Gameplay > Memory System > Memory Bank.");
+        notice(s, "Living Meters: story cards are unavailable. Enable Gameplay > Memory System > Memory Bank.");
       }
       return;
     }
@@ -46902,11 +46935,22 @@ const RM = (function () {
       `${p}<id> +N       add to a resource   (e.g. ${p}hp +10)`,
       `${p}<id> -N       subtract from it`,
       `${p}<id> =N       set it exactly`,
-      `${p}set <k> <v>   change a setting  (e.g. ${p}set statusEvery 5)`,
+      `${p}set <k> <v>   change a setting  (e.g. ${p}set difficulty hard)`,
       `${p}set           show what you have changed`,
       `${p}reset         restore starting values`,
       `${p}help          this list`,
     ].join("\n");
+  }
+
+  // Whether this input is a command, decided without running it. The drift has
+  // to know before the answer is produced: it is settled at the top of Input,
+  // and a command's own generation must not be charged for. Kept in step with
+  // handleCommand's two early returns below.
+  function looksLikeCommand(raw) {
+    const p = RM_CONFIG.commandPrefix;
+    const t = stripPrefix(raw);
+    if (!t.startsWith(p)) return false;
+    return t.slice(p.length).trim().length > 0;
   }
 
   // Returns a message string if the input was a command, else null.
@@ -46921,7 +46965,7 @@ const RM = (function () {
     const cmd = parts[0].toLowerCase();
 
     if (cmd === "help") return helpText();
-    if (cmd === "status") return statusToast(s) || "No resources are being tracked.";
+    if (cmd === "status") return statusBlock(s) || "No resources are being tracked.";
 
     if (cmd === "set") {
       const key = parts[1];
@@ -46930,11 +46974,12 @@ const RM = (function () {
         const keys = Object.keys(s.over);
         return keys.length
           ? "Your settings:\n" + keys.map((k) => k + " = " + s.over[k]).join("\n")
-          : `Nothing changed yet. Try ${p}set statusEvery 5`;
+          : `Nothing changed yet. Try ${p}set difficulty hard`;
       }
       if (!isOverrideKey(key)) {
-        return `"${key}" is not a setting you can change. Try ${p}difficulty, ` +
-          `${p}set statusEvery 5, or ${p}set <resource>.perTurn -2. ${p}help lists the rest.`;
+        return `"${key}" is not a setting you can change. Try ` +
+          `${p}set difficulty hard, or ${p}set <resource>.perTurn -2. ` +
+          `${p}help lists the rest.`;
       }
       if (!value) return `Usage: ${p}set ${key} <value>`;
 
@@ -46953,7 +46998,7 @@ const RM = (function () {
       // is what /reset restores.
       for (const d of defs()) setVal(s, d.id, eff(s, d).start);
       s.band = {};
-      return "Meters reset. " + statusToast(s);
+      return "Meters reset.\n\n" + statusBlock(s);
     }
 
     // "<id> +10" / "<id> -5" / "<id> =80" / "<id>" to query one
@@ -46993,7 +47038,7 @@ const RM = (function () {
         s.band[e.id] = name;
       }
     }
-    if (crossed.length) toast(s, crossed.join("   "));
+    if (crossed.length) notice(s, crossed.join("\n"));
   }
 
   // ---- config problem reporting ------------------------------------------
@@ -47007,8 +47052,74 @@ const RM = (function () {
     if (s.cfgWarned && !RM_CONFIG.debug) return;
     s.cfgWarned = true;
     const shown = PROBLEMS.slice(0, 4);
-    toast(s, "Living Meters, check your config:\n• " + shown.join("\n• ") +
+    notice(s, "Living Meters, check your config:\n• " + shown.join("\n• ") +
       (PROBLEMS.length > shown.length ? `\n• …and ${PROBLEMS.length - shown.length} more` : ""));
+  }
+
+  // ---- keeping our own answers out of the AI's context --------------------
+
+  // A command answers as story output, so the answer lands in the history and
+  // comes back inside the context window on every turn after it. Left there,
+  // the model reads a table of numbers while the directive is telling it never
+  // to state the numbers, and it starts reciting meters instead of playing
+  // them. Take our own lines back out before the model sees them.
+  //
+  // Matched by shape, not by a hidden marker. The host runs its own filters
+  // over the answer after we return it - one of them collapses runs of spaces -
+  // so nothing invisible we stamp on the text is guaranteed to survive the
+  // round trip. A bar is unmistakable, and the rest is keyed on the labels this
+  // scenario actually configures, so it cannot fire on ordinary prose.
+  const BAR_ROW = /[\u2588\u2591]{3,}/;
+
+  function answerShapes(s) {
+    const labels = defs()
+      .map((d) => escapeRe(eff(s, d).label))
+      .filter(Boolean)
+      .join("|");
+    const p = escapeRe(RM_CONFIG.commandPrefix || "/");
+    return {
+      // "Hull: critical", "Hull: 100 -> 90/100", "Hull: 90/100 (damaged)",
+      // with or without the icon in front.
+      labelled: labels ? new RegExp("^(?:\\S+\\s+)?(?:" + labels + "):\\s") : null,
+      help: new RegExp("^" + p + "\\S*\\s"),
+    };
+  }
+
+  function isOwnAnswer(line, shapes) {
+    const t = line.trim();
+    if (!t) return false;
+    if (BAR_ROW.test(t)) return true;                      // a status row
+    if (shapes.help.test(t)) return true;                  // a /help row
+    if (shapes.labelled && shapes.labelled.test(t)) return true;
+    if (t === "Meters reset." || t === "Your settings:") return true;
+    if (t.indexOf("Living Meters") === 0) return true;     // a card or config notice
+    if (t.indexOf('Unknown command "') === 0) return true;
+    // And the action that asked for it. Left on its own, with the answer taken
+    // out from under it, it is an order the model can see nobody answered.
+    if (stripPrefix(t).indexOf(RM_CONFIG.commandPrefix || "/") === 0) return true;
+    return false;
+  }
+
+  function scrubAnswers(s, text) {
+    if (!RM_CONFIG.hideAnswersFromAI) return text;
+    const src = typeof text === "string" ? text : "";
+    // Only inside the story itself. Story cards, the summary and the memory
+    // bank are somebody else's to edit.
+    const m = src.match(/(^|\n)Recent\s*Story\s*:[ \t]*\n/i);
+    if (!m) return src;
+
+    const cut = m.index + m[0].length;
+    const shapes = answerShapes(s);
+    const kept = [];
+    let removed = 0;
+    for (const line of src.slice(cut).split("\n")) {
+      if (isOwnAnswer(line, shapes)) { removed += 1; continue; }
+      kept.push(line);
+    }
+    if (!removed) return src;
+    dbg("scrubbed", removed, "of our own lines out of the context");
+    // Each removed row leaves a hole, and a whole table leaves a crater.
+    return src.slice(0, cut) + kept.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
   // ---- hook entry points --------------------------------------------------
@@ -47019,19 +47130,32 @@ const RM = (function () {
 
     try {
       s.fired = {};              // a new player action begins a new turn
-      s.msgOpen = false;         // and a new message, not an addition
+      s.cmdTurn = looksLikeCommand(out);
       reportProblems(s);
       syncCard(s);
 
+      // Input is the earliest hook of a generation and, unlike Context and
+      // Output, this host never hands it to somebody else, so settle the drift
+      // owed here. It must not fall back to actionCount: Input sees the
+      // intermediate value and Context would count the same turn again.
+      catchUp(s, "input");
+
       const reply = handleCommand(s, out);
       if (reply !== null) {
-        toast(s, reply);
-        if (RM_CONFIG.haltOnCommand) {
-          // stop:true from onInput surfaces an error banner to the player; the
-          // working halt is executed from the Context hook instead.
-          s.pendingStop = true;
-        }
-        flushToast(s);
+        // Commands answer as the story output: the Output hook puts this in
+        // place of the AI's response, so the answer reaches the player through
+        // the story itself and the module never writes state.message.
+        //
+        // The answer is NOT composed with the pending notices here. If it is
+        // never delivered, the notices have to survive for the next one.
+        //
+        // An answer already waiting is not discarded either. A host can defer
+        // this module's Output hook for a whole generation, and a command that
+        // moved a meter with no confirmation at all is worse than one answered
+        // a turn late.
+        s.reply = reply;
+        s.replyGen = 0;
+        s.cmdTurn = true;
         persist(s);
         return out;
       }
@@ -47047,7 +47171,6 @@ const RM = (function () {
       dbg("onInput error", String(err));
     }
 
-    flushToast(s);
     persist(s);
     return out;
   }
@@ -47055,33 +47178,33 @@ const RM = (function () {
   function onContext(inText, inStop) {
     const s = hydrate();
     let out = typeof inText === "string" ? inText : " ";
-    let halt = inStop === true;
+    const halt = inStop === true;
 
     try {
-      if (s.pendingStop) {
-        s.pendingStop = false;
-        halt = true;
-        flushToast(s);
-        persist(s);
-        return [out, halt];
-      }
-
       reportProblems(s);
 
-      // The Context hook is the only one that runs on every generation,
-      // including Continue actions, so the turn tick belongs here.
-      if (turnAdvanced(s)) {
-        tick(s);
-        announce(s);
-        // Through the overrides, not RM_CONFIG directly, or a player can
-        // set this and nothing will ever read it.
-        const every = optNum(s, "statusEvery", RM_CONFIG.statusEvery);
-        if (every > 0 && s.turn % every === 0) {
-          toast(s, statusToast(s));
-        }
+      // Where a waiting answer ages. One generation is its own; beyond that
+      // the Output hook was skipped and the answer is late. Give up after a
+      // few, rather than let a forgotten answer surface in the middle of an
+      // unrelated scene. If this hook is taken over the answer simply ages
+      // more slowly, which errs towards delivering it rather than losing it.
+      if (s.reply) {
+        s.replyGen += 1;
+        if (s.replyGen > REPLY_MAX_GEN) { s.reply = ""; s.replyGen = 0; }
       }
 
+      // Context is where a Continue is first seen, since a Continue never runs
+      // Input. It is not guaranteed to run either, so it settles what is owed
+      // rather than assuming exactly one turn has passed since it last looked.
+      // A command turn costs no drift; turnsPassed handles that, so that the
+      // gate is the command turn itself and never "an answer is waiting" - an
+      // answer can wait several generations, and those are ordinary turns that
+      // must drift as usual.
+      catchUp(s, "context");
+
       syncCard(s);
+
+      out = scrubAnswers(s, out);
 
       if (RM_CONFIG.inject === "context") {
         const block = directive(s);
@@ -47102,7 +47225,6 @@ const RM = (function () {
       dbg("onContext error", String(err));
     }
 
-    flushToast(s);
     persist(s);
     return [out, halt];
   }
@@ -47112,6 +47234,31 @@ const RM = (function () {
     let out = typeof inText === "string" ? inText : " ";
 
     try {
+      // Last chance for a generation whose Input and Context both went
+      // elsewhere. Ahead of the early return below, so that delivering an
+      // answer never costs the drift this generation owes.
+      catchUp(s, "output");
+
+      // A pending command answer leaves on this generation.
+      let pending = "";
+      let late = false;
+      if (s.reply) {
+        late = s.replyGen > 1;
+        pending = s.reply;
+        s.reply = "";
+        s.replyGen = 0;
+      }
+
+      // On its own turn the answer REPLACES the response. The model was
+      // replying to a slash command, so that text is dropped UNSCANNED: it
+      // would otherwise fire triggers on words the story never contained.
+      if (pending && !late) {
+        s.fired = {};
+        const answer = compose(s, pending);
+        persist(s);
+        return answer;
+      }
+
       if (RM_CONFIG.scanOutput && out.trim()) {
         // Retries reuse cached outputs, so the same text can arrive twice.
         // Hashing it stops a retry from applying every trigger a second time.
@@ -47125,15 +47272,20 @@ const RM = (function () {
       }
       s.fired = {};              // the turn is over; release every trigger
 
+      // A late answer is a different matter: this generation's narration is
+      // real and has just been scanned like any other, so the answer joins it
+      // rather than stealing it. Composed here, after the scan, so a band the
+      // story just crossed is reported in the same breath.
+      if (pending) {
+        const answer = compose(s, pending);
+        persist(s);
+        return out.trim() ? out + "\n\n" + answer : answer;
+      }
+
     } catch (err) {
       dbg("onOutput error", String(err));
     }
 
-    flushToast(s);
-    // Output is the last hook of every generation, including a Continue, which
-    // never calls Input. Closing the message here is what keeps the next
-    // generation from appending to this one.
-    s.msgOpen = false;
     persist(s);
     // Never return an empty string: onOutput throws a player-visible error.
     return out.length ? out : " ";
@@ -47152,7 +47304,6 @@ const RM = (function () {
     all: () => hydrate().res,
     status: () => statusBlock(hydrate()),
     line: () => statusLine(hydrate()),
-    toastLine: () => statusToast(hydrate()),
     directive: () => directive(hydrate()),
 
     // Effective definitions after player overrides, as plain JSON-safe data.
@@ -47172,13 +47323,10 @@ const RM = (function () {
         };
       });
     },
-    // Queue a toast through RM's own buffer instead of writing state.message
-    // yourself. flushToast stays the single writer, so a scenario add-on's
-    // message and a band announcement on the same turn are joined rather than
-    // one silently losing the slot: assigning state.message directly makes RM
-    // yield, and the band is already recorded as announced, so it never
-    // returns. Call this before RM.input/RM.context in the same hook.
-    toast: (msg) => { toast(null, msg); },
+    // Queue a line for the player. It waits with RM's own notices and leaves
+    // with the next command answer, so an add-on can say something without
+    // touching state.message and without racing anybody for it.
+    notice: (msg) => { const s = hydrate(); notice(s, msg); persist(s); },
 
     problems: () => { defs(); return PROBLEMS.slice(); },
   };
