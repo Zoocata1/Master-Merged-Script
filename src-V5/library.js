@@ -1,13 +1,14 @@
 /* ============================================================
-   MASTER SCRIPT V5.3.8
+   MASTER SCRIPT V5.3.9.1
    --- Please enjoy ---
    --- Thank you for all your hard work and feedback ---
+   --- Final edition unless updates are pushed from creators ---
    ============================================================ */
 
 const MCPV5_VERSION = 5;
 const MCPV5_SCHEMA_VERSION = 3;
-const MCPV5_BUILD_VERSION = "5.3.8";
-const MCPV5_PATCH = "5.3.8-lm1.2-slowburn-outcome-rolls";
+const MCPV5_BUILD_VERSION = "5.3.9.1";
+const MCPV5_PATCH = "5.3.9.1-command-owner-safety";
 const MCPV5_CARD_KEYS = "__MCP_EXACT_SCRIPT_COLLECTION__";
 const MCPV5_CARD_TITLE = "⚙️ Master Script Control Panel";
 const MCPV5_CARD_TYPE = "_MCP_V5_";
@@ -1155,7 +1156,7 @@ function MCPV5CanonicalEntry(enabled, settings, plan, status) {
     "╔══════════════════════════════════════════════════════╗",
     "║              MASTER SCRIPT CONTROL PANEL             ║",
     "╚══════════════════════════════════════════════════════╝",
-    "Build 5.3.8  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
+    "Build 5.3.9.1  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
     "",
     "⚡ QUICK ACTIONS",
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -2390,6 +2391,173 @@ function MCPV5DeduplicateMemoryField(field, value) {
   return out.join("\n\n");
 }
 
+const MCPV5_LM_FRONT_MEMORY_BEGIN = "<LM_FRONT_MEMORY>";
+const MCPV5_LM_FRONT_MEMORY_END = "</LM_FRONT_MEMORY>";
+const MCPV5_CC_FRONT_MEMORY_BEGIN = "<CC_FRONT_MEMORY>";
+const MCPV5_CC_FRONT_MEMORY_END = "</CC_FRONT_MEMORY>";
+
+function MCPV5StripOwnedFrontMemoryBlock(value, begin, end) {
+  const source = String(value || "");
+  const esc = text => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return source
+    .replace(new RegExp(esc(begin) + "[\\s\\S]*?" + esc(end), "g"), "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
+function MCPV5ExtractOwnedFrontMemoryBlock(value, begin, end) {
+  const source = String(value || "");
+  const esc = text => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = source.match(
+    new RegExp(esc(begin) + "[\\s\\S]*?" + esc(end))
+  );
+  return match ? match[0].trim() : "";
+}
+
+function MCPV5StripKnownOwnedFrontMemory(value) {
+  return MCPV5StripOwnedFrontMemoryBlock(
+    MCPV5StripOwnedFrontMemoryBlock(
+      value,
+      MCPV5_LM_FRONT_MEMORY_BEGIN,
+      MCPV5_LM_FRONT_MEMORY_END
+    ),
+    MCPV5_CC_FRONT_MEMORY_BEGIN,
+    MCPV5_CC_FRONT_MEMORY_END
+  ).trim();
+}
+
+function MCPV5ComposeOwnedFrontMemory(baseValue, records, plan) {
+  const source = String(baseValue || "");
+  let lmBlock = MCPV5ExtractOwnedFrontMemoryBlock(
+    source,
+    MCPV5_LM_FRONT_MEMORY_BEGIN,
+    MCPV5_LM_FRONT_MEMORY_END
+  );
+  let ccBlock = MCPV5ExtractOwnedFrontMemoryBlock(
+    source,
+    MCPV5_CC_FRONT_MEMORY_BEGIN,
+    MCPV5_CC_FRONT_MEMORY_END
+  );
+  let external = MCPV5StripKnownOwnedFrontMemory(source);
+  let handled = !!(lmBlock || ccBlock);
+
+  const prepends = [];
+  const appends = [];
+  const replacements = [];
+
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i] || {};
+    const snap = record.after;
+    const value = (
+      snap &&
+      snap.memoryExists &&
+      snap.memory &&
+      typeof snap.memory.frontMemory === "string"
+    ) ? snap.memory.frontMemory : source;
+
+    if (record.id === "living_meters") {
+      const nextBlock = MCPV5ExtractOwnedFrontMemoryBlock(
+        value,
+        MCPV5_LM_FRONT_MEMORY_BEGIN,
+        MCPV5_LM_FRONT_MEMORY_END
+      );
+      if (nextBlock || lmBlock) {
+        lmBlock = nextBlock;
+        handled = true;
+      }
+    }
+
+    if (record.id === "character_continuity") {
+      const nextBlock = MCPV5ExtractOwnedFrontMemoryBlock(
+        value,
+        MCPV5_CC_FRONT_MEMORY_BEGIN,
+        MCPV5_CC_FRONT_MEMORY_END
+      );
+      if (nextBlock || ccBlock) {
+        ccBlock = nextBlock;
+        handled = true;
+      }
+    }
+
+    const externalValue = MCPV5StripKnownOwnedFrontMemory(value);
+    const change = MCPV5ClassifySharedMemoryChange(
+      MCPV5StripKnownOwnedFrontMemory(source),
+      externalValue
+    );
+    if (!change) continue;
+
+    if (change.mode === "replace" || change.mode === "remove") {
+      replacements.push({
+        id: record.id || "",
+        text: change.mode === "remove" ? "" : change.text,
+        score: MCPV5AuthorityScore(record.id || "", plan)
+      });
+    } else {
+      if (change.before) prepends.push(change.before);
+      if (change.after) appends.push(change.after);
+    }
+  }
+
+  replacements.sort((a, b) => b.score - a.score);
+  if (replacements.length) external = replacements[0].text;
+
+  const uniquePrepends = MCPV5UniqueStrings(prepends)
+    .filter(value => !external.includes(value));
+  const uniqueAppends = MCPV5UniqueStrings(appends)
+    .filter(value => !external.includes(value));
+  if (uniquePrepends.length) {
+    external = uniquePrepends.join("\n\n") + (external ? "\n\n" + external : "");
+  }
+  if (uniqueAppends.length) {
+    external = external
+      ? external + "\n\n" + uniqueAppends.join("\n\n")
+      : uniqueAppends.join("\n\n");
+  }
+
+  const parts = [external.trim(), lmBlock, ccBlock].filter(Boolean);
+  return {
+    handled,
+    text: parts.join("\n\n")
+  };
+}
+
+function MCPV5NormalizeLivingMetersFrontMemory(beforeValue) {
+  if (
+    !state.memory ||
+    typeof state.memory !== "object" ||
+    Array.isArray(state.memory) ||
+    typeof state.memory.frontMemory !== "string"
+  ) return;
+
+  const before = String(beforeValue || "");
+  const after = String(state.memory.frontMemory || "");
+  if (after === before) return;
+
+  const external = MCPV5StripOwnedFrontMemoryBlock(
+    before,
+    MCPV5_LM_FRONT_MEMORY_BEGIN,
+    MCPV5_LM_FRONT_MEMORY_END
+  ).trim();
+  const rawDirective = MCPV5StripOwnedFrontMemoryBlock(
+    after,
+    MCPV5_LM_FRONT_MEMORY_BEGIN,
+    MCPV5_LM_FRONT_MEMORY_END
+  ).trim();
+  if (!rawDirective) {
+    state.memory.frontMemory = external;
+    return;
+  }
+
+  const block = [
+    MCPV5_LM_FRONT_MEMORY_BEGIN,
+    rawDirective,
+    MCPV5_LM_FRONT_MEMORY_END
+  ].join("\n");
+  state.memory.frontMemory = external
+    ? external + "\n\n" + block
+    : block;
+}
+
 function MCPV5CommitSharedState(base, records, plan) {
   if (!base || !Array.isArray(records) || !records.length) return;
 
@@ -2409,6 +2577,19 @@ function MCPV5CommitSharedState(base, records, plan) {
   for (let f = 0; f < fields.length; f++) {
     const field = fields[f];
     const baseValue = typeof memory[field] === "string" ? memory[field] : "";
+
+    if (field === "frontMemory") {
+      const owned = MCPV5ComposeOwnedFrontMemory(baseValue, records, plan);
+      if (owned.handled) {
+        // CC v2.02 and the MMS Living Meters wrapper use atomic tagged blocks.
+        // Never truncate through one of those blocks: both modules budget their
+        // own payloads, and broken begin/end markers make later ownership
+        // recovery unsafe.
+        memory[field] = owned.text;
+        continue;
+      }
+    }
+
     const prepends = [];
     const appends = [];
     const replacements = [];
@@ -2659,7 +2840,7 @@ function MCPV5RecordDiagnostic(kind, data) {
   root.diagnostics.push(row);
   root.diagnostics = root.diagnostics.slice(-30);
   if (root.settings && root.settings.diagnostics) {
-    log("MCP V5.3.7", row.kind, row.data);
+    log("MCP V5.3.9.1", row.kind, row.data);
   }
 }
 
@@ -3112,6 +3293,7 @@ function MCPV5PlanSignature(plan, settings) {
     macro: plan ? plan.macroPacingAuthority : "",
     scene: plan ? plan.scenePacingAuthority : "",
     relationship: plan ? plan.relationshipPacingAuthority : "",
+    outcome: plan ? plan.outcomeRollAuthority : "",
     guard: settings ? settings.workloadGuard : false,
     budget: settings ? settings.hookBudgetMs : 0,
     safety: settings ? settings.hookSafetyMarginMs : 0
@@ -3132,6 +3314,14 @@ function MCPV5EligibleModules(plan) {
     out.push(id);
   }
   return out;
+}
+
+function MCPV5LooksLikeLivingMetersSlashInput(value) {
+  let text = String(value || "");
+  text = text.replace(/^\s*>\s*/, "");
+  text = text.replace(/^[^\s]+\s+(?:say|says|said)[,:]?\s*/i, "");
+  text = text.replace(/^["'“”]+|["'“”\s]+$/g, "").trim();
+  return /^\/\S+/.test(text);
 }
 
 function MCPV5BuildActionSchedule(plan, settings, inputText) {
@@ -3218,6 +3408,23 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
   // Their hook costs were reserved before ordinary module selection.
   selected = selected.concat(fixedOutput);
 
+  // Living Meters v1.2 command replies are queued in Input and delivered in
+  // Output. A slash action must therefore never lose LM merely because the
+  // workload rotation deferred it. LM itself decides whether the slash command
+  // is actually one of its own; unknown slash commands remain available to
+  // other modules.
+  if (
+    plan &&
+    plan.effective &&
+    plan.effective.living_meters === true &&
+    MCPV5LooksLikeLivingMetersSlashInput(inputText) &&
+    !selected.includes("living_meters")
+  ) {
+    selected.push("living_meters");
+    const skippedIndex = skipped.indexOf("living_meters");
+    if (skippedIndex >= 0) skipped.splice(skippedIndex, 1);
+  }
+
   const action = Number.isFinite(info && info.actionCount)
     ? info.actionCount
     : -1;
@@ -3230,6 +3437,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     projectedTotals,
     inputText: String(inputText || "").slice(0, 800),
     commandOwner: "",
+    controlOutput: "",
     stages: { input: false, context: false, output: false },
     completed: false
   };
@@ -25145,7 +25353,7 @@ function MCPV5Create_realmheart() {
 
 function MCPV5Create_character_continuity() {
 const CHARACTER_CONTINUITY_STABLE_SETTINGS = {
-  VERSION: "v2.01",
+  VERSION: "v2.02",
   OUTER_CHARACTER_LABEL: "Outer",
   INNER_CHARACTER_LABEL: "Inner",
   VIEWS_LABEL: "Views",
@@ -25162,6 +25370,8 @@ const CHARACTER_CONTINUITY_STABLE_SETTINGS = {
   DEBUG_TITLE: "CC — Debug",
   CARD_TYPE: "Continuity",
   CARD_KEY_PREFIX: "__CC_STABLE_CARD__:",
+  FRONT_MEMORY_BEGIN: "<CC_FRONT_MEMORY>",
+  FRONT_MEMORY_END: "</CC_FRONT_MEMORY>",
   SCRIPT_CARD_TITLE: "Script Story Card",
 
   DEFAULT_ENABLED: true,
@@ -25198,11 +25408,16 @@ const CHARACTER_CONTINUITY_STABLE_SETTINGS = {
   MAX_OPERATION_DRAIN_RECORDS: 160,
   OPERATION_DRAIN_CAP: 12,
   MAX_OPERATION_TASK_TOKENS: 1200,
-  MAX_ASSESSMENT_EVIDENCE_ITEMS: 2,
-  MAX_OPERATION_EVIDENCE_CHARS: 300,
+  // Model-facing request limits, deliberately below the MAX_* limits enforced on
+  // the reply. The gap is headroom: the model is asked for less than will fit, so
+  // ordinary overshoot still lands inside the stored limit and is kept verbatim
+  // rather than compacted. Documented in CONFIGURATION.md as "requested from the
+  // model" against "stored ... after safe word-boundary compaction".
   MODEL_STATE_VALUE_CHARS: 100,
   MODEL_OPERATION_EXPLANATION_CHARS: 150,
   MODEL_RELATIONSHIP_EXPLANATION_CHARS: 90,
+  MAX_ASSESSMENT_EVIDENCE_ITEMS: 2,
+  MAX_OPERATION_EVIDENCE_CHARS: 300,
   MAX_OPERATION_EXPLANATION_CHARS: 180,
   MAX_RELATIONSHIP_EXPLANATION_CHARS: 120,
   MAX_STORED_RELATIONSHIP_EXPLANATION_CHARS: 120,
@@ -25236,7 +25451,26 @@ const CHARACTER_CONTINUITY_STABLE_SETTINGS = {
   DEBUG_LOGS: false
 };
 
+// Outermost safety net. The hook body below sets up ~60 top-level statements
+// (player profile, runtime settings, store sessions) before dispatch is reached,
+// so a failure there cannot be reported through the Status card -- but it must
+// still not break the player's turn. Returning the platform's own text is a valid
+// result for every hook, and is trivially append-only for contextAppend.
 function CharacterContinuity(hook, incomingText) {
+  try {
+    return characterContinuityRun(hook, incomingText);
+  } catch (error) {
+    try {
+      log("[Character Continuity Stable] The " + hook + " hook failed before it could report: "
+        + (error && error.message ? error.message : error));
+    } catch (ignored) {
+      // log() is a platform global and may be absent; the pass-through below still holds.
+    }
+    return typeof incomingText === "string" && incomingText.length ? incomingText : " ";
+  }
+}
+
+function characterContinuityRun(hook, incomingText) {
   const settings = CHARACTER_CONTINUITY_STABLE_SETTINGS;
   const originalText = incomingText;
   const appendOnlyContext = hook === "contextAppend";
@@ -25244,8 +25478,10 @@ function CharacterContinuity(hook, incomingText) {
   const contextHook = hook === "context" || hook === "contextAppend";
   const outputHook = hook === "output";
   const rootState = state;
-  const historyList = history;
-  const cards = storyCards;
+  // The platform normally supplies these, but a missing or malformed global must
+  // not take the turn down before the hook body can degrade gracefully.
+  const historyList = Array.isArray(history) ? history : [];
+  const cards = Array.isArray(storyCards) ? storyCards : [];
   const STORE_KINDS = ["names", "views", "relationships", "turningpoints", "experiences"];
   const storeSession = STORE_KINDS.reduce((result, kind) => {
     result[kind] = {
@@ -25278,6 +25514,7 @@ function CharacterContinuity(hook, incomingText) {
     recorded: false
   };
   let cardCatalog = null;
+  let frontMemoryContextVerified = false;
 
   function finish(value) {
     return typeof value === "string" && value.length ? value : " ";
@@ -25401,6 +25638,139 @@ function CharacterContinuity(hook, incomingText) {
 
   function escapeRegExp(value) {
     return textOf(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function frontMemoryStore() {
+    if (!rootState.memory || typeof rootState.memory !== "object" || Array.isArray(rootState.memory)) {
+      rootState.memory = {};
+    }
+    return rootState.memory;
+  }
+
+  function currentFrontMemory() {
+    return textOf(frontMemoryStore().frontMemory);
+  }
+
+  function stripOwnedFrontMemory(value) {
+    const begin = escapeRegExp(settings.FRONT_MEMORY_BEGIN);
+    const end = escapeRegExp(settings.FRONT_MEMORY_END);
+    return textOf(value).replace(new RegExp(begin + "[\\s\\S]*?" + end, "g"), "");
+  }
+
+  function ownedFrontMemoryBlock(instructionText) {
+    const instruction = textOf(instructionText).replace(/\r/g, "").trim();
+    return instruction
+      ? [settings.FRONT_MEMORY_BEGIN, instruction, settings.FRONT_MEMORY_END].join("\n")
+      : "";
+  }
+
+  function composedFrontMemory(externalMemory, instructionText) {
+    const external = textOf(externalMemory);
+    const block = ownedFrontMemoryBlock(instructionText);
+    if (!block) return external;
+    if (!external) return block;
+    return external + (/\r?\n$/.test(external) ? "" : "\n\n") + block;
+  }
+
+  function stableFrontMemoryTracking() {
+    const stable = rootState.characterContinuityStableV1;
+    return stable && typeof stable === "object" && !Array.isArray(stable) ? stable : null;
+  }
+
+  function trackedExternalFrontMemory(currentValue) {
+    const current = textOf(currentValue);
+    const stable = stableFrontMemoryTracking();
+    if (!stable || stable.frontMemoryOwnsBlock !== true
+      || typeof stable.frontMemoryExternal !== "string") return stripOwnedFrontMemory(current);
+    const external = stable.frontMemoryExternal;
+    const prefix = external + (external && !/\r?\n$/.test(external) ? "\n\n" : "");
+    const remainder = current.slice(prefix.length);
+    return current.startsWith(prefix)
+      && remainder.startsWith(settings.FRONT_MEMORY_BEGIN)
+      && remainder.trimEnd().endsWith(settings.FRONT_MEMORY_END)
+      ? external
+      : stripOwnedFrontMemory(current);
+  }
+
+  function rememberFrontMemory(externalMemory, ownsBlock) {
+    const stable = stableFrontMemoryTracking();
+    if (!stable) return;
+    stable.frontMemoryExternal = textOf(externalMemory);
+    stable.frontMemoryOwnsBlock = ownsBlock === true;
+  }
+
+  function replaceFrontMemorySuffix(contextValue, oldFrontMemory, nextFrontMemory) {
+    const context = textOf(contextValue);
+    const oldFront = textOf(oldFrontMemory);
+    const nextFront = textOf(nextFrontMemory);
+    if (!oldFront) {
+      if (!nextFront) return { ok: true, text: context };
+      const separator = context && !/\n\s*$/.test(context) ? "\n\n" : "";
+      return { ok: true, text: context + separator + nextFront };
+    }
+    const index = context.lastIndexOf(oldFront);
+    if (index < 0 || context.slice(index + oldFront.length).trim()) {
+      return { ok: false, text: context };
+    }
+    return {
+      ok: true,
+      text: context.slice(0, index) + nextFront + context.slice(index + oldFront.length)
+    };
+  }
+
+  function clearOwnedFrontMemoryState() {
+    const memory = frontMemoryStore();
+    const current = textOf(memory.frontMemory);
+    const external = trackedExternalFrontMemory(current);
+    if (external === current) {
+      rememberFrontMemory(external, false);
+      return false;
+    }
+    memory.frontMemory = external;
+    const cleared = textOf(memory.frontMemory) === external;
+    if (cleared) rememberFrontMemory(external, false);
+    return cleared;
+  }
+
+  function beginFrontMemoryContext(contextValue) {
+    const oldFrontMemory = currentFrontMemory();
+    const externalFrontMemory = trackedExternalFrontMemory(oldFrontMemory);
+    const cleared = replaceFrontMemorySuffix(contextValue, oldFrontMemory, "");
+    const baseText = cleared.ok ? cleared.text : textOf(contextValue);
+    return {
+      ok: cleared.ok,
+      baseText,
+      externalFrontMemory,
+      commit(instructionText, preparedContext = baseText) {
+        if (!cleared.ok) {
+          return { ok: false, delivered: false, text: textOf(contextValue), frontMemory: oldFrontMemory };
+        }
+        const nextFrontMemory = composedFrontMemory(externalFrontMemory, instructionText);
+        const prepared = textOf(preparedContext);
+        const alreadyEndsWithFrontMemory = !!nextFrontMemory
+          && prepared.trimEnd().endsWith(nextFrontMemory.trimEnd());
+        const separator = nextFrontMemory && prepared && !/\n\s*$/.test(prepared) ? "\n\n" : "";
+        const returnedText = alreadyEndsWithFrontMemory
+          ? prepared
+          : prepared + separator + nextFrontMemory;
+        const memory = frontMemoryStore();
+        memory.frontMemory = nextFrontMemory;
+        const stateMatches = textOf(memory.frontMemory) === nextFrontMemory;
+        const returnedSuffixMatches = nextFrontMemory
+          ? returnedText.trimEnd().endsWith(nextFrontMemory.trimEnd())
+          : returnedText === prepared;
+        const appendPrefixMatches = !appendOnlyContext || returnedText.startsWith(baseText);
+        const ok = stateMatches && returnedSuffixMatches && appendPrefixMatches;
+        frontMemoryContextVerified = ok;
+        if (ok) rememberFrontMemory(externalFrontMemory, !!textOf(instructionText).trim());
+        return {
+          ok,
+          delivered: ok && !!textOf(instructionText).trim(),
+          text: ok ? returnedText : textOf(contextValue),
+          frontMemory: ok ? nextFrontMemory : oldFrontMemory
+        };
+      }
+    };
   }
 
   function clone(value) {
@@ -25583,6 +25953,21 @@ function CharacterContinuity(hook, incomingText) {
     const source = textOf(value).trim();
     if (!source.startsWith(settings.CARD_KEY_PREFIX)) return "";
     return decodedManagedTitle(source.slice(settings.CARD_KEY_PREFIX.length));
+  }
+
+  // Evidence that CC created this card, rather than a player card whose title
+  // merely matches the owned-title shape. A managed key proves CC minted the card;
+  // a recognisable CC entry wrapper covers cards whose key was lost but whose body
+  // is still one CC authored. The free-text card type is not proof of ownership.
+  function cardOwnedByContinuity(card) {
+    if (!card) return false;
+    // A managed key is proof CC minted the card, and a recognisable CC entry
+    // wrapper is proof CC authored its body -- which also covers a CC card whose
+    // key a player cleared. The card TYPE is deliberately not proof: "Continuity"
+    // is free text a player can set on their own card, and trusting it let a
+    // player-authored "Sarah's State" be seized and have its triggers rewritten.
+    if (managedTitleFromKey(card.keys)) return true;
+    return !!managedTitleFromEntry(card);
   }
 
   function defaultScriptCardTitle(value) {
@@ -25976,8 +26361,8 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function capturePhysicalCardDeck() {
-    const idCounts = {};
-    const imageCounts = {};
+    const idCounts = Object.create(null);
+    const imageCounts = Object.create(null);
     return cards.map((card, index) => {
       const id = physicalCardId(card);
       const imageKey = exactCardImageKey(card);
@@ -26034,7 +26419,7 @@ function CharacterContinuity(hook, incomingText) {
       if (card) used.add(card);
       return { image, card };
     });
-    const unresolvedById = {};
+    const unresolvedById = Object.create(null);
     mapped.forEach(item => {
       if (item.card) return;
       const id = item.image.id;
@@ -26174,8 +26559,6 @@ function CharacterContinuity(hook, incomingText) {
   function updateCardAt(index, keys, entry, type, intendedTitle, preserveExactFields = false) {
     if (!Number.isInteger(index) || index < 0 || index >= cards.length) return null;
     const current = cards[index];
-    const priorDeck = capturePhysicalCardDeck();
-    const targetImage = priorDeck[index];
     const priorTitle = line(titleOf(current), 220);
     const logicalTitle = line(intendedTitle || priorTitle, 220);
     const nextKeys = preserveExactFields
@@ -26199,6 +26582,13 @@ function CharacterContinuity(hook, incomingText) {
         ? unchanged
         : null;
     }
+    // Captured only once a write will actually be attempted. capturePhysicalCardDeck
+    // JSON-stringifies every card entry in the deck, and the no-op branch above is
+    // the common case: readRuntime, the title/wrapper migrations and every store
+    // parser re-save unchanged cards to assert identity. Capturing before that
+    // check paid a full-deck serialisation per identity re-assert.
+    const priorDeck = capturePhysicalCardDeck();
+    const targetImage = priorDeck[index];
     const restorePrior = () => restorePhysicalCardDeck(priorDeck);
     const verifiedUpdatedCard = () => {
       if (cards.length !== priorDeck.length) return null;
@@ -26495,6 +26885,11 @@ function CharacterContinuity(hook, incomingText) {
       // converting them into ordinary non-triggered CC cards.
       if (intendedParts && keyOf(intendedParts.label) === keyOf(settings.TURNING_POINTS_LABEL)) return;
       if (!intended || managedCardIdentityMatches(card, intended)) return;
+      // Only migrate cards CC provably owns. A player is free to write their own
+      // lore card called "Sarah's State"; rewriting its keys strips the triggers
+      // it fires on and hands the card to CC to overwrite, with no notice beyond
+      // a Debug counter that is off by default.
+      if (!cardOwnedByContinuity(card)) return;
       const saved = saveCard(card, entryOf(card), intended);
       if (saved && managedCardIdentityMatches(saved, intended)) migrated += 1;
       else failed += 1;
@@ -26528,6 +26923,9 @@ function CharacterContinuity(hook, incomingText) {
       if (!headerLabel) return;
       const normalized = canonicalOwnedEntryWrapper(entryOf(card), parts.owner, headerLabel);
       if (!normalized.valid || !normalized.changed) return;
+      // saveCard rewrites keys and type as well as the entry, so the same
+      // ownership rule as migrateOwnedCardTitles applies here.
+      if (!cardOwnedByContinuity(card)) return;
       const saved = saveCard(card, normalized.entry, parts.title);
       if (saved && entryOf(saved) === normalized.entry) migrated += 1;
       else failed += 1;
@@ -26788,7 +27186,10 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   const runtime = readRuntime();
-  if (!runtime.enabled) return finish(originalText);
+  if (!runtime.enabled) {
+    clearOwnedFrontMemoryState();
+    return finish(originalText);
+  }
 
   function playerProfile() {
     let card = findCard(settings.PLAYER_TITLE);
@@ -26833,8 +27234,10 @@ function CharacterContinuity(hook, incomingText) {
       s: player.agreement === "plural" ? "" : "s"
     };
     return textOf(value).replace(/{{\s*(player|Player|PLAYER)\.([a-zA-Z_]+)\s*}}/g, (match, owner, field) => {
-      const replacement = forms[keyOf(field).replace(/\s+/g, "_")];
-      if (replacement === undefined) return match;
+      const token = keyOf(field).replace(/\s+/g, "_");
+      if (!Object.prototype.hasOwnProperty.call(forms, token)) return match;
+      const replacement = forms[token];
+      if (typeof replacement !== "string") return match;
       if (owner === "PLAYER") return textOf(replacement).toUpperCase();
       if (owner === "Player") return replacement ? replacement.charAt(0).toUpperCase() + replacement.slice(1) : replacement;
       return replacement;
@@ -26851,16 +27254,12 @@ function CharacterContinuity(hook, incomingText) {
     const parts = textOf(extractLine(source, "Name, age, gender, pronouns"))
       .split(",")
       .map(value => value.trim());
-    let pronouns = "";
-    if (parts.length >= 4) {
-      pronouns = line(parts.pop(), 120);
-    } else {
-      parts.shift();
-      parts.shift();
-      parts.shift();
-      pronouns = line(parts.join(","), 120);
-    }
-    return pronouns;
+    // The field is "Name, age, gender, pronouns", so the pronouns are the fourth
+    // value and everything after it belongs to them. Taking the LAST value instead
+    // meant any trailing note -- "Snow, 31, woman, she/her, tall" -- was read as the
+    // pronouns, and an unrecognised value silently falls back to they/them, so the
+    // character was misgendered for the rest of the story.
+    return line(parts.slice(3).join(", "), 120);
   }
 
   function shortenProfileValue(value, maximum) {
@@ -27054,12 +27453,12 @@ function CharacterContinuity(hook, incomingText) {
       slot.name = name;
     });
     rows.forEach(row => {
-      const match = row.match(/^[ \\t]*N(\d+)[ \\t]*:/i);
+      const match = row.match(/^[ \t]*N(\d+)[ \t]*:/i);
       if (match && !activeNpcSlotCode(Number(match[1]))) {
         activeRosterDiagnostics.push("Unsupported active NPC slot N" + Number(match[1]) + " was ignored.");
       }
     });
-    const seen = {};
+    const seen = Object.create(null);
     slots.forEach(slot => {
       if (!slot.valid || !slot.name) return;
       const key = nameKeyOf(slot.name);
@@ -27072,7 +27471,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function onboardingMarkerPresent(source) {
-    return /^[ \\t]*Onboarding[ \\t]*:[ \\t]*Pending[ \\t]*$/im.test(textOf(source));
+    return /^[ \t]*Onboarding[ \t]*:[ \t]*Pending[ \t]*$/im.test(textOf(source));
   }
 
   const ONBOARDING_VIEW_CATEGORIES = ["Loves", "Likes", "Neutrals", "Dislikes", "Hates"];
@@ -27433,7 +27832,7 @@ function CharacterContinuity(hook, incomingText) {
       const alias = aliasMatch ? line(aliasMatch[1], 160) : "";
       if (ONBOARDING_NAME_PLACEHOLDERS.some(value => sameNameForm(value, alias))) return;
       const labels = ["Alias", "Status", "Use", "Progress", "Reason"];
-      const values = {};
+      const values = Object.create(null);
       if (recordRows.length !== labels.length) {
         errors.push("Names Alias " + (alias || "record") + " must contain exactly five fields");
         return;
@@ -27519,7 +27918,7 @@ function CharacterContinuity(hook, incomingText) {
       || nonempty[nonempty.length - 1].value !== "}") {
       errors.push("Views wrapper or owner header is invalid");
     }
-    const grouped = {};
+    const grouped = Object.create(null);
     ONBOARDING_VIEW_CATEGORIES.forEach(category => { grouped[category] = []; });
     let current = "";
     const headings = [];
@@ -27655,7 +28054,7 @@ function CharacterContinuity(hook, incomingText) {
       const start = block.start;
       const recordRows = block.rows;
       const labels = ["About"].concat(ONBOARDING_RELATIONSHIP_FIELDS);
-      const values = {};
+      const values = Object.create(null);
       if (recordRows.length !== labels.length) {
         errors.push("Relationships record at line " + (start + 1)
           + " must contain exactly six fields");
@@ -27681,7 +28080,7 @@ function CharacterContinuity(hook, incomingText) {
       const targetKey = nameKeyOf(target);
       if (seenTargets.has(targetKey)) errors.push("Relationships repeats target " + target);
       seenTargets.add(targetKey);
-      const fields = {};
+      const fields = Object.create(null);
       ONBOARDING_RELATIONSHIP_FIELDS.forEach(field => {
         const parsed = onboardingCanonicalRelationshipField(field, values[field]);
         if (!parsed.ok) {
@@ -27882,7 +28281,7 @@ function CharacterContinuity(hook, incomingText) {
         .some(outer => onboardingMarkerPresent(entryOf(outer)));
       const aliases = textOf(entryOf(card)).replace(/\r/g, "").split("\n")
         .map(row => {
-          const match = row.match(/^[ \\t]*Alias[ \\t]*:[ \\t]*(.*?)[ \\t]*$/i);
+          const match = row.match(/^[ \t]*Alias[ \t]*:[ \t]*(.*?)[ \t]*$/i);
           return match ? line(match[1], 160) : "";
         })
         .filter(value => value && !(pendingOwner
@@ -28398,6 +28797,16 @@ function CharacterContinuity(hook, incomingText) {
     return RELATIONSHIP_FIELDS.find(field => keyOf(field) === keyOf(value)) || "";
   }
 
+  // A use signature must survive JSON.parse or the exactly-once guard it backs is
+  // dead. Cap generously -- the parts are individually bounded, so this only rejects
+  // a genuinely pathological payload -- and return "" rather than a truncated string.
+  const MAX_USE_SIGNATURE_CHARS = 2000;
+
+  function boundedUseSignature(value) {
+    const source = textOf(value);
+    return source.length > MAX_USE_SIGNATURE_CHARS ? "" : source;
+  }
+
   function canonicalRelationshipUseSignature(ownerKey, targetKey, sourceId, sourceIdentity, field) {
     const canonicalField = canonicalRelationshipFieldName(field);
     const canonicalSourceId = provenanceId(sourceId);
@@ -28406,14 +28815,19 @@ function CharacterContinuity(hook, incomingText) {
     const normalizedIdentity = line(sourceIdentity, 500);
     if (!normalizedOwner || !normalizedTarget || !/^[SX]\d+$/.test(canonicalSourceId)
       || !normalizedIdentity || !canonicalField) return "";
-    return line(JSON.stringify([
+    // Never truncate the serialized form: the inverse reads it with JSON.parse, and
+    // normalizedIdentity alone may be 500 characters before JSON escaping, so a
+    // 500-char cap routinely cut the array mid-string and produced a signature that
+    // could never be parsed back -- deadlocking the exactly-once guard it exists to
+    // provide. Refuse outright past a generous bound instead of emitting a corrupt one.
+    return boundedUseSignature(JSON.stringify([
       "relationship",
       normalizedOwner,
       normalizedTarget,
       canonicalSourceId,
       normalizedIdentity,
       canonicalField
-    ]), 500);
+    ]));
   }
 
   function parseRelationshipUseSignature(value) {
@@ -28463,7 +28877,7 @@ function CharacterContinuity(hook, incomingText) {
     const canonicalMode = canonicalViewOperationMode(operationMode);
     if (!normalizedOwner || !normalizedTarget || !/^[RX]\d+$/.test(canonicalSourceId)
       || !normalizedIdentity || !canonicalDestination) return "";
-    return line(JSON.stringify([
+    return boundedUseSignature(JSON.stringify([
       "view",
       normalizedOwner,
       normalizedTarget,
@@ -28471,7 +28885,7 @@ function CharacterContinuity(hook, incomingText) {
       normalizedIdentity,
       canonicalDestination,
       canonicalMode
-    ]), 500);
+    ]));
   }
 
   function parseViewUseSignature(value) {
@@ -28882,7 +29296,7 @@ function CharacterContinuity(hook, incomingText) {
     const maximum = Math.max(1, Number(settings.MAX_PROVENANCE_RECORDS) || 1);
     if (normalized.length <= maximum) return normalized;
 
-    const byId = {};
+    const byId = Object.create(null);
     normalized.forEach(record => { byId[record.id] = record; });
     const selected = new Set();
     const candidates = normalized.map((record, index) => ({ record, index }))
@@ -28953,7 +29367,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function blankOwnerOperationState() {
-    const result = {};
+    const result = Object.create(null);
     OPERATION_KINDS.forEach(kind => { result[kind] = blankOperationMeter(); });
     return result;
   }
@@ -29002,7 +29416,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function blankOperationState() {
-    return { owners: {}, drains: [] };
+    return { owners: Object.create(null), drains: [] };
   }
 
   function effectiveOperationDrainValue(record, ownerOpportunity) {
@@ -29055,14 +29469,14 @@ function CharacterContinuity(hook, incomingText) {
 
   function normalizeOperationState(raw) {
     const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    const owners = {};
+    const owners = Object.create(null);
     const rawOwners = source.owners && typeof source.owners === "object" && !Array.isArray(source.owners)
       ? source.owners
       : {};
     Object.keys(rawOwners).forEach(ownerKey => {
       owners[ownerKey] = normalizeOwnerOperationState(rawOwners[ownerKey]);
     });
-    const drainsByKey = {};
+    const drainsByKey = Object.create(null);
     (Array.isArray(source.drains) ? source.drains : [])
       .map(normalizeOperationDrainRecord)
       .filter(Boolean)
@@ -29205,7 +29619,7 @@ function CharacterContinuity(hook, incomingText) {
     const fallback = blankMaintenanceState();
     const suppliedCache = source.statusCache && typeof source.statusCache === "object"
       && !Array.isArray(source.statusCache) ? source.statusCache : {};
-    const statusCache = {};
+    const statusCache = Object.create(null);
     Object.keys(fallback.statusCache).forEach(kind => {
       const supplied = suppliedCache[kind];
       statusCache[kind] = supplied && typeof supplied === "object" && !Array.isArray(supplied)
@@ -29433,6 +29847,7 @@ function CharacterContinuity(hook, incomingText) {
       lastTimeJumpEvidenceId: "",
       maintenance: blankMaintenanceState(),
       cardHashes: {}, cardsInitialized: false,
+      frontMemoryExternal: "", frontMemoryOwnsBlock: false,
       last: {
         context: "Not built", output: "No output yet", warning: "", error: "",
         outputRawChars: 0, outputStoryChars: 0, outputRecordChars: 0, outputRecordPosition: "none",
@@ -29467,8 +29882,8 @@ function CharacterContinuity(hook, incomingText) {
     rootState.characterContinuityStableV1 = CC;
   }
 
-  const legacyCharacterKeyMap = {};
-  const legacyCharacterGroups = {};
+  const legacyCharacterKeyMap = Object.create(null);
+  const legacyCharacterGroups = Object.create(null);
   characters.forEach(character => {
     if (!legacyCharacterGroups[character.legacyKey]) legacyCharacterGroups[character.legacyKey] = [];
     legacyCharacterGroups[character.legacyKey].push(character);
@@ -29501,7 +29916,7 @@ function CharacterContinuity(hook, incomingText) {
 
   function migratedKeyedObject(value, nestedMigration) {
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    const result = {};
+    const result = Object.create(null);
     const assign = originalKey => {
       const migratedKey = migratedCharacterKey(originalKey);
       const migratedValue = typeof nestedMigration === "function"
@@ -29596,7 +30011,7 @@ function CharacterContinuity(hook, incomingText) {
 
   function migrateRecoveringViewKeys(value) {
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    const result = {};
+    const result = Object.create(null);
     Object.keys(source).forEach(key => {
       const marker = source[key] && typeof source[key] === "object" && !Array.isArray(source[key])
         ? source[key]
@@ -29780,6 +30195,8 @@ function CharacterContinuity(hook, incomingText) {
   if (typeof CC.lastInputSignature !== "string") CC.lastInputSignature = "";
   CC.maintenance = normalizeMaintenanceState(CC.maintenance);
   if (!CC.cardHashes || typeof CC.cardHashes !== "object" || Array.isArray(CC.cardHashes)) CC.cardHashes = {};
+  if (typeof CC.frontMemoryExternal !== "string") CC.frontMemoryExternal = "";
+  if (typeof CC.frontMemoryOwnsBlock !== "boolean") CC.frontMemoryOwnsBlock = false;
   if (!CC.last || typeof CC.last !== "object" || Array.isArray(CC.last)) CC.last = initialStableState().last;
   else CC.last = { ...initialStableState().last, ...CC.last };
   if (!Array.isArray(CC.last.provenanceDiagnostics)) CC.last.provenanceDiagnostics = [];
@@ -29900,7 +30317,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function renderViewsPage(character, buried, page, records) {
-    const grouped = {};
+    const grouped = Object.create(null);
     VIEW_CATEGORIES.forEach(category => { grouped[category] = []; });
     (Array.isArray(records) ? records : []).forEach(record => {
       if (grouped[record.category]) grouped[record.category].push(record);
@@ -30052,7 +30469,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function markViewDuplicates(pages, diagnostics, collectionName) {
-    const groups = {};
+    const groups = Object.create(null);
     pages.forEach(page => page.records.forEach(record => {
       if (!groups[record.targetKey]) groups[record.targetKey] = [];
       groups[record.targetKey].push(record);
@@ -30077,7 +30494,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function markDuplicateViewPages(character, buried, pages, diagnostics) {
-    const counts = {};
+    const counts = Object.create(null);
     pages.forEach(page => { counts[page.page] = (counts[page.page] || 0) + 1; });
     const duplicatePageNumbers = Object.keys(counts)
       .map(Number)
@@ -30189,7 +30606,12 @@ function CharacterContinuity(hook, incomingText) {
       const verifiedPages = verifiedOwner
         ? (buried ? verifiedOwner.buriedPages : verifiedOwner.activePages)
         : [];
-      for (const page of repairablePages) {
+      // Verify only what was actually written. parseViewsPage is deliberately lenient
+      // (it accepts -, – and —, trims rows, and matches headings case-insensitively),
+      // so an untouched page written in any non-canonical but legal form never equals
+      // its canonical render -- which failed the whole repair, including the duplicate
+      // removal that triggered it. verifyPlannedViews already gets this right.
+      for (const page of repairablePages.filter(item => item.dirty)) {
         const expected = renderViewsPage(character, buried, page.page, page.records);
         const matching = verifiedPages.filter(item => item.page === page.page
           && entryOf(item.card) === expected && item.safe && !item.duplicatePage);
@@ -30218,7 +30640,7 @@ function CharacterContinuity(hook, incomingText) {
     let store = storeIsFresh("views", viewsStore) ? viewsStore : null;
     if (!store) {
       const writesAtStart = session ? session.writes : 0;
-      store = { owners: {}, diagnostics: [], pageStats: [] };
+      store = { owners: Object.create(null), diagnostics: [], pageStats: [] };
       characters.filter(character => !character.onboardingPending).forEach(character => {
         ensureBaseViewsCard(character);
         const activeRefs = viewPageCards(character, false);
@@ -30312,8 +30734,16 @@ function CharacterContinuity(hook, incomingText) {
     return store;
   }
 
+  // Character keys come from player-authored card text, so a key like "constructor"
+  // would otherwise resolve through Object.prototype and hand back a function where
+  // owner data is expected. Own-property lookup also survives the JSON round-trip
+  // the platform performs on state between turns, which a null prototype does not.
+  function ownedEntry(map, key) {
+    return map && Object.prototype.hasOwnProperty.call(map, key) ? (map[key] || null) : null;
+  }
+
   function viewsForOwner(ownerKey) {
-    return viewsStore && viewsStore.owners ? viewsStore.owners[ownerKey] || null : null;
+    return viewsStore ? ownedEntry(viewsStore.owners, ownerKey) : null;
   }
 
   function canonicalManagedViewRecord(record) {
@@ -30425,8 +30855,8 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function captureOwnedManagedCards(records, ownerKeys) {
-    const titleCounts = {};
-    const idCounts = {};
+    const titleCounts = Object.create(null);
+    const idCounts = Object.create(null);
     const items = orderedUniqueOwnedCatalogRecords(records).map(record => {
       const card = record.card;
       const title = titleOf(card);
@@ -30470,7 +30900,7 @@ function CharacterContinuity(hook, incomingText) {
       : (Array.isArray(snapshot && snapshot.ownerKeys) ? snapshot.ownerKeys : [])
         .concat((Array.isArray(snapshot) ? snapshot : []).map(item => item && item.ownerKey));
     const ownerScope = new Set(scopeValues.map(value => line(value, 180)).filter(Boolean));
-    const pools = {};
+    const pools = Object.create(null);
     records.forEach(record => {
       const titleKey = line(record.ownerKey, 180) + "\u241f" + nameKeyOf(titleOf(record.card));
       if (!pools[titleKey]) pools[titleKey] = [];
@@ -30486,7 +30916,7 @@ function CharacterContinuity(hook, incomingText) {
         : null;
     }).filter(Boolean);
     const used = new Set();
-    const restoredCounts = {};
+    const restoredCounts = Object.create(null);
     let restored = true;
     if (eligible.length !== (Array.isArray(snapshot) ? snapshot.length : 0)) restored = false;
     eligible.forEach(({ item, ownerKey }) => {
@@ -30722,25 +31152,32 @@ function CharacterContinuity(hook, incomingText) {
       { buried: true, planned: buriedPages, actual: ownerData.buriedPages }
     ];
     return sets.every(set => {
-      if (set.actual.length !== set.planned.length) return false;
-      return set.planned.every(plan => {
-        const matching = set.actual.filter(page => page.page === plan.page);
+      // A duplicate physical page is deliberately tolerated by markDuplicateViewPages,
+      // which marks it unsafe so nothing is written to it. Counting it here made every
+      // Views transaction for that character fail forever, including ones that never
+      // touched the duplicated page. Verify what this transaction actually wrote.
+      const touched = set.planned.filter(plan => plan.dirty || plan.created);
+      const usable = set.actual.filter(page => page.safe && !page.duplicatePage);
+      if (usable.length < touched.length) return false;
+      return touched.every(plan => {
+        const matching = set.actual.filter(page => page.page === plan.page
+          && page.safe && !page.duplicatePage);
         if (matching.length !== 1) return false;
         const page = matching[0];
-        if (!plan.dirty && !plan.created) {
-          return entryOf(page.card) === plan.priorEntry
-            && textOf(page.card.keys) === plan.priorKeys
-            && textOf(page.card.type) === plan.priorType
-            && rawVisibleTitleOf(page.card) === plan.priorVisibleTitle;
-        }
         const expectedEntry = renderViewsPage(
           character, set.buried, plan.page, plan.records
         );
+        // Compare as multisets, not positionally. renderViewsPage groups records by
+        // VIEW_CATEGORIES, so the reparsed page comes back in category order while
+        // plan.records is in insertion order -- placePlannedRecord appends. Any
+        // insert into a non-final category diverged and rolled the transaction back.
+        // entryOf === expectedEntry above is what actually proves the page is right.
+        const plannedSignatures = plan.records.map(plannedViewRecordSignature).sort();
+        const actualSignatures = page.records.map(plannedViewRecordSignature).sort();
         return page.safe && !page.duplicatePage
           && entryOf(page.card) === expectedEntry
           && page.records.length === plan.records.length
-          && page.records.every((record, index) =>
-            plannedViewRecordSignature(record) === plannedViewRecordSignature(plan.records[index]));
+          && actualSignatures.every((signature, index) => signature === plannedSignatures[index]);
       });
     });
   }
@@ -30853,7 +31290,15 @@ function CharacterContinuity(hook, incomingText) {
     if (nameKeyOf(player.name) === normalized) matches.push({ key: "player", name: "Player" });
     characters.filter(character => nameKeyOf(character.name) === normalized)
       .forEach(character => matches.push({ key: "npc:" + character.key, name: character.name }));
-    return matches.length === 1 ? matches[0] : null;
+    if (matches.length === 1) return matches[0];
+    // Ambiguous stays a hard error. A name that matches nothing usually means the
+    // NPC rotated out of the five active roster slots, which discoverCharacters
+    // treats as not existing -- invalidating the whole Use field for that would
+    // freeze every other character's alias record that merely mentions them.
+    // Carry it unresolved instead: it grants nothing while they are away, the card
+    // text round-trips unchanged, and it resolves again when they come back.
+    if (matches.length > 1) return null;
+    return { key: "unresolved:" + normalized, name: supplied, unresolved: true };
   }
 
   function parseNameUse(value) {
@@ -30932,7 +31377,7 @@ function CharacterContinuity(hook, incomingText) {
       return { kind: "raw", raw, page, card, line: startLine, reason: "malformed fixed Alias record", oversize: false };
     }
     const labels = ["Alias", "Status", "Use", "Progress", "Reason"];
-    const values = {};
+    const values = Object.create(null);
     for (let index = 0; index < labels.length; index++) {
       const match = rows[index].match(new RegExp("^\\s*" + escapeRegExp(labels[index]) + "\\s*:\\s*(.*?)\\s*$", "i"));
       if (!match) {
@@ -31043,7 +31488,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function markNameDuplicates(pages, diagnostics, identity) {
-    const groups = {};
+    const groups = Object.create(null);
     pages.forEach(page => page.records.forEach(record => {
       if (!groups[record.aliasKey]) groups[record.aliasKey] = [];
       groups[record.aliasKey].push(record);
@@ -31072,12 +31517,12 @@ function CharacterContinuity(hook, incomingText) {
     if (storeIsFresh("names", namesStore)) return namesStore;
     const session = storeSessionFor("names");
     const writesAtStart = session ? session.writes : 0;
-    const store = { identities: {}, diagnostics: [], pageStats: [] };
+    const store = { identities: Object.create(null), diagnostics: [], pageStats: [] };
     nameIdentities.forEach(identity => {
       ensureBaseNamesCard(identity);
       const refs = namePageCards(identity);
       const pages = refs.map(ref => parseNamesPage(identity, ref.card, ref.page));
-      const counts = {};
+      const counts = Object.create(null);
       pages.forEach(page => { counts[page.page] = (counts[page.page] || 0) + 1; });
       pages.forEach(page => {
         if (textOf(page.card.type) !== settings.CARD_TYPE
@@ -31126,7 +31571,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function namesForIdentity(identityKey) {
-    return namesStore && namesStore.identities ? namesStore.identities[identityKey] || null : null;
+    return namesStore ? ownedEntry(namesStore.identities, identityKey) : null;
   }
 
   function managedNamesRecords() {
@@ -31397,7 +31842,12 @@ function CharacterContinuity(hook, incomingText) {
     nameIdentities.forEach(identity => {
       const identityData = namesForIdentity(identity.key);
       const records = identityData ? identityData.contextRecords : [];
-      const resolving = records.map(record => record.alias);
+      // Established forms only. Including Emerging records here put them inside
+      // `aliases`, and since every includeEmerging:false call site computes
+      // aliases.concat(includeEmerging ? emergingAliases : []), the false branch
+      // removed nothing -- the whole flag was inert and unconfirmed aliases were
+      // treated as established everywhere.
+      const resolving = records.filter(record => record.status !== "Emerging").map(record => record.alias);
       const emerging = records.filter(record => record.status === "Emerging").map(record => record.alias);
       const forms = uniqueNameForms([identity.canonical].concat(resolving), 160);
       if (identity.player) {
@@ -31588,7 +32038,7 @@ function CharacterContinuity(hook, incomingText) {
       return { kind: "raw", raw, page, card, line: startLine, reason: "malformed fixed Relationship record", oversize: false };
     }
     const labels = ["About"].concat(RELATIONSHIP_FIELDS);
-    const values = {};
+    const values = Object.create(null);
     for (let index = 0; index < labels.length; index++) {
       const match = rows[index].match(new RegExp("^\\s*" + escapeRegExp(labels[index]) + "\\s*:\\s*(.*?)\\s*$", "i"));
       if (!match) {
@@ -31600,8 +32050,8 @@ function CharacterContinuity(hook, incomingText) {
     if (!target) {
       return { kind: "raw", raw, page, card, line: startLine, reason: "invalid Relationship target", oversize: false };
     }
-    const parsedFields = {};
-    const fieldUnsafe = {};
+    const parsedFields = Object.create(null);
+    const fieldUnsafe = Object.create(null);
     RELATIONSHIP_FIELDS.forEach(field => {
       parsedFields[field] = parseRelationshipField(field, values[field]);
       if (!parsedFields[field].safe) fieldUnsafe[field] = parsedFields[field].reason || "unsafe field";
@@ -31715,13 +32165,21 @@ function CharacterContinuity(hook, incomingText) {
       : addCard(relationshipPageTitle(character, 1), emptyRelationshipsEntry(character, 1));
   }
 
+  // Hash the canonical parse, not the raw card text. parseRelationshipField already
+  // normalises case and clamps out-of-range scores, so two records that resolve to
+  // byte-identical managed values could still produce different raw signatures --
+  // and markRelationshipDuplicates then took the `conflict` branch and froze BOTH
+  // copies instead of collapsing the later one as a duplicate.
   function relationshipRecordSignature(record) {
-    return RELATIONSHIP_FIELDS.map(field => textOf(record && record.values && record.values[field])
-      .replace(/\s+/g, " ").trim()).join("\u241f");
+    return RELATIONSHIP_FIELDS.map(field => {
+      const parsed = record && record.parsedFields && record.parsedFields[field];
+      if (parsed && parsed.safe) return textOf(parsed.normalized).replace(/\s+/g, " ").trim();
+      return textOf(record && record.values && record.values[field]).replace(/\s+/g, " ").trim();
+    }).join("\u241f");
   }
 
   function markRelationshipDuplicates(pages, diagnostics) {
-    const groups = {};
+    const groups = Object.create(null);
     pages.forEach(page => page.records.forEach(record => {
       if (!groups[record.targetKey]) groups[record.targetKey] = [];
       groups[record.targetKey].push(record);
@@ -31751,12 +32209,12 @@ function CharacterContinuity(hook, incomingText) {
     if (storeIsFresh("relationships", relationshipsStore)) return relationshipsStore;
     const session = storeSessionFor("relationships");
     const writesAtStart = session ? session.writes : 0;
-    const store = { owners: {}, diagnostics: [], pageStats: [] };
+    const store = { owners: Object.create(null), diagnostics: [], pageStats: [] };
     characters.filter(character => !character.onboardingPending).forEach(character => {
       ensureBaseRelationshipsCard(character);
       const refs = relationshipPageCards(character);
       const pages = refs.map(ref => parseRelationshipsPage(character, ref.card, ref.page));
-      const pageCounts = {};
+      const pageCounts = Object.create(null);
       pages.forEach(page => { pageCounts[page.page] = (pageCounts[page.page] || 0) + 1; });
       pages.forEach(page => {
         if (textOf(page.card.type) !== settings.CARD_TYPE
@@ -31814,9 +32272,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function relationshipsForOwner(ownerKey) {
-    return relationshipsStore && relationshipsStore.owners
-      ? relationshipsStore.owners[ownerKey] || null
-      : null;
+    return relationshipsStore ? ownedEntry(relationshipsStore.owners, ownerKey) : null;
   }
 
   function managedRelationshipsRecords() {
@@ -32378,7 +32834,7 @@ function CharacterContinuity(hook, incomingText) {
       return { kind: "raw", raw, page, card, line: startLine, reason: "malformed fixed Turning Point record", oversize: false };
     }
     const labels = hasBreakthrough ? requiredLabels.concat(["Breakthrough"]) : requiredLabels;
-    const values = {};
+    const values = Object.create(null);
     for (let index = 0; index < labels.length; index += 1) {
       const match = rows[index].match(new RegExp("^\\s*" + escapeRegExp(labels[index]) + "\\s*:\\s*(.*?)\\s*$", "i"));
       if (!match) {
@@ -32512,7 +32968,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function markTurningPointDuplicates(pages, diagnostics) {
-    const groups = {};
+    const groups = Object.create(null);
     pages.forEach(page => page.records.forEach(record => {
       if (!groups[record.id]) groups[record.id] = [];
       groups[record.id].push(record);
@@ -32540,11 +32996,11 @@ function CharacterContinuity(hook, incomingText) {
     if (storeIsFresh("turningpoints", turningPointsStore)) return turningPointsStore;
     const session = storeSessionFor("turningpoints");
     const writesAtStart = session ? session.writes : 0;
-    const store = { owners: {}, diagnostics: [], pageStats: [], stageStats: [] };
+    const store = { owners: Object.create(null), diagnostics: [], pageStats: [], stageStats: [] };
     characters.filter(character => !character.onboardingPending).forEach(character => {
       const refs = turningPointPageCards(character);
       const pages = refs.map(ref => parseTurningPointsPage(character, ref.card, ref.page));
-      const pageCounts = {};
+      const pageCounts = Object.create(null);
       pages.forEach(page => { pageCounts[page.page] = (pageCounts[page.page] || 0) + 1; });
       pages.forEach(page => {
         page.duplicatePage = pageCounts[page.page] > 1;
@@ -32607,9 +33063,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function turningPointsForOwner(ownerKey) {
-    return turningPointsStore && turningPointsStore.owners
-      ? turningPointsStore.owners[ownerKey] || null
-      : null;
+    return turningPointsStore ? ownedEntry(turningPointsStore.owners, ownerKey) : null;
   }
 
   function turningPointRecordFor(ownerKey, id) {
@@ -33001,9 +33455,38 @@ function CharacterContinuity(hook, incomingText) {
       : { card, source, changed: false };
   }
 
+  const stateCardDiagnostics = [];
+
+  // Exact duplicates are collapsed the way discoverCharacters collapses duplicate
+  // Outer cards; conflicting ones are reported and left alone. Returns the cards
+  // still claiming this character's State after the collapse.
+  function stateCardsFor(character) {
+    const matching = namedCards(character.name, settings.STATE_LABEL);
+    if (matching.length < 2) return matching;
+    const signatures = new Set(matching.map(duplicateCardEntrySignature));
+    if (signatures.size === 1) {
+      const extras = matching.slice(1);
+      removeCards(extras);
+      stateCardDiagnostics.push(
+        character.name + " had " + matching.length + " exact State cards; kept the first and removed "
+          + extras.length + " duplicate" + (extras.length === 1 ? "" : "s") + "."
+      );
+      return [matching[0]];
+    }
+    stateCardDiagnostics.push(
+      character.name + " has " + matching.length
+        + " conflicting State cards; its State is frozen until only one remains."
+    );
+    return matching;
+  }
+
   function syncStateCard(character) {
     const title = stateTitle(character);
-    let card = namedCard(character.name, settings.STATE_LABEL);
+    const matching = stateCardsFor(character);
+    // Never re-parse in-memory State from an arbitrary copy: namedCard returns the
+    // first card, and with conflicting duplicates that choice is meaningless.
+    if (matching.length > 1) return;
+    let card = matching[0] || null;
     if (!card) return;
     let source = entryOf(card);
     const currentHash = hashString(source);
@@ -33025,7 +33508,10 @@ function CharacterContinuity(hook, incomingText) {
     if (!npc) return;
     const title = stateTitle(character);
     const entry = stateEntry(character, npc);
-    const matching = namedCards(character.name, settings.STATE_LABEL);
+    const matching = stateCardsFor(character);
+    // Conflicting duplicates: writing to either copy would pick one arbitrarily,
+    // and the reason is now reported through stateCardDiagnostics rather than
+    // being silently swallowed here.
     if (matching.length > 1) return null;
     const card = matching[0] || null;
     const saved = card ? saveCard(card, entry) : addCard(title, entry);
@@ -33288,7 +33774,7 @@ function CharacterContinuity(hook, incomingText) {
       return experiencesStore;
     }
     const writesAtStart = session ? session.writes : 0;
-    const store = { owners: {}, diagnostics: [], pageStats: [] };
+    const store = { owners: Object.create(null), diagnostics: [], pageStats: [] };
     characters.filter(character => !character.onboardingPending).forEach(character => {
       store.owners[character.key] = { character, pages: [], records: [], contextRecords: [] };
     });
@@ -33299,7 +33785,7 @@ function CharacterContinuity(hook, incomingText) {
     });
     Object.values(store.owners).forEach(ownerData => {
       ownerData.pages.sort((left, right) => left.page - right.page || cardIndex(left.card) - cardIndex(right.card));
-      const counts = {};
+      const counts = Object.create(null);
       ownerData.pages.forEach(page => { counts[page.page] = (counts[page.page] || 0) + 1; });
       const seen = new Set();
       ownerData.pages.forEach(page => {
@@ -33346,9 +33832,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function experiencesForOwner(ownerKey) {
-    return experiencesStore && experiencesStore.owners
-      ? experiencesStore.owners[ownerKey] || null
-      : null;
+    return experiencesStore ? ownedEntry(experiencesStore.owners, ownerKey) : null;
   }
 
   function managedExperienceRecords(ownerKeys) {
@@ -33400,7 +33884,11 @@ function CharacterContinuity(hook, incomingText) {
     let remaining = source;
     while (remaining.length > maximum) {
       const minimum = Math.floor(maximum * 0.45);
-      let cut = remaining.lastIndexOf(" ", maximum + 1);
+      // lastIndexOf returns the last space at an index <= fromIndex, so a fromIndex
+      // of maximum + 1 can cut at maximum + 1 and emit a chunk one character over
+      // the cap. The re-parse then marks it oversize and every later migration
+      // commit fails and rolls back, permanently.
+      let cut = remaining.lastIndexOf(" ", maximum);
       if (cut < minimum) {
         return {
           ok: false,
@@ -33422,6 +33910,11 @@ function CharacterContinuity(hook, incomingText) {
     chunks.push(remaining);
     if (chunks.join(" ") !== source) {
       return { ok: false, error: "An oversized Experience could not be divided losslessly." };
+    }
+    // Refuse the migration rather than writing a chunk the re-parse will reject:
+    // a boundary bug here degrades to a reported refusal, not a write/rollback loop.
+    if (chunks.some(chunk => chunk.length > maximum)) {
+      return { ok: false, error: "An oversized Experience could not be divided within the stored length limit." };
     }
     const records = chunks.map((chunk, index) => ({
       ...record,
@@ -33720,7 +34213,7 @@ function CharacterContinuity(hook, incomingText) {
       .sort((left, right) => left.confirmation - right.confirmation
         || left.createdClock - right.createdClock
         || left.id.localeCompare(right.id));
-    const selectedByConfirmation = {};
+    const selectedByConfirmation = Object.create(null);
     matching.forEach(record => {
       if (!selectedByConfirmation[record.confirmation]) selectedByConfirmation[record.confirmation] = record;
     });
@@ -34056,7 +34549,7 @@ function CharacterContinuity(hook, incomingText) {
     const excerpt = evidenceExcerpt(value);
     if (!excerpt.text) return null;
     const number = CC.nextEvidenceNumber++;
-    const ownerBirth = {};
+    const ownerBirth = Object.create(null);
     characters.forEach(character => {
       ownerBirth[character.key] = Math.max(0, Number(CC.ownerOpportunities[character.key]) || 0);
     });
@@ -35178,6 +35671,25 @@ function CharacterContinuity(hook, incomingText) {
 
   function beginContinueIfNeeded(contextValue) {
     const observedActionCount = platformActionCount();
+    // AI Dungeon fires no hook on undo, so the script only learns about one when the
+    // platform's action count comes back LOWER than the high-water mark that
+    // markActionCompleted maintains. Without this, an N-action undo left the count N
+    // below the mark, clearlyNewAction stayed false for N turns, and every one of
+    // them was misread as a retry of an action the player had already erased --
+    // replaying a stale snapshot and going inert. Resync instead.
+    if (observedActionCount !== null && observedActionCount < CC.lastCompletedActionCount) {
+      const undone = CC.lastCompletedActionCount - observedActionCount;
+      CC.lastCompletedActionCount = observedActionCount;
+      // Drop what the erased actions left behind -- the snapshot, the output anchor
+      // and any pending retry all describe generations the player has thrown away.
+      // CC.currentPlan is deliberately NOT cleared: beginInput built it for the turn
+      // now in progress, and discarding it downgrades this turn to a preview.
+      CC.preGenerationSnapshot = null;
+      CC.lastVisibleOutputAnchor = "";
+      cancelPendingOperationRetry(null);
+      CC.last.warning = "Detected " + undone + " undone action"
+        + (undone === 1 ? "" : "s") + "; continuity resynchronised to the current action.";
+    }
     let discardedPlan = CC.currentPlan && typeof CC.currentPlan === "object" ? clone(CC.currentPlan) : null;
     if (CC.currentPlan && !CC.currentPlan.completed) {
       const currentActionCount = Number.isFinite(Number(CC.currentPlan.actionCount))
@@ -35640,8 +36152,8 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function relevantRecoveredBlocks(owner, activeSelections, buriedSelections) {
-    const activeByTarget = {};
-    const buriedByTarget = {};
+    const activeByTarget = Object.create(null);
+    const buriedByTarget = Object.create(null);
     activeSelections.forEach(item => { activeByTarget[item.record.targetKey] = item.record; });
     buriedSelections.forEach(item => { buriedByTarget[item.record.targetKey] = item.record; });
     return Object.keys(CC.recoveringViews).map(key => {
@@ -35792,11 +36304,11 @@ function CharacterContinuity(hook, incomingText) {
         result.push(target);
       }
     };
-    const activeByTarget = {};
+    const activeByTarget = Object.create(null);
     activeSelections.forEach(item => { activeByTarget[item.record.targetKey] = item.record; });
-    const buriedByTarget = {};
+    const buriedByTarget = Object.create(null);
     buriedSelections.forEach(item => { buriedByTarget[item.record.targetKey] = item.record; });
-    const relationshipByTarget = {};
+    const relationshipByTarget = Object.create(null);
     (Array.isArray(relationshipSelections) ? relationshipSelections : []).forEach(item => {
       relationshipByTarget[item.record.targetKey] = item.record;
     });
@@ -36094,28 +36606,52 @@ function CharacterContinuity(hook, incomingText) {
       if (positive === negative) return "";
       return positive ? positiveDestination : negativeDestination;
     };
+    // The polarity tests below are bare keyword scans over narrative prose, so
+    // "she no longer trusts him" scored as a Trust GAIN -- the exact opposite of
+    // what the story said -- because the negative list is a disjoint set of words
+    // that a sentence phrased with "trust" itself never hits. keyOf has already
+    // flattened punctuation to spaces, so cues and keywords sit in one word stream
+    // and a cue plus the next few words can simply be blanked out. Note the
+    // apostrophe forms below are post-keyOf ("can t", not "can't"); the original
+    // "can't rely" spelling could never match.
+    const negationCue = "(?:no longer|never|not|cannot|can t|could not|couldn t|"
+      + "does not|doesn t|did not|didn t|do not|don t|stopped|refused|refuses|"
+      + "without|lost|losing|lack|lacks|lacked|failed to|far from|less)";
+    let negationPresent = false;
+    const affirmed = source.replace(
+      new RegExp("\\b" + negationCue + "\\b(?:\\s+\\S+){0,3}", "g"),
+      () => { negationPresent = true; return " "; }
+    );
+    // Affirmed: the keyword survives outside every negated span.
+    const affirms = pattern => pattern.test(affirmed);
+    // Negated: the keyword appears, but only inside a negated span.
+    const negates = pattern => negationPresent && pattern.test(source) && !pattern.test(affirmed);
     if (field === "Trust") {
       const severe = hasTrigger(["betrayal"]) || /\b(?:betray\w*|treacher\w*)\b/.test(source);
+      const trustGain = /\b(?:trust\w*|reliab\w*|dependab\w*|can rely|could rely|kept (?:a|the|his|her|their) promise)\b/;
       const negative = severe || hasTrigger(["trust_loss"])
-        || /\b(?:distrust\w*|dishonest\w*|unreliab\w*|cannot rely|can't rely|could not rely|deceiv\w*|lied|lying|broken promise)\b/.test(source);
-      const positive = hasTrigger(["trust_gain", "repair"])
-        || /\b(?:trust\w*|reliab\w*|dependab\w*|can rely|could rely|kept (?:a|the|his|her|their) promise)\b/.test(source);
+        || /\b(?:distrust\w*|dishonest\w*|unreliab\w*|cannot rely|can t rely|could not rely|deceiv\w*|lied|lying|broken promise)\b/.test(source)
+        || negates(trustGain);
+      const positive = hasTrigger(["trust_gain", "repair"]) || affirms(trustGain);
       return choose(positive, negative, "Trust", severe ? "Severe distrust" : "Distrust");
     }
     if (field === "Closeness") {
+      const closenessGain = /\b(?:close|closeness|bond\w*|affection\w*|reconnect\w*|intimacy|intimate)\b/;
       const negative = hasTrigger(["closeness_loss", "withdraw"])
-        || /\b(?:distant|distance|disconnect\w*|withdraw\w*|pull\w* away)\b/.test(source);
+        || /\b(?:distant|distance|disconnect\w*|withdraw\w*|pull\w* away)\b/.test(source)
+        || negates(closenessGain);
       const positive = hasTrigger(["closeness_gain", "affection", "reconnect"])
-        || /\b(?:close|closeness|bond\w*|affection\w*|reconnect\w*|intimacy|intimate)\b/.test(source);
+        || affirms(closenessGain);
       return choose(positive, negative, "Close", "Distant");
     }
     if (field === "Conflict") {
-      const repaired = hasTrigger(["repair"])
-        || /\b(?:resolved|made peace|reconcil\w*|repair\w*)\b/.test(source);
+      const repair = /\b(?:resolved|made peace|reconcil\w*|repair\w*)\b/;
+      const repaired = hasTrigger(["repair"]) || affirms(repair);
       const ruptured = hasTrigger(["betrayal"])
         || /\b(?:rupture\w*|severed ties|cut ties|irreparable|betray\w*)\b/.test(source);
       const conflict = ruptured || hasTrigger(["conflict", "anger", "boundary_crossed"])
-        || /\b(?:conflict\w*|fight\w*|argument\w*|anger|angry|hostil\w*|friction|strain)\b/.test(source);
+        || /\b(?:conflict\w*|fight\w*|argument\w*|anger|angry|hostil\w*|friction|strain)\b/.test(source)
+        || negates(repair);
       return choose(repaired, conflict, "Clear", ruptured ? "Rupture" : "Open conflict");
     }
     if (field === "Boundaries") {
@@ -36163,7 +36699,7 @@ function CharacterContinuity(hook, incomingText) {
     const currentOpportunity = opportunityOverride === null
       ? Math.max(0, Number(CC.ownerOpportunities[owner.key]) || 0)
       : Math.max(0, Number(opportunityOverride) || 0);
-    const frozenById = {};
+    const frozenById = Object.create(null);
     const frozenOrder = [];
     (Array.isArray(frozenPacket) ? frozenPacket : []).forEach(source => {
       const id = provenanceId(source && source.id);
@@ -36212,7 +36748,7 @@ function CharacterContinuity(hook, incomingText) {
         ? frozen.allowedFields.filter(field => RELATIONSHIP_FIELDS.includes(field))
         : null;
       const allowedFields = (frozenFields || grounded).filter(field => grounded.includes(field));
-      const fieldUseSignatures = {};
+      const fieldUseSignatures = Object.create(null);
       allowedFields.forEach(field => {
         const recomputed = relationshipUseSignatureForRecord(record, owner.key, record.targetKey, field);
         const frozenSignature = frozen && frozen.useSignatures && frozen.useSignatures[field];
@@ -36421,7 +36957,7 @@ function CharacterContinuity(hook, incomingText) {
     const currentOpportunity = opportunityOverride === null
       ? Math.max(0, Number(CC.ownerOpportunities[owner.key]) || 0)
       : Math.max(0, Number(opportunityOverride) || 0);
-    const frozenById = {};
+    const frozenById = Object.create(null);
     const frozenOrder = [];
     (Array.isArray(frozenPacket) ? frozenPacket : []).forEach(source => {
       const id = provenanceId(source && source.id);
@@ -36480,7 +37016,7 @@ function CharacterContinuity(hook, incomingText) {
           && current.operationMode === item.operationMode && current.targetMode === item.targetMode)
       );
       const rawLineage = storyLineageForSources(record.sourceIds.concat(record.storyEvidenceIds || []));
-      const useSignatures = {};
+      const useSignatures = Object.create(null);
       const unusedInterpretations = [];
       allowedInterpretations.forEach(item => {
         const key = [item.destination, item.operationMode, item.targetMode || ""].join("|");
@@ -37278,7 +37814,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function operationCandidateGroups(owner, signals, currentInputId, recent, scoringOpportunity) {
-    const groups = {};
+    const groups = Object.create(null);
     (Array.isArray(signals) ? signals : []).forEach(entry => {
       const signal = entry && entry.signal;
       const sourceCandidate = entry && (entry.sourceCandidate || (entry.item ? { item: entry.item } : null));
@@ -37340,7 +37876,7 @@ function CharacterContinuity(hook, incomingText) {
       }
       const evidenceItems = contributing.map(entry => entry.item);
       const sourceCandidates = contributing.map(entry => entry.sourceCandidate);
-      const sourceMetadata = {};
+      const sourceMetadata = Object.create(null);
       sourceCandidates.forEach(source => {
         if (!source || !source.item) return;
         sourceMetadata[source.item.id] = {
@@ -37790,7 +38326,7 @@ function CharacterContinuity(hook, incomingText) {
           ? id.charAt(0) === "E"
           : ["S", "X"].includes(id.charAt(0));
       });
-    const byId = {};
+    const byId = Object.create(null);
     eligible.forEach(candidate => { byId[candidate.item.id] = candidate; });
     const requested = operationPacketSourceIds(kind, selectedCandidate, frozenIds);
     const ordered = [];
@@ -38204,7 +38740,7 @@ function CharacterContinuity(hook, incomingText) {
         ...stateContinuityRules,
         frozenConfirmation
           ? "KEEP is fixed. Replace Thought with concise direct first-person inner speech consistent with the scheduled evidence."
-          : "Replace Situation with a character-voiced clause of at most 100 characters and Thought with direct first-person inner speech. Keep both consistent with the scheduled evidence; natural paraphrase is allowed.",
+          : "Replace Situation with a character-voiced clause of at most " + settings.MODEL_STATE_VALUE_CHARS + " characters and Thought with direct first-person inner speech. Keep both consistent with the scheduled evidence; natural paraphrase is allowed.",
         ...(selectedCandidate && selectedCandidate.pendingRetry === true
           ? ["This is the one carried retry of the earlier frozen evidence; the completed record remains unchanged."]
           : []),
@@ -38223,7 +38759,9 @@ function CharacterContinuity(hook, incomingText) {
         targetMap,
         evidenceChoice,
         evidenceAuthority,
-        "Alias, Transition, and Use are fixed. Replace Explanation with one short clause describing why the scheduled transition applies; natural paraphrase is allowed.",
+        "Alias, Transition, and Use are fixed. Replace Explanation with one short clause of at most "
+          + settings.MODEL_OPERATION_EXPLANATION_CHARS
+          + " characters describing why the scheduled transition applies; natural paraphrase is allowed.",
         ...commonEnding
       ];
     } else if (normalized === "relationship") {
@@ -38241,7 +38779,9 @@ function CharacterContinuity(hook, incomingText) {
         evidenceChoice,
         evidenceAuthority,
         "Target, field, " + (direct ? "direct" : "accumulated") + " event class, and destination "
-          + destinationField + " are fixed. Replace Explanation with one short clause describing the scheduled relationship movement; natural paraphrase is allowed.",
+          + destinationField + " are fixed. Replace Explanation with one short clause of at most "
+          + settings.MODEL_RELATIONSHIP_EXPLANATION_CHARS
+          + " characters describing the scheduled relationship movement; natural paraphrase is allowed.",
         "Frozen " + pace.name + " pace: " + (direct ? "D " + pace.direct : "A " + pace.accumulated)
           + " per event, maximum " + pace.maxStages + " stage" + (pace.maxStages === 1 ? "" : "s") + ".",
         relationshipFieldMeaning(field),
@@ -38261,7 +38801,9 @@ function CharacterContinuity(hook, incomingText) {
         evidenceChoice,
         evidenceAuthority,
         "Target, destination " + destinationField + ", and mode " + modeField
-          + " are fixed. Replace Explanation with one short clause describing the scheduled View movement; natural paraphrase is allowed.",
+          + " are fixed. Replace Explanation with one short clause of at most "
+          + settings.MODEL_OPERATION_EXPLANATION_CHARS
+          + " characters describing the scheduled View movement; natural paraphrase is allowed.",
         ...commonEnding
       ];
     } else if (normalized === "turning") {
@@ -38488,6 +39030,18 @@ function CharacterContinuity(hook, incomingText) {
     ].join("\n");
   }
 
+  function operationFrontMemoryInstruction() {
+    return [
+      "<SYSTEM>",
+      "A Character Continuity operation is mandatory this response.",
+      "Follow the final CC CURRENT ASSESSMENT/OPERATION block in Context.",
+      "Output exactly one completed CCO record as the first nonblank line, then story prose.",
+      "If the Context block offers K and no change is supported, use K.",
+      "Do not omit or refuse the record.",
+      "</SYSTEM>"
+    ].join("\n");
+  }
+
   function currentStoryResponseTask() {
     return [
       "<SYSTEM>",
@@ -38595,7 +39149,7 @@ function CharacterContinuity(hook, incomingText) {
     };
   }
 
-  function assembleContext(base, active, focus, currentInput, recent, plan) {
+  function assembleContext(base, active, focus, currentInput, recent, plan, externalFrontMemory = "") {
     const components = [];
     let tail = CC.recoveryPending ? recoveryTask() : currentStoryResponseTask();
     const selectedNames = [];
@@ -38632,11 +39186,20 @@ function CharacterContinuity(hook, incomingText) {
 
     const composition = (candidateComponents = components, candidateTail = tail, materialize = false) => {
       const prefix = renderPortrayalComponents(candidateComponents);
-      const tokens = estimateTokens([prefix, candidateTail].filter(Boolean).join("\n"));
+      const frontInstruction = operationTaskUsesForcedContract(candidateTail)
+        ? operationFrontMemoryInstruction()
+        : "";
+      const frontMemory = composedFrontMemory(externalFrontMemory, frontInstruction);
+      const fittedTail = [candidateTail, frontMemory].filter(Boolean).join("\n\n");
+      const tokens = estimateTokens([
+        prefix,
+        candidateTail,
+        ownedFrontMemoryBlock(frontInstruction)
+      ].filter(Boolean).join("\n"));
       if (tokens > continuityTurnBudget) return { ok: false, reason: "continuity turn budget" };
       if (tokens > continuityEffectiveBudget) return { ok: false, reason: "effective context allowance" };
       const fitted = fitWithoutTrimming(
-        base, prefix, candidateTail, maxChars, recentChars, materialize, capacity
+        base, prefix, fittedTail, maxChars, recentChars, materialize, capacity
       );
       return fitted.ok ? { ok: true, tokens, fitted } : { ok: false, reason: fitted.reason };
     };
@@ -39434,6 +39997,7 @@ function CharacterContinuity(hook, incomingText) {
       ) : 0,
       taskTokens: estimateTokens(tail),
       taskText: taskDelivered ? tail : "",
+      frontTaskText: taskDelivered ? operationFrontMemoryInstruction() : "",
       taskKind: taskDelivered ? selectedOperationKind : "",
       operationEvidenceSignature: taskDelivered && plan.selectedCandidate
         ? operationEvidenceSignature(plan.selectedCandidate, selectedEvidence.map(candidate => candidate.item))
@@ -39582,6 +40146,11 @@ function CharacterContinuity(hook, incomingText) {
       : "";
   }
 
+  // Pipe-separated field count per CCO record kind, matching the length checks in
+  // parseTerminalCandidate. Keep the two in step: an undercount here leaves part of
+  // a malformed record visible to the player.
+  const CCO_RECORD_FIELD_COUNTS = { K: 5, S: 7, V: 7, T: 7, N: 8, R: 8 };
+
   function ccoProtocolSpans(value) {
     const source = textOf(value).replace(/\r/g, "");
     const opener = /\(\s*(?:CCO\b|[SNRVT]\s*\|)/gi;
@@ -39603,8 +40172,56 @@ function CharacterContinuity(hook, incomingText) {
           }
         }
       }
+      // An unbalanced record must not swallow the rest of the reply, and must not
+      // leave its own tail visible either. A genuinely truncated record is the last
+      // thing in the output -- the case terminalProtocolCutoff models. Otherwise the
+      // record is merely malformed: consume its continuation lines, stopping at the
+      // first blank line or the first line that reads as finished story prose, so a
+      // multiline record goes entirely while the story is untouched.
+      let bounded = false;
+      if (!complete) {
+        const lineEnd = source.indexOf("\n", start);
+        if (lineEnd !== -1 && source.slice(lineEnd + 1).trim()) {
+          // Punctuation alone cannot mark the end of a malformed record: a record's
+          // own continuation can read as a sentence, and the story after one can be
+          // cut off mid-word. Use each record kind's field count instead, and enforce
+          // one absolute rule: never consume the last remaining content. Leaving a
+          // fragment of a broken record visible is bad; deleting the player's turn
+          // is worse.
+          const openerLine = source.slice(start, lineEnd);
+          const kindMatch = /^\(\s*(?:CCO\s*\|\s*)?([SNRVTK])\b/i.exec(openerLine);
+          const kindLetter = kindMatch ? kindMatch[1].toUpperCase() : "";
+          // Field counts are per kind and must match the parser's own checks:
+          // K 5, S 7, V 7, T 7, N 8, R 8. Assuming 7 for everything undercounted
+          // N and R, so a Name or Relationship record whose Explanation wrapped
+          // onto the next line was judged already complete and left that line
+          // visible. Default to the largest count when the kind is unreadable,
+          // since the "never remove the last remaining line" rule still applies.
+          const expectedFields = CCO_RECORD_FIELD_COUNTS[kindLetter] || 8;
+          let cursor = lineEnd;
+          let prosePulled = 0;
+          for (let guard = 0; guard < 16; guard += 1) {
+            const nextBreak = source.indexOf("\n", cursor + 1);
+            const nextLine = source.slice(cursor + 1, nextBreak === -1 ? source.length : nextBreak);
+            if (!nextLine.trim()) break;
+            // Anything after this line. If there is none, this line is the last
+            // content in the reply and is kept, whatever it looks like.
+            if (nextBreak === -1 || !source.slice(nextBreak + 1).trim()) break;
+            if (hasTerminallyPunctuatedStory(nextLine)) {
+              // Reads as prose. Only pull it in if the record is still missing
+              // fields, and only once, so a multi-paragraph reply stays intact.
+              const fieldsSoFar = source.slice(start, cursor).split("|").length;
+              if (fieldsSoFar >= expectedFields || prosePulled >= 1) break;
+              prosePulled += 1;
+            }
+            cursor = nextBreak;
+          }
+          end = cursor;
+          bounded = true;
+        }
+      }
       spans.push({ start, end, complete, text: source.slice(start, end) });
-      if (!complete) break;
+      if (!complete && !bounded) break;
       opener.lastIndex = end;
       match = opener.exec(source);
     }
@@ -39634,7 +40251,11 @@ function CharacterContinuity(hook, incomingText) {
       const bareIndex = bareCcoIndex(result);
       if (bareIndex >= 0) result = result.slice(0, bareIndex);
       if (labelOnly.test(controlPresentationText(result))) result = "";
-      return result.replace(/[ \t]{2,}/g, " ").trimEnd();
+      // Collapse runs of whitespace only where a removal actually left a gap.
+      // Applying it to every line reformats the player's prose -- indented verse,
+      // letters and lists are left-flushed on turns where nothing was stripped.
+      if (result !== rawLine) result = result.replace(/[ \t]{2,}/g, " ");
+      return result.trimEnd();
     }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
 
@@ -39848,6 +40469,25 @@ function CharacterContinuity(hook, incomingText) {
     ].some(pattern => pattern.test(normalized));
   }
 
+  // The exact instruction lines CC emits inside its own <SYSTEM> blocks. Derived
+  // from the emitters so the two cannot drift apart.
+  let ccAuthoredSystemLineSet = null;
+
+  function ccAuthoredSystemLine(value) {
+    if (!ccAuthoredSystemLineSet) {
+      ccAuthoredSystemLineSet = new Set([
+        recoveryTask(),
+        operationFrontMemoryInstruction(),
+        currentStoryResponseTask(),
+        currentOperationAuthorityLines().join("\n")
+      ].flatMap(block => textOf(block).split("\n"))
+        .map(controlPresentationText)
+        .map(row => keyOf(row))
+        .filter(row => row && !/^\s*<?\/?system>?\s*$/i.test(row)));
+    }
+    return ccAuthoredSystemLineSet.has(keyOf(controlPresentationText(value)));
+  }
+
   function stripSystemControlBlocks(value) {
     let source = textOf(value).replace(/\r/g, "");
     const removed = [];
@@ -39857,10 +40497,29 @@ function CharacterContinuity(hook, incomingText) {
       removed.push(line(block, 220));
       return "";
     });
-    const unmatched = source.search(new RegExp(openTag, "i"));
-    if (unmatched >= 0) {
-      removed.push(line(source.slice(unmatched), 220));
-      source = source.slice(0, unmatched);
+    // An unmatched opener is usually the model echoing a bare tag mid-reply, not a
+    // truncated block -- that is why the echo table below exists. Truncating to
+    // end-of-text there deletes the rest of the story. Only truncate when nothing
+    // after the tag reads as finished prose (the genuine cut-off case); otherwise
+    // drop the tag alone and keep the reply.
+    // Remove the tag and the instructions it was wrapping, never anything else.
+    // Deciding on terminal punctuation was wrong in both directions: it left CC's
+    // own instructions visible when they read as sentences, and it deleted the
+    // player's story when the story was cut off mid-word. The wrapped lines are
+    // CC's own text, so matching them exactly is both sufficient and safe -- story
+    // prose cannot match. Whatever is left afterwards is the player's, and is kept.
+    for (let guard = 0; guard < 8; guard += 1) {
+      const unmatched = new RegExp(openTag, "i").exec(source);
+      if (!unmatched) break;
+      removed.push(line(unmatched[0], 220));
+      const rest = source.slice(unmatched.index + unmatched[0].length).split("\n");
+      let head = 0;
+      if (rest.length && !rest[0].trim()) head = 1;
+      while (head < rest.length && rest[head].trim() && ccAuthoredSystemLine(rest[head])) {
+        removed.push(line(rest[head], 220));
+        head += 1;
+      }
+      source = source.slice(0, unmatched.index) + rest.slice(head).join("\n");
     }
     source = source.replace(new RegExp(closeTag, "gi"), tag => {
       removed.push(line(tag, 220));
@@ -39934,8 +40593,14 @@ function CharacterContinuity(hook, incomingText) {
       source = source.replace(/(^|\n)[ \t]*(?:>\s*|[-+*]\s*)(?=\n|$)/g, "$1");
       source = source.replace(/(^|\n)[ \t]*(?:\*{2,}|_{2,}|`+)(?:[ \t]+(?:\*{2,}|_{2,}|`+))?[ \t]*(?=\n|$)/g, "$1");
     }
+    // Only normalise whitespace when something was actually removed. This runs on
+    // every output turn and its result is the base for every later stage, so
+    // applying it unconditionally strips the leading indentation of all prose --
+    // verse, letters and lists arrive left-flushed even when nothing was stripped.
     return {
-      text: source.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n[ \t]+/g, "\n"),
+      text: count > 0
+        ? source.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n[ \t]+/g, "\n")
+        : source.replace(/[ \t]+\n/g, "\n"),
       count,
       sample
     };
@@ -40276,7 +40941,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 
   function frozenOperationEvidenceIds(plan, kind) {
-    const supplied = {};
+    const supplied = Object.create(null);
     (Array.isArray(plan && plan.sourcePacket) ? plan.sourcePacket : []).forEach(sourceItem => {
       const id = continuitySourceId(sourceItem && sourceItem.id);
       if (id) supplied[id] = sourceItem;
@@ -41122,6 +41787,20 @@ function CharacterContinuity(hook, incomingText) {
         : "");
   }
 
+  // An over-length Explanation is trimmed to a clause boundary rather than
+  // discarding the whole record, which is a deliberate change from the earlier
+  // hard rejection. Report when the trim happened so it is visible on the Status
+  // card instead of silently altering what the model wrote.
+  function compactedExplanation(value, maximum) {
+    const supplied = wholeLine(value, 0);
+    const compacted = compactLineAtBoundary(value, maximum);
+    return {
+      value: compacted,
+      shortened: !!supplied && !!compacted && compacted !== supplied,
+      note: " The Explanation exceeded " + maximum + " characters and was shortened to fit."
+    };
+  }
+
   function exactStateFieldValue(value, label) {
     const source = textOf(value).trim();
     const normalized = source.replace(new RegExp("^" + escapeRegExp(label) + "\\s*:\\s*", "i"), "").trim();
@@ -41530,11 +42209,12 @@ function CharacterContinuity(hook, incomingText) {
       const replacedAlias = line(replacedAliasSource, 160);
       const useField = wholeLine(parts[6], 0);
       const explanationField = exactStateFieldValue(parts[7], "Explanation");
-      const explanation = wholeLine(explanationField.value, settings.MAX_OPERATION_EXPLANATION_CHARS);
+      const explanationResult = compactedExplanation(explanationField.value, settings.MAX_OPERATION_EXPLANATION_CHARS);
+      const explanation = explanationResult.value;
       if (!subjectCode || !alias || alias !== aliasSource || replacedAlias !== replacedAliasSource
         || !transition || !useField || !explanation
         || /[{}\[\]|()\r\n]/.test(alias + useField + explanation + replacedAlias)) {
-        return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Name CCO record used an invalid subject, alias, transition, permission, overlong explanation, or reserved character.", raw: line(raw, 300) };
+        return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Name CCO record used an invalid subject, alias, transition, permission, or reserved character.", raw: line(raw, 300) };
       }
       if (keyOf(explanation) === "explanation") {
         return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Name CCO record retained its uncompleted Explanation placeholder.", raw: line(raw, 300) };
@@ -41542,7 +42222,8 @@ function CharacterContinuity(hook, incomingText) {
       return {
         story, malformed: false, hadProtocol: true,
         reason: parsedCcoReason("CCO Name record parsed.", routing) + protocolPresentationNote
-          + (explanationField.changed ? " The exact position-matched Explanation label was normalized." : ""),
+          + (explanationField.changed ? " The exact position-matched Explanation label was normalized." : "")
+          + (explanationResult.shortened ? explanationResult.note : ""),
         raw: reportedRaw,
         candidate: { kind: "name", subjectCode, evidenceIds, alias, transition, replacedAlias, useField, explanation }
       };
@@ -41557,12 +42238,13 @@ function CharacterContinuity(hook, incomingText) {
       const destinationSource = textOf(parts[6]).trim();
       const destination = field ? relationshipDestination(field, destinationSource) : null;
       const explanationField = exactStateFieldValue(parts[7], "Explanation");
-      const explanation = wholeLine(explanationField.value, settings.MAX_RELATIONSHIP_EXPLANATION_CHARS);
+      const explanationResult = compactedExplanation(explanationField.value, settings.MAX_RELATIONSHIP_EXPLANATION_CHARS);
+      const explanation = explanationResult.value;
       if (!targetCode || !field || !["A", "D"].includes(eventKind) || !destination) {
         return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Relationship CCO record used an invalid target, field, A/D flag, or destination.", raw: line(raw, 300) };
       }
       if (!explanation || /[{}\[\]|()\r\n]/.test(explanation)) {
-        return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Relationship explanation was empty, over " + settings.MAX_RELATIONSHIP_EXPLANATION_CHARS + " characters, or used reserved record characters.", raw: line(raw, 300) };
+        return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Relationship explanation was empty or used reserved record characters.", raw: line(raw, 300) };
       }
       if (keyOf(explanation) === "explanation") {
         return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The Relationship CCO record retained its uncompleted Explanation placeholder.", raw: line(raw, 300) };
@@ -41570,7 +42252,8 @@ function CharacterContinuity(hook, incomingText) {
       return {
         story, malformed: false, hadProtocol: true,
         reason: parsedCcoReason("CCO Relationship record parsed.", routing) + protocolPresentationNote
-          + (explanationField.changed ? " The exact position-matched Explanation label was normalized." : ""),
+          + (explanationField.changed ? " The exact position-matched Explanation label was normalized." : "")
+          + (explanationResult.shortened ? explanationResult.note : ""),
         raw: reportedRaw,
         candidate: {
           kind: "relationship", targetCode, evidenceIds, field, eventKind,
@@ -41590,12 +42273,13 @@ function CharacterContinuity(hook, incomingText) {
           : "");
       const severity = textOf(parts[5]).trim().toUpperCase();
       const explanationField = exactStateFieldValue(parts[6], "Explanation");
-      const explanation = wholeLine(explanationField.value, settings.MAX_OPERATION_EXPLANATION_CHARS);
+      const explanationResult = compactedExplanation(explanationField.value, settings.MAX_OPERATION_EXPLANATION_CHARS);
+      const explanation = explanationResult.value;
       if (!targetField || !destination || !["O", "M"].includes(severity)) {
         return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The View CCO record used an invalid target, destination, or O/M flag.", raw: line(raw, 300) };
       }
       if (!explanation || /[{}|\r\n]/.test(explanation)) {
-        return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The View explanation was empty, over " + settings.MAX_OPERATION_EXPLANATION_CHARS + " characters, or used reserved wrapper characters.", raw: line(raw, 300) };
+        return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The View explanation was empty or used reserved wrapper characters.", raw: line(raw, 300) };
       }
       if (keyOf(explanation) === "explanation") {
         return { story, candidate: null, malformed: true, hadProtocol: true, reason: "The View CCO record retained its uncompleted Explanation placeholder.", raw: line(raw, 300) };
@@ -41603,7 +42287,8 @@ function CharacterContinuity(hook, incomingText) {
       return {
         story, malformed: false, hadProtocol: true,
         reason: parsedCcoReason("CCO View record parsed.", routing) + protocolPresentationNote
-          + (explanationField.changed ? " The exact position-matched Explanation label was normalized." : ""),
+          + (explanationField.changed ? " The exact position-matched Explanation label was normalized." : "")
+          + (explanationResult.shortened ? explanationResult.note : ""),
         raw: reportedRaw,
         candidate: { kind: "view", targetField, evidenceIds, destination, severity, explanation }
       };
@@ -42090,7 +42775,7 @@ function CharacterContinuity(hook, incomingText) {
     const operationKind = keyOf(candidate && candidate.kind);
     const normalizedTarget = normalizedTargetKey(targetKey);
     const suppliedPacket = Array.isArray(plan.sourcePacket) ? plan.sourcePacket : [];
-    const suppliedById = {};
+    const suppliedById = Object.create(null);
     suppliedPacket.forEach(source => {
       const id = continuitySourceId(source && source.id);
       if (id) suppliedById[id] = source;
@@ -43643,6 +44328,17 @@ function CharacterContinuity(hook, incomingText) {
         : result;
     }
 
+    // Every sibling path guards this; only the create branch did not, so a buried
+    // View plus a fresh active one could coexist for the same owner and target.
+    // That pair permanently blocks future burial and makes Recovered reconcile
+    // against a memory that was supposed to be put away.
+    if (buriedRecord) {
+      return {
+        ok: false,
+        error: "A buried View of " + target.name + " already exists, so a second active View cannot be created."
+      };
+    }
+
     const result = transactViews(owner, ({ activePages }) => {
       const record = baseViewRecord(target, candidate.destination, candidate.explanation, false);
       const placed = placePlannedRecord(owner, false, activePages, record, 0);
@@ -43677,6 +44373,15 @@ function CharacterContinuity(hook, incomingText) {
 
   function buildContext() {
     resetLastForContext();
+    const frontMemory = beginFrontMemoryContext(originalText);
+    const commitFrontMemory = (instructionText, preparedContext = frontMemory.baseText) => {
+      return frontMemory.commit(instructionText, preparedContext);
+    };
+    if (!frontMemory.ok) {
+      CC.last.context = "Front Memory suffix could not be identified safely; Character Continuity made no context change.";
+      CC.last.error = "The current state.memory.frontMemory value was not found as the actual context suffix.";
+      return originalText;
+    }
     refreshViewsStore(false);
     refreshNamesStore();
     applyManagedNameForms();
@@ -43699,7 +44404,7 @@ function CharacterContinuity(hook, incomingText) {
       plan.taskDelivered = false;
       plan.activeKeys = [];
       CC.last.context = "Opening prompt retained; only its immediate automatic output will be suppressed.";
-      return originalText;
+      return commitFrontMemory("").text;
     }
     expireTemporaryState(CC.stateClock);
     if (!plan.retry && plan.inputEvidenceId && plan.inputEvidenceId !== CC.lastTimeJumpEvidenceId && TIME_JUMP.test(currentInput)) {
@@ -43745,7 +44450,7 @@ function CharacterContinuity(hook, incomingText) {
       plan.taskDelivered = false;
       CC.last.context = "No predetermined active NPC was detected.";
       recordGenuineContextPlan(plan, "no predetermined active NPC was detected");
-      return originalText;
+      return commitFrontMemory("").text;
     }
     CC.activeKeys = active.map(character => character.key);
     CC.focusKey = focus.key;
@@ -43807,12 +44512,20 @@ function CharacterContinuity(hook, incomingText) {
     freezeOperationSelection(plan, focus, scoringTargets, scoringSources, plan.inputEvidenceId || "", recent);
     }
 
-    const attempt = assembleContext(originalText, active, focus, currentInput, recent, plan);
+    const attempt = assembleContext(
+      frontMemory.baseText,
+      active,
+      focus,
+      currentInput,
+      recent,
+      plan,
+      frontMemory.externalFrontMemory
+    );
     if (!attempt.ok) {
       CC.last.effectiveBudget = Math.max(0, Number(attempt.effectiveBudget) || 0);
       CC.last.headroomTokens = CC.last.effectiveBudget;
       CC.last.recentStoryChars = Math.max(0, Number(attempt.recentChars) || 0);
-      CC.last.contextBaseChars = Math.max(0, Number(attempt.baseChars) || textOf(originalText).length);
+      CC.last.contextBaseChars = Math.max(0, Number(attempt.baseChars) || textOf(frontMemory.baseText).length);
       CC.last.contextMaxChars = Math.max(0, Number(attempt.maxChars) || 0);
       CC.last.cacheOverflowActive = attempt.cacheOverflowActive === true;
       CC.last.cacheOverflowUsedTokens = Math.max(0, Number(attempt.cacheOverflowUsedTokens) || 0);
@@ -43848,7 +44561,41 @@ function CharacterContinuity(hook, incomingText) {
       plan.sourcePacketTokens = 0;
       CC.modelActiveKeys = [];
       recordGenuineContextPlan(plan, attempt.reason || "the continuity packet could not fit safely");
+      return commitFrontMemory("").text;
+    }
+
+    const requestedFrontInstruction = textOf(attempt.frontTaskText);
+    const committedFrontMemory = commitFrontMemory(requestedFrontInstruction, attempt.text);
+    if (!committedFrontMemory.ok) {
+      plan.task = "none";
+      plan.taskDelivered = false;
+      plan.operationTaskText = "";
+      plan.operationTaskKind = "";
+      plan.operationTaskTokens = 0;
+      CC.last.context = "The operation was withheld because its Front Memory instruction could not be verified.";
+      CC.last.error = "Front Memory instruction verification failed; no operation was marked delivered.";
+      recordGenuineContextPlan(plan, "Front Memory instruction verification failed");
       return originalText;
+    }
+    const returnedBeforeFrontMemory = committedFrontMemory.frontMemory
+      ? committedFrontMemory.text.slice(0, committedFrontMemory.text.lastIndexOf(committedFrontMemory.frontMemory))
+      : committedFrontMemory.text;
+    const operationPacketVerified = !attempt.taskDelivered
+      || returnedBeforeFrontMemory.trimEnd().endsWith(textOf(attempt.taskText).trimEnd());
+    attempt.taskDelivered = attempt.taskDelivered
+      && committedFrontMemory.delivered
+      && operationPacketVerified;
+    if (requestedFrontInstruction && !attempt.taskDelivered) {
+      const restored = commitFrontMemory("", frontMemory.baseText);
+      plan.task = "none";
+      plan.taskDelivered = false;
+      plan.operationTaskText = "";
+      plan.operationTaskKind = "";
+      plan.operationTaskTokens = 0;
+      CC.last.context = "The operation was withheld because its ordinary Context packet and Front Memory instruction were not both verified.";
+      CC.last.error = "Operation delivery verification failed; no operation was marked delivered.";
+      recordGenuineContextPlan(plan, "operation delivery verification failed");
+      return restored.ok ? restored.text : originalText;
     }
 
     plan.task = attempt.taskDelivered ? "operation" : (CC.recoveryPending ? "recovery" : "none");
@@ -44000,10 +44747,11 @@ function CharacterContinuity(hook, incomingText) {
     CC.last.context = "Scene-relevant " + active.map(character => character.name).join(", ")
       + "; model-facing " + attempt.modelActive.map(character => character.name).join(", ")
       + "; focus " + focus.name + (attempt.taskDelivered
-        ? "; one " + operationKindLabel(attempt.taskKind) + " CCO task delivered."
+        ? "; one " + operationKindLabel(attempt.taskKind)
+          + " CCO task delivered with its mandatory instruction in Front Memory."
         : ".");
     recordGenuineContextPlan(plan, attempt.taskDelivered ? "" : attempt.taskDeferredReason);
-    return attempt.text;
+    return committedFrontMemory.text;
   }
 
   function candidateSourceLabel(sourceIds) {
@@ -44286,10 +45034,17 @@ function CharacterContinuity(hook, incomingText) {
         }
       }
 
-      CC.last.output = "No terminally punctuated story prose survived; no operation was applied and prose-only recovery remains pending.";
+      // Withholding the continuity bookkeeping here is right: an unfinished reply
+      // is not safe to derive state from. Deleting the prose is not. AI Dungeon
+      // truncates generations at the token limit routinely, so returning " " blanks
+      // the turn the player waited for and loses text no other copy of exists.
+      // Hand the prose back and leave recovery pending.
+      CC.last.output = story
+        ? "The response did not finish terminally punctuated prose, so it was delivered unchanged but no operation was applied and prose-only recovery remains pending."
+        : "No story prose survived; no operation was applied and prose-only recovery remains pending.";
       CC.last.error = "The response did not finish terminally punctuated story prose.";
       recordGenuineOutputResolution(plan);
-      return " ";
+      return story ? story : " ";
     }
 
     const nextGeneration = CC.visibleGenerationCount + 1;
@@ -44767,7 +45522,7 @@ function CharacterContinuity(hook, incomingText) {
 
   function provenanceStatusSnapshot(validate = true) {
     if (validate) refreshProvenanceActivity();
-    const counts = {};
+    const counts = Object.create(null);
     Object.keys(PROVENANCE_KINDS).forEach(prefix => {
       const records = CC.provenance.records.filter(record => record.id.charAt(0) === prefix);
       counts[prefix] = {
@@ -45195,6 +45950,7 @@ function CharacterContinuity(hook, incomingText) {
       ...wrapperMigrationDiagnostics,
       ...activeRosterDiagnostics,
       ...characterDiscoveryDiagnostics,
+      ...stateCardDiagnostics,
       ...storeSessionWarnings(),
       CC.last.warning,
       CC.last.error
@@ -45308,6 +46064,7 @@ function CharacterContinuity(hook, incomingText) {
       "Card title migration: " + (titleMigrationDiagnostics.join("; ") || "None"),
       "Card wrapper migration: " + (wrapperMigrationDiagnostics.join("; ") || "None"),
       "Identity discovery: " + (characterDiscoveryDiagnostics.join("; ") || "None"),
+      "State cards: " + (stateCardDiagnostics.join("; ") || "None"),
       "Outer: " + (characters.map(outerStatus).join("; ") || "None"),
       "Names: " + (nameIdentities.map(namesStatus).join("; ") || "None"),
       "Names pages: " + ((namesStore && namesStore.pageStats || []).join("; ") || "None"),
@@ -45420,33 +46177,70 @@ function CharacterContinuity(hook, incomingText) {
     )));
   }
 
+  // The platform supplies no safety net: an uncaught throw in any hook breaks the
+  // player's turn outright. Every branch below degrades to passing the platform's
+  // own text through untouched, which is always a valid result for every hook --
+  // for contextAppend it is trivially append-only, so the cache contract holds.
+  function hookFailure(error) {
+    const detail = textOf(error && error.message ? error.message : error);
+    try {
+      CC.last.error = "The " + hook + " hook failed and its continuity work was withheld: "
+        + line(detail, 300);
+      writeStatusCard();
+    } catch (ignored) {
+      // State may be too damaged to report through; passing the text through still matters.
+    }
+    return finish(originalText);
+  }
+
   if (hook === "input") {
-    beginInput(originalText);
-    writeAllStateCards();
-    writeStatusCard();
+    try {
+      clearOwnedFrontMemoryState();
+      beginInput(originalText);
+      writeAllStateCards();
+      writeStatusCard();
+    } catch (error) {
+      return hookFailure(error);
+    }
     return finish(originalText);
   }
 
   if (hook === "context" || hook === "contextAppend") {
-    let result = buildContext();
-    if (appendOnlyContext && !textOf(result).startsWith(textOf(originalText))) {
-      CC.last.context = "Cache-compatible append guard preserved the original platform context.";
-      CC.last.error = "The context result was not append-only, so its continuity addition was withheld.";
-      result = originalText;
+    let result;
+    try {
+      result = buildContext();
+      if (appendOnlyContext && !textOf(result).startsWith(textOf(originalText))
+        && !frontMemoryContextVerified) {
+        CC.last.context = "Cache-compatible append guard preserved the original platform context.";
+        CC.last.error = "The context result was not append-only, so its continuity addition was withheld.";
+        result = originalText;
+      }
+      writeAllStateCards();
+      writeStatusCard();
+    } catch (error) {
+      return hookFailure(error);
     }
-    writeAllStateCards();
-    writeStatusCard();
     return finish(result);
   }
 
   if (hook === "output") {
-    const result = processOutput(originalText);
-    writeAllStateCards();
-    writeStatusCard();
+    let result;
+    try {
+      clearOwnedFrontMemoryState();
+      result = processOutput(originalText);
+      writeAllStateCards();
+      writeStatusCard();
+    } catch (error) {
+      return hookFailure(error);
+    }
     return finish(result);
   }
 
-  writeStatusCard();
+  try {
+    writeStatusCard();
+  } catch (error) {
+    return hookFailure(error);
+  }
   return finish(originalText);
 }
 
@@ -45456,9 +46250,9 @@ function CharacterContinuity(hook, incomingText) {
       return { text: CharacterContinuity("input", currentText) };
     }
     if (tab === "context") {
-      // The new CC release supplies an append-only cache-compatible hook.
-      // Use it only when the host is composing multiple Context proposals;
-      // standalone/Legacy Exact retains CC's original context hook.
+      // CC v2.02 supplies an append-only cache-compatible hook with owned
+      // Front Memory handling. Use it when MMS is composing Context proposals;
+      // standalone/Legacy Exact retains CC's ordinary context hook.
       const hookName = (
         MCPV5_ACTIVE_PLAN &&
         MCPV5_ACTIVE_PLAN.cooperative
@@ -46400,6 +47194,8 @@ const RM = (function () {
       replyGen: 0,        // generations it has waited; more than one is late
       cmdTurn: false,     // this generation answers a command, so it will not tick
       pend: [],           // notices waiting for the next command answer
+      answerHistory: [],  // exact delivered command answers, capped
+      commandHistory: [], // exact LM commands whose story echoes may be scrubbed
       cfgWarned: false,   // config problems have been noticed once
       fired: {},          // trigger keys already counted this turn
       over: {},        // player overrides parsed from the story card
@@ -46434,6 +47230,18 @@ const RM = (function () {
     if (typeof raw.cmdTurn === "boolean") s.cmdTurn = raw.cmdTurn;
     if (Array.isArray(raw.pend)) {
       s.pend = raw.pend.filter((n) => typeof n === "string").slice(-PEND_MAX);
+    }
+    if (Array.isArray(raw.answerHistory)) {
+      s.answerHistory = raw.answerHistory
+        .filter((n) => typeof n === "string" && n.trim())
+        .map((n) => n.replace(/\r/g, "").trim().slice(0, 6000))
+        .slice(-8);
+    }
+    if (Array.isArray(raw.commandHistory)) {
+      s.commandHistory = raw.commandHistory
+        .filter((n) => typeof n === "string" && n.trim())
+        .map((n) => n.trim().slice(0, 300))
+        .slice(-12);
     }
     if (typeof raw.cfgWarned === "boolean") s.cfgWarned = raw.cfgWarned;
     if (raw.fired && typeof raw.fired === "object") s.fired = raw.fired;
@@ -46797,6 +47605,26 @@ const RM = (function () {
 
   // How many generations an undelivered answer may wait for an Output hook.
   const REPLY_MAX_GEN = 3;
+  const ANSWER_HISTORY_MAX = 8;
+  const COMMAND_HISTORY_MAX = 12;
+
+  function rememberCommand(s, raw) {
+    const command = stripPrefix(raw);
+    if (!command) return;
+    if (s.commandHistory[s.commandHistory.length - 1] !== command) {
+      s.commandHistory.push(command.slice(0, 300));
+      while (s.commandHistory.length > COMMAND_HISTORY_MAX) s.commandHistory.shift();
+    }
+  }
+
+  function rememberAnswer(s, raw) {
+    const answer = String(raw || "").replace(/\r/g, "").trim().slice(0, 6000);
+    if (!answer) return;
+    if (s.answerHistory[s.answerHistory.length - 1] !== answer) {
+      s.answerHistory.push(answer);
+      while (s.answerHistory.length > ANSWER_HISTORY_MAX) s.answerHistory.shift();
+    }
+  }
 
   function notice(s, msg) {
     if (!s || !msg) return;
@@ -46950,7 +47778,11 @@ const RM = (function () {
     const p = RM_CONFIG.commandPrefix;
     const t = stripPrefix(raw);
     if (!t.startsWith(p)) return false;
-    return t.slice(p.length).trim().length > 0;
+    const body = t.slice(p.length).trim();
+    if (!body) return false;
+    const cmd = body.split(/\s+/)[0].toLowerCase();
+    if (["help", "status", "set", "reset"].includes(cmd)) return true;
+    return !!def(cmd);
   }
 
   // Returns a message string if the input was a command, else null.
@@ -47020,7 +47852,9 @@ const RM = (function () {
       return `${e.label}: ${Math.round(r.before)} → ${Math.round(r.after)}/${Math.round(e.max)}`;
     }
 
-    return `Unknown command "${cmd}". Type ${p}help.`;
+    // MMS compatibility: do not consume slash commands owned by another
+    // module. Unknown Living Meters commands therefore fall through unchanged.
+    return null;
   }
 
   // ---- band-change announcements -----------------------------------------
@@ -47058,68 +47892,77 @@ const RM = (function () {
 
   // ---- keeping our own answers out of the AI's context --------------------
 
-  // A command answers as story output, so the answer lands in the history and
-  // comes back inside the context window on every turn after it. Left there,
-  // the model reads a table of numbers while the directive is telling it never
-  // to state the numbers, and it starts reciting meters instead of playing
-  // them. Take our own lines back out before the model sees them.
-  //
-  // Matched by shape, not by a hidden marker. The host runs its own filters
-  // over the answer after we return it - one of them collapses runs of spaces -
-  // so nothing invisible we stamp on the text is guaranteed to survive the
-  // round trip. A bar is unmistakable, and the rest is keyed on the labels this
-  // scenario actually configures, so it cannot fire on ordinary prose.
-  const BAR_ROW = /[\u2588\u2591]{3,}/;
-
-  function answerShapes(s) {
-    const labels = defs()
-      .map((d) => escapeRe(eff(s, d).label))
-      .filter(Boolean)
-      .join("|");
-    const p = escapeRe(RM_CONFIG.commandPrefix || "/");
-    return {
-      // "Hull: critical", "Hull: 100 -> 90/100", "Hull: 90/100 (damaged)",
-      // with or without the icon in front.
-      labelled: labels ? new RegExp("^(?:\\S+\\s+)?(?:" + labels + "):\\s") : null,
-      help: new RegExp("^" + p + "\\S*\\s"),
-    };
+  // MMS keeps a capped ledger of the exact command answers it actually
+  // delivered. Only those exact blocks, plus exact LM command echoes, are
+  // removed from Recent Story. This avoids treating ordinary prose beginning
+  // with a resource label (for example "Hull: ...") as machine output.
+  function exactTrimmedLines(value) {
+    return String(value || "")
+      .replace(/\r/g, "")
+      .split("\n")
+      .map((line) => line.trim());
   }
 
-  function isOwnAnswer(line, shapes) {
-    const t = line.trim();
-    if (!t) return false;
-    if (BAR_ROW.test(t)) return true;                      // a status row
-    if (shapes.help.test(t)) return true;                  // a /help row
-    if (shapes.labelled && shapes.labelled.test(t)) return true;
-    if (t === "Meters reset." || t === "Your settings:") return true;
-    if (t.indexOf("Living Meters") === 0) return true;     // a card or config notice
-    if (t.indexOf('Unknown command "') === 0) return true;
-    // And the action that asked for it. Left on its own, with the answer taken
-    // out from under it, it is an order the model can see nobody answered.
-    if (stripPrefix(t).indexOf(RM_CONFIG.commandPrefix || "/") === 0) return true;
-    return false;
+  function removeExactAnswerBlocks(lines, block) {
+    const wanted = exactTrimmedLines(block);
+    while (wanted.length && !wanted[0]) wanted.shift();
+    while (wanted.length && !wanted[wanted.length - 1]) wanted.pop();
+    if (!wanted.length || wanted.length > lines.length) return 0;
+
+    let removed = 0;
+    for (let i = 0; i <= lines.length - wanted.length;) {
+      let match = true;
+      for (let j = 0; j < wanted.length; j++) {
+        if (lines[i + j].trim() !== wanted[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (!match) {
+        i += 1;
+        continue;
+      }
+      lines.splice(i, wanted.length);
+      removed += wanted.length;
+    }
+    return removed;
   }
 
   function scrubAnswers(s, text) {
     if (!RM_CONFIG.hideAnswersFromAI) return text;
     const src = typeof text === "string" ? text : "";
-    // Only inside the story itself. Story cards, the summary and the memory
-    // bank are somebody else's to edit.
     const m = src.match(/(^|\n)Recent\s*Story\s*:[ \t]*\n/i);
     if (!m) return src;
 
     const cut = m.index + m[0].length;
-    const shapes = answerShapes(s);
-    const kept = [];
+    const lines = src.slice(cut).split("\n");
     let removed = 0;
-    for (const line of src.slice(cut).split("\n")) {
-      if (isOwnAnswer(line, shapes)) { removed += 1; continue; }
-      kept.push(line);
+
+    const answers = Array.isArray(s.answerHistory)
+      ? s.answerHistory.slice(-ANSWER_HISTORY_MAX)
+      : [];
+    for (const answer of answers) {
+      removed += removeExactAnswerBlocks(lines, answer);
     }
+
+    const commands = new Set(
+      (Array.isArray(s.commandHistory) ? s.commandHistory : [])
+        .slice(-COMMAND_HISTORY_MAX)
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    );
+
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const normalized = stripPrefix(lines[i]);
+      if (commands.has(normalized)) {
+        lines.splice(i, 1);
+        removed += 1;
+      }
+    }
+
     if (!removed) return src;
-    dbg("scrubbed", removed, "of our own lines out of the context");
-    // Each removed row leaves a hole, and a whole table leaves a crater.
-    return src.slice(0, cut) + kept.join("\n").replace(/\n{3,}/g, "\n\n");
+    dbg("scrubbed", removed, "exact Living Meters history lines");
+    return src.slice(0, cut) + lines.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
   // ---- hook entry points --------------------------------------------------
@@ -47142,6 +47985,7 @@ const RM = (function () {
 
       const reply = handleCommand(s, out);
       if (reply !== null) {
+        rememberCommand(s, out);
         // Commands answer as the story output: the Output hook puts this in
         // place of the AI's response, so the answer reaches the player through
         // the story itself and the module never writes state.message.
@@ -47255,6 +48099,7 @@ const RM = (function () {
       if (pending && !late) {
         s.fired = {};
         const answer = compose(s, pending);
+        rememberAnswer(s, answer);
         persist(s);
         return answer;
       }
@@ -47278,6 +48123,7 @@ const RM = (function () {
       // story just crossed is reported in the same breath.
       if (pending) {
         const answer = compose(s, pending);
+        rememberAnswer(s, answer);
         persist(s);
         return out.trim() ? out + "\n\n" + answer : answer;
       }
@@ -47334,8 +48180,19 @@ const RM = (function () {
 
   function run(tab) {
     const currentText = MCPV5SafeText(globalThis.text, "\u200B");
+    const beforeFrontMemory = (
+      state.memory &&
+      typeof state.memory === "object" &&
+      !Array.isArray(state.memory) &&
+      typeof state.memory.frontMemory === "string"
+    ) ? state.memory.frontMemory : "";
+
     if (tab === "input") {
-      return { text: MCPV5SafeText(RM.input(currentText), currentText) };
+      const result = { text: MCPV5SafeText(RM.input(currentText), currentText) };
+      if (RM_CONFIG.inject === "frontMemory") {
+        MCPV5NormalizeLivingMetersFrontMemory(beforeFrontMemory);
+      }
+      return result;
     }
     if (tab === "context") {
       const result = RM.context(currentText, globalThis.stop === true);
@@ -47343,12 +48200,19 @@ const RM = (function () {
         ? MCPV5SafeText(result[0], currentText)
         : currentText;
       const nextStop = !!(Array.isArray(result) && result[1] === true);
+      if (RM_CONFIG.inject === "frontMemory") {
+        MCPV5NormalizeLivingMetersFrontMemory(beforeFrontMemory);
+      }
       return nextStop
         ? { text: nextText, stop: true }
         : { text: nextText };
     }
     if (tab === "output") {
-      return { text: MCPV5SafeText(RM.output(currentText), currentText) };
+      const result = { text: MCPV5SafeText(RM.output(currentText), currentText) };
+      if (RM_CONFIG.inject === "frontMemory") {
+        MCPV5NormalizeLivingMetersFrontMemory(beforeFrontMemory);
+      }
+      return result;
     }
     return { text: currentText };
   }
@@ -50546,7 +51410,7 @@ function MCPV5StripRealmHeartContextLeak(value, plan) {
     );
     return cleaned;
   } catch (error) {
-    log("MCP V5.3.8 RealmHeart leak guard error:", error);
+    log("MCP V5.3.9.1 RealmHeart leak guard error:", error);
     return original;
   }
 }
@@ -50674,7 +51538,7 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
       MCPV5Name(id) + " / " + tab + " / " +
       String(error && error.message ? error.message : error)
     );
-    log("MCP V5.3.8 module error:", MCPV5Name(id), tab, error);
+    log("MCP V5.3.9.1 module error:", MCPV5Name(id), tab, error);
     return { text: original, __mcpOk: false };
   } finally {
     MCPV5RestoreModuleGlobals(globalSnapshot);
@@ -50745,24 +51609,13 @@ function MCPV5CleanupRemovedModulesOnce() {
   if (!root.migrations || typeof root.migrations !== "object") {
     root.migrations = {};
   }
-  if (root.migrations.removedSlowBurnAndFirewall === true) return;
 
-  // Slow Burn is no longer installed. Remove only its exact dynamic marker so
-  // an old adventure does not keep receiving stale Companion State guidance.
-  if (
-    state.memory &&
-    typeof state.memory === "object" &&
-    !Array.isArray(state.memory) &&
-    typeof state.memory.authorsNote === "string"
-  ) {
-    const cleaned = state.memory.authorsNote
-      .replace(/(?:^|\n)\s*\[Companion's State:[^\]\r\n]*\]\s*(?=\n|$)/gi, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    state.memory.authorsNote = cleaned;
+  // Slow Burn is installed again. V5.3.9 could still run the older one-time
+  // removal migration and delete a legitimate user/Slow-Burn State marker.
+  // Retire that migration without mutating Author's Note.
+  if (root.migrations.removedSlowBurnAndFirewall !== true) {
+    root.migrations.removedSlowBurnAndFirewall = true;
   }
-
-  root.migrations.removedSlowBurnAndFirewall = true;
 }
 
 function MCPV5Run(tab, incomingText) {
@@ -50833,7 +51686,24 @@ function MCPV5Run(tab, incomingText) {
     for (let i = 0; i < order.length; i++) {
       const id = order[i];
       const before = current;
+      const messageBeforeExists = Object.prototype.hasOwnProperty.call(state, "message");
+      const messageBefore = messageBeforeExists ? state.message : undefined;
+      const sharedRecordStart = sharedRecords.length;
       const result = execute(id, current);
+      const moduleSharedAfter = (
+        plan.cooperative &&
+        sharedRecords.length > sharedRecordStart
+      ) ? sharedRecords[sharedRecords.length - 1].after : null;
+      const messageAfterExists = moduleSharedAfter
+        ? moduleSharedAfter.messageExists
+        : Object.prototype.hasOwnProperty.call(state, "message");
+      const messageAfter = moduleSharedAfter
+        ? moduleSharedAfter.message
+        : (messageAfterExists ? state.message : undefined);
+      const messageChanged = (
+        messageAfterExists !== messageBeforeExists ||
+        messageAfter !== messageBefore
+      );
       if (
         result &&
         result.__mcpOk === true &&
@@ -50856,18 +51726,44 @@ function MCPV5Run(tab, incomingText) {
 
         if (
           tab === "input" &&
+          id === "living_meters" &&
+          state.RM &&
+          typeof state.RM === "object" &&
+          typeof state.RM.reply === "string" &&
+          state.RM.reply.trim()
+        ) {
+          // LM's command lifecycle deliberately leaves Input unchanged and
+          // stores its answer for Output, so the legacy command-owner heuristic
+          // cannot see it. Claim the command only after LM actually queued a
+          // reply; unknown slash commands remain unclaimed.
+          schedule.commandOwner = "living_meters";
+          schedule.controlOutput = "living_meters";
+        } else if (
+          tab === "input" &&
           /^\s*\//.test(original) &&
           !schedule.commandOwner &&
           (
             result.stop === true ||
             current !== before ||
             (
-              typeof state.message === "string" &&
-              state.message.trim()
+              messageChanged &&
+              typeof messageAfter === "string" &&
+              messageAfter.trim()
             )
           )
         ) {
           schedule.commandOwner = id;
+        }
+
+        if (
+          tab === "input" &&
+          id === "living_meters" &&
+          schedule.commandOwner === "living_meters"
+        ) {
+          // A recognized LM command is control input. Do not let unrelated
+          // narrative modules interpret it as story prose or start a protected
+          // model task on the generation whose response will be discarded.
+          break;
         }
 
         if (result.stop === true) {
@@ -50877,7 +51773,22 @@ function MCPV5Run(tab, incomingText) {
       }
     }
   } else if (tab === "context") {
-    if (transaction) {
+    if (
+      !transaction &&
+      schedule &&
+      schedule.commandOwner === "living_meters" &&
+      order.includes("living_meters")
+    ) {
+      const result = execute("living_meters", original);
+      if (
+        result &&
+        result.__mcpOk === true &&
+        typeof result.text === "string"
+      ) {
+        current = MCPV5FitContext(result.text, original);
+        stopped = result.stop === true;
+      }
+    } else if (transaction) {
       const result = execute(transaction.owner, original);
       if (
         result &&
@@ -50943,7 +51854,30 @@ function MCPV5Run(tab, incomingText) {
           );
     }
   } else if (tab === "output") {
-    if (transaction) {
+    // A Living Meters command reply is control output, not narrative. Run only
+    // LM for this stage so protocol consumers, AR/USC-E, Slow Burn and
+    // Dice/Coin cannot inspect or rewrite a response that will be discarded.
+    if (
+      !transaction &&
+      schedule &&
+      schedule.commandOwner === "living_meters" &&
+      order.includes("living_meters")
+    ) {
+      const result = execute("living_meters", original);
+      if (
+        result &&
+        result.__mcpOk === true &&
+        typeof result.text === "string"
+      ) {
+        current = MCPV5ApplyOutputGuard(
+          "living_meters",
+          result.text,
+          original,
+          original
+        );
+        stopped = result.stop === true;
+      }
+    } else if (transaction) {
       const result = execute(transaction.owner, original);
       if (
         result &&
@@ -51177,5 +52111,5 @@ function MCPV5Run(tab, incomingText) {
 try {
   MCPV5SyncControls();
 } catch (error) {
-  log("MCP V5.3.8 initialization error:", error);
+  log("MCP V5.3.9.1 initialization error:", error);
 }
