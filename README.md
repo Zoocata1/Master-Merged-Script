@@ -9,6 +9,11 @@
 <details>
 <summary><b>(click to expand)</b></summary>
 
+### 5.3.9.1
+- Updated Character Continuity to v2.02
+- Fixed ```/AC``` routing Auto-Cards commands
+- Fixed bad ```state.message``` causing the wrong module to claim slash commands. 
+
 ### 5.3.8
 - Added Dice-Roll Script
 - Added Coin Toss Script
