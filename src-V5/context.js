@@ -1,4 +1,4 @@
-// MASTER SCRIPT V5.3.7 — Context
+// MASTER SCRIPT V5.3.9 — Context
 const modifier = (text) => {
   const original = (
     typeof text === "string" && text.length
