@@ -9,6 +9,16 @@
 <details>
 <summary><b>(click to expand)</b></summary>
 
+### 5.4.0
+- All 16 scripts work together more smoothly, with fewer conflicts.
+- Resolved an issue that could prevent Auto-Cards from working alongside certain scripts.
+- Improved how scripts share processing time to reduce slowdowns.
+- Fixed conflicts where one script could accidentally interfere with another script's commands.
+- Added a helpful warning when gambling is not enabled for RealmHeart
+- Improved how scripts share story information without overwriting each other.
+- Scripts are less likely to miss important updates when several are running.
+- Added better ways to identify and troubleshoot problems.
+- 
 ### 5.3.9.1
 - Updated Character Continuity to v2.02
 - Fixed ```/AC``` routing Auto-Cards commands
