@@ -18,7 +18,7 @@
 - Improved how scripts share story information without overwriting each other.
 - Scripts are less likely to miss important updates when several are running.
 - Added better ways to identify and troubleshoot problems.
-- 
+  
 ### 5.3.9.1
 - Updated Character Continuity to v2.02
 - Fixed ```/AC``` routing Auto-Cards commands
