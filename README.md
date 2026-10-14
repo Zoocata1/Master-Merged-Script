@@ -2,7 +2,8 @@
  <img width="1500" height="500" alt="giphy (2)" src="https://github.com/user-attachments/assets/ded0c400-1c05-4910-abc8-42133b21e05d" />
 </p>
 
-# MASTER MERGED SCRIPT V5 [Access Here](./src-V5/library.js)
+# MASTER MERGED SCRIPT V5 
+[Access Here](./src-V5/)
 
 ## Changelog
 
