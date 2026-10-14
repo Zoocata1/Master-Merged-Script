@@ -81,13 +81,11 @@
 
 ---
 
-## TLDR
+## WHAT IS MASTER MERGED SCRIPT?
 
-Master Merged Script V4 is a collection of some of the best scripts in AI Dungeon to grace us with awesome capabilities and game changing mechanics. MMSv4 serves as a 'Glass Case Museum' by gathering them all and presenting them, to YOU, for easy use.
+Master Merged Script V4 is a collection of some of the best scripts in AI Dungeon to grace us with awesome capabilities and game changing mechanics. MMSv4 serves as a 'Glass Case Museum' by gathering them all and presenting them, to YOU, for easy use of your 1 choice. However, they're not meant to be enabled all at once. It could cause conflicts and game breaking issues. 
 
-MMS Version 5 is a current work in progress. V5 aims to merge all current scripts into 1 seamless script providing all functions without the conflicts.
-
-FULL DISCLAIMER: Enabling all scripts, at the same time, CAN and/or WILL cause unintended outputs or errors. For Now... 
+MMS Version 5 is the remedy to version 4. V5 aims to merge all current scripts into 1 seamless script providing all functions without the conflicts but does require modifcation of the original scripts. It will look the same, Story Cards and Functionality wise, but the backend will be greatly reconfigured.
 
 ---
 
