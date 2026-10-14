@@ -1,11 +1,11 @@
-// MASTER SCRIPT V5.3.9 — Context
+// MASTER SCRIPT V5.4.0 — Input
 const modifier = (text) => {
   const original = (
     typeof text === "string" && text.length
   ) ? text : "\u200B";
 
   try {
-    const result = MCPV5Run("context", original);
+    const result = MCPV5Run("input", original);
     if (
       result &&
       typeof result === "object" &&
@@ -18,7 +18,7 @@ const modifier = (text) => {
     }
     return { text: original };
   } catch (error) {
-    log("MCP V5.3.3 context error:", error);
+    log("MCP V5.4.0 input error:", error);
     return { text: original };
   }
 }
