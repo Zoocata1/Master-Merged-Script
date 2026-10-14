@@ -1,14 +1,13 @@
 /* ============================================================
-   MASTER SCRIPT V5.3.9.1
+   MASTER SCRIPT V5.4.0 — MAJOR QOL UPDATE
    --- Please enjoy ---
    --- Thank you for all your hard work and feedback ---
-   --- Final edition unless updates are pushed from creators ---
    ============================================================ */
 
 const MCPV5_VERSION = 5;
 const MCPV5_SCHEMA_VERSION = 3;
-const MCPV5_BUILD_VERSION = "5.3.9.1";
-const MCPV5_PATCH = "5.3.9.1-command-owner-safety";
+const MCPV5_BUILD_VERSION = "5.4.0";
+const MCPV5_PATCH = "5.4.0-host-safe-optimization";
 const MCPV5_CARD_KEYS = "__MCP_EXACT_SCRIPT_COLLECTION__";
 const MCPV5_CARD_TITLE = "⚙️ Master Script Control Panel";
 const MCPV5_CARD_TYPE = "_MCP_V5_";
@@ -446,6 +445,18 @@ function MCPV5HashString(value) {
 
 function MCPV5CloneStateValue(value, maxChars) {
   try {
+    // Fast-path immutable JSON primitives. Keep a conservative escaped-string
+    // bound so this never bypasses the original serialized-size limit.
+    const cap = Number.isFinite(maxChars) ? maxChars : 300000;
+    if (value === null || typeof value === "boolean") {
+      return { ok: true, value };
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return { ok: true, value };
+    }
+    if (typeof value === "string" && value.length * 6 + 2 <= cap) {
+      return { ok: true, value };
+    }
     const json = JSON.stringify(value);
     if (
       typeof json !== "string" ||
@@ -1156,7 +1167,7 @@ function MCPV5CanonicalEntry(enabled, settings, plan, status) {
     "╔══════════════════════════════════════════════════════╗",
     "║              MASTER SCRIPT CONTROL PANEL             ║",
     "╚══════════════════════════════════════════════════════╝",
-    "Build 5.3.9.1  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
+    "Build 5.4.0  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
     "",
     "⚡ QUICK ACTIONS",
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1577,6 +1588,7 @@ function MCPV5HideFromStoryCardExtension(card) {
   if (keys === MCPV5_CARD_KEYS || title === MCPV5_CARD_TITLE) return true;
   if (keys === "%RM%" || title === "⚙️ Living Meters") return true;
   if (keys === "[CONFIG] Banned words") return true;
+  if (lowerTitle === "gambling hall" && String(card.type || "").toLowerCase() === "realmheart") return true;
   if (
     typeof card.entry === "string" &&
     card.entry.includes("Evolution Stages") &&
@@ -2738,6 +2750,34 @@ function MCPV5CommitSharedState(base, records, plan) {
   }
 }
 
+function MCPV5TrackSharedMemoryOwnership(base, records) {
+  if (!base || !Array.isArray(records) || !records.length) return;
+  const root = MCPV5Root();
+  const memory = state.memory && typeof state.memory === "object"
+    ? state.memory : {};
+  const previous = root.memoryOwnership &&
+    typeof root.memoryOwnership === "object" ? root.memoryOwnership : {};
+  const next = {};
+  for (const field of ["context", "authorsNote", "frontMemory"]) {
+    const baseline = base.memory && typeof base.memory[field] === "string"
+      ? base.memory[field] : "";
+    const contributors = [];
+    for (const record of records) {
+      const snap = record && record.after;
+      if (!snap || !snap.memory || typeof snap.memory[field] !== "string") continue;
+      if (snap.memory[field] !== baseline && !contributors.includes(record.id)) {
+        contributors.push(record.id);
+      }
+    }
+    next[field] = contributors.length ? {
+      action: Number.isFinite(info && info.actionCount) ? info.actionCount : -1,
+      contributors: contributors.slice(0, 16),
+      committedHash: MCPV5HashString(memory[field] || "")
+    } : previous[field] || null;
+  }
+  root.memoryOwnership = next;
+}
+
 function MCPV5FitContext(candidate, before) {
   const next = MCPV5SafeText(candidate, before);
   if (!Number.isFinite(info && info.maxChars) || info.maxChars < 500) {
@@ -2840,7 +2880,7 @@ function MCPV5RecordDiagnostic(kind, data) {
   root.diagnostics.push(row);
   root.diagnostics = root.diagnostics.slice(-30);
   if (root.settings && root.settings.diagnostics) {
-    log("MCP V5.3.9.1", row.kind, row.data);
+    log("MCP V5.3.10", row.kind, row.data);
   }
 }
 
@@ -3306,7 +3346,11 @@ function MCPV5EligibleModules(plan) {
     const id = MCPV5_PROFILE_ORDER[i];
     if (!plan || !plan.effective || plan.effective[id] !== true) continue;
     if (plan.dependencyOnly && plan.dependencyOnly[id]) continue;
-    if (id === "auto_cards" && plan.effective.inner_self === true) continue;
+    if (
+      id === "auto_cards" &&
+      plan.effective.inner_self === true &&
+      !(plan.dependencyOnly && plan.dependencyOnly.inner_self)
+    ) continue;
     if (
       (id === "dice_roll" || id === "coin_flip") &&
       id !== plan.outcomeRollAuthority
@@ -3324,10 +3368,111 @@ function MCPV5LooksLikeLivingMetersSlashInput(value) {
   return /^\/\S+/.test(text);
 }
 
+function MCPV5LooksLikeRealmHeartSlashInput(inputText) {
+  // Follow v2.5's Input normalization. /help remains intentionally ambiguous.
+  const clean = String(inputText || "")
+    .replace(/^[>\s]+/, "")
+    .replace(/^you\s+/i, "")
+    .replace(/^say,?\s+/i, "")
+    .replace(/^["']+/, "")
+    .trim();
+  const slash = clean.indexOf("/");
+  if (slash < 0 || slash >= 4) return false;
+  return /^(?:rh\s+|ubis\s+|balance\b|inventory\b|ledger\b|time\b|weather\b|holidays\b|events\b|keywords\b|pay\s+|earn\s+|additem\s+|removeitem\s+|jackpot\s+start\b|coinflip\s+start\b|dice\s+start\b|highstakes\s+start\b|gamble\s+end\b)/i.test(clean.slice(slash + 1));
+}
+
+function MCPV5CommandHint(value, plan) {
+  const effective = plan && plan.effective ? plan.effective : {};
+  let clean = String(value || "")
+    .replace(/^\s*>\s*/, "")
+    .replace(/^you\s+/i, "")
+    .replace(/^say,?\s+/i, "")
+    .replace(/^["'“”]+/, "")
+    .trim();
+  // Original Auto-Cards also accepts the older AC/ spelling in Story actions.
+  if (/^(?:\/ac(?:\s|\/|$)|ac\/(?:\s|$))/i.test(clean)) {
+    if (effective.inner_self === true &&
+        !(plan.dependencyOnly && plan.dependencyOnly.inner_self)) {
+      return "inner_self";
+    }
+    if (effective.auto_cards === true) return "auto_cards";
+  }
+  if (effective.realmheart === true &&
+      MCPV5LooksLikeRealmHeartSlashInput(value)) return "realmheart";
+  // /help, /inventory and user-defined meter commands can be shared. Do not
+  // preclaim or reinterpret them; original source handlers remain authoritative.
+  if (effective.living_meters === true &&
+      /^\/status(?:\s|$)/i.test(clean)) return "living_meters";
+  return "";
+}
+
+function MCPV5CommandAmbiguous(value, plan) {
+  if (!plan || !plan.effective) return false;
+  const clean = String(value || "").replace(/^[>\s"'“”]+/, "").trim();
+  return /^\/(?:help|inventory)(?:\s|$)/i.test(clean) &&
+    [plan.effective.living_meters, plan.effective.realmheart,
+     plan.effective.auto_cards, plan.effective.inner_self]
+       .filter(Boolean).length > 1;
+}
+
+function MCPV5LooksLikeRealmHeartGambleAction(inputText) {
+  const raw = String(inputText || "").trim();
+  const wager = /\b(?:bet|gamble|wager|stake|risk|throw down|lay down|place a bet|quit|stop|end|give up)\b/i.test(raw);
+  if (!wager) return false;
+  const ubis = state && state.ubis;
+  if (ubis && typeof ubis === "object" &&
+      typeof ubis.activeGamble === "string" && ubis.activeGamble.length) {
+    return true;
+  }
+  return /\b(?:coin\s*flip|coinflip|jackpot|dice|high\s*stakes|highstakes)\b/i.test(raw);
+}
+
+function MCPV5RealmHeartCommandReply(value) {
+  return typeof value === "string" &&
+    value.startsWith("=== REALMHEART ===\n") &&
+    value.includes("\n=== END ===");
+}
+
+function MCPV5RealmHeartControlFeedback(inputText, reply) {
+  const source = MCPV5SafeText(reply, " ");
+  try {
+    const ubis = state.ubis;
+    if (
+      !ubis || !ubis.settings ||
+      ubis.settings.gamblingEnabled !== false ||
+      !MCPV5LooksLikeRealmHeartSlashInput(inputText) ||
+      !/\/(?:jackpot|coinflip|dice|highstakes)\s+start\b/i.test(String(inputText || "")) ||
+      !MCPV5RealmHeartCommandReply(source)
+    ) return source;
+    const warning = "Gambling Auto is OFF. Enable Gambling auto in RealmHeart settings to resolve wagers.";
+    if (source.includes(warning)) return source;
+    const marker = "\n=== END ===";
+    const at = source.lastIndexOf(marker);
+    if (at < 0) return source;
+    return source.slice(0, at) + "\n" + warning + source.slice(at);
+  } catch {
+    return source;
+  }
+}
+
+function MCPV5RealmHeartReplyForAction(root, schedule) {
+  const record = root && root.realmheartCommand;
+  return record &&
+    record.signature === (schedule && schedule.signature) &&
+    record.action === (schedule && schedule.action) &&
+    typeof record.reply === "string" &&
+    record.reply.length
+      ? record.reply
+      : "";
+}
+
 function MCPV5BuildActionSchedule(plan, settings, inputText) {
   const root = MCPV5Root();
   const eligible = MCPV5EligibleModules(plan);
+  // RealmHeart advances world time and recurring bills; unlike a lightweight
+  // observer it must be scheduled on every ordinary narrative lifecycle.
   const fixedOutput = eligible.filter(id => (
+    id === "realmheart" ||
     id === "ar" ||
     id === "usc_e" ||
     id === "slow_burn" ||
@@ -3341,6 +3486,16 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
   const rotated = ordinary
     .slice(cursor)
     .concat(ordinary.slice(0, cursor));
+  // Oldest deferred work goes first, but never bypasses the hook budget.
+  const heartbeat = root.scheduler && root.scheduler.heartbeat;
+  const aged = rotated.map((id, index) => ({
+    id, index,
+    streak: heartbeat && heartbeat[id] &&
+      Number.isFinite(heartbeat[id].deferStreak)
+      ? Math.min(100, heartbeat[id].deferStreak) : 0
+  }));
+  aged.sort((a, b) => b.streak - a.streak || a.index - b.index);
+  const prioritized = aged.map(record => record.id);
 
   let selected = rotated.slice();
   const skipped = [];
@@ -3359,15 +3514,15 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     )
   };
 
-  if (plan.cooperative && settings.workloadGuard && rotated.length > 1) {
+  if (plan.cooperative && settings.workloadGuard && prioritized.length > 1) {
     selected = [];
     const limit = Math.max(
       250,
       settings.hookBudgetMs - settings.hookSafetyMarginMs
     );
 
-    for (let i = 0; i < rotated.length; i++) {
-      const id = rotated[i];
+    for (let i = 0; i < prioritized.length; i++) {
+      const id = prioritized[i];
       const projected = {
         input: projectedTotals.input + MCPV5ExpectedTiming("input", id),
         context: projectedTotals.context + MCPV5ExpectedTiming("context", id),
@@ -3389,8 +3544,8 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
       }
     }
   } else {
-    for (let i = 0; i < rotated.length; i++) {
-      const id = rotated[i];
+    for (let i = 0; i < prioritized.length; i++) {
+      const id = prioritized[i];
       projectedTotals.input += MCPV5ExpectedTiming("input", id);
       projectedTotals.context += MCPV5ExpectedTiming("context", id);
       projectedTotals.output += MCPV5ExpectedTiming("output", id);
@@ -3404,8 +3559,8 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     ) % ordinary.length;
   }
 
-  // Lightweight final-stage modules must run on every normal visible Output.
-  // Their hook costs were reserved before ordinary module selection.
+  // Reserved lifecycle modules (including RealmHeart) run on every ordinary
+  // turn. Their costs were included before optional-module scheduling.
   selected = selected.concat(fixedOutput);
 
   // Living Meters v1.2 command replies are queued in Input and delivered in
@@ -3425,6 +3580,30 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     if (skippedIndex >= 0) skipped.splice(skippedIndex, 1);
   }
 
+  // Auto-Cards' explicit command must not disappear when it is workload-
+  // deferred. Inner Self owns its package whenever Inner Self is active.
+  const commandHint = MCPV5CommandHint(inputText, plan);
+  if (
+    (commandHint === "inner_self" || commandHint === "auto_cards") &&
+    !selected.includes(commandHint)
+  ) {
+    selected.push(commandHint);
+    const skippedIndex = skipped.indexOf(commandHint);
+    if (skippedIndex >= 0) skipped.splice(skippedIndex, 1);
+  }
+
+  // Preserve RealmHeart's own command lifecycle under Workload Guard.
+  if (
+    plan && plan.effective && plan.effective.realmheart === true &&
+    (MCPV5LooksLikeRealmHeartSlashInput(inputText) ||
+     MCPV5LooksLikeRealmHeartGambleAction(inputText)) &&
+    !selected.includes("realmheart")
+  ) {
+    selected.push("realmheart");
+    const skippedIndex = skipped.indexOf("realmheart");
+    if (skippedIndex >= 0) skipped.splice(skippedIndex, 1);
+  }
+
   const action = Number.isFinite(info && info.actionCount)
     ? info.actionCount
     : -1;
@@ -3436,6 +3615,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     skipped,
     projectedTotals,
     inputText: String(inputText || "").slice(0, 800),
+    commandHint: MCPV5CommandHint(inputText, plan),
     commandOwner: "",
     controlOutput: "",
     stages: { input: false, context: false, output: false },
@@ -4051,22 +4231,22 @@ function MCPV5Create_inner_package() {
           "%{memory}",
           "\"\"\"",
           "Summarize below:"
-      ] // (mimic this multi-line "text" format)
+      ]
       ,
-      // Titles banned from future card generation attempts?
+
       DEFAULT_BANNED_TITLES_LIST: (
           "North, East, South, West, Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, January, February, March, April, May, June, July, August, September, October, November, December"
-      ) // (mimic this comma-list "text" format)
+      )
       ,
-      // Default story card "type" used by Auto-Cards? (does not matter)
+
       DEFAULT_CARD_TYPE: "class"
-      // ("text")
+
       ,
-      // Should titles mentioned in the "opening" plot component be banned from future card generation by default?
+
       DEFAULT_BAN_TITLES_FROM_OPENING: false
-      // (true or false)
+
       ,
-      }; //——————————————————————————————————————————————————————————————————————————————
+      };
 
       #config;
       constructor(script, alternative) {
@@ -4090,81 +4270,66 @@ function MCPV5Create_inner_package() {
       }
   });
 
-  //—————————————————————————————————————————————————————————————————————————————————————
-
-  /**
-   * Inner Self v1.0.2
-   * Made by LewdLeah on January 3, 2026
-   * Gives story characters the ability to learn, plan, and adapt over time
-   * Inner Self is free and open-source for anyone! ❤️
-   */
   function InnerSelf(hook) {
       "use strict";
-      /**
-       * Scenario-level default settings
-       * Creators modify these before publishing
-       * Players modify these in-game via the config card
-       */
-      const S = {
-      // Default settings for scenario creators to modify:
 
-      // List the first name of every scenario NPC whose brain should be simulated by Inner Self:
+      const S = {
+
       IMPORTANT_SCENARIO_CHARACTERS: ""
-      // (write a comma separated list of names inside the "" like so: "Leah, Lily, Lydia")
+
       ,
-      // Is Inner Self already enabled when the adventure begins?
+
       IS_INNER_SELF_ENABLED_BY_DEFAULT: true
-      // (true or false)
+
       ,
-      // Is the player character's first name known in advance? Ignore this setting if unsure
+
       PREDETERMINED_PLAYER_CHARACTER_NAME: ""
-      // (any name inside the "" or leave empty)
+
       ,
-      // Is the adventure intended for 1st, 2nd, or 3rd person gameplay?
+
       FIRST_SECOND_OR_THIRD_PERSON_POV: 2
-      // (1, 2, or 3)
+
       ,
-      // What (maximum) percentage of "Recent Story" context should be repurposed for NPC brains?
+
       PERCENTAGE_OF_RECENT_STORY_USED_FOR_BRAINS: 30
-      // (1 to 95)
+
       ,
-      // How many actions back should Inner Self look for character name triggers?
+
       NUMBER_OF_ACTIONS_TO_LOOK_BACK_FOR_TRIGGERS: 5
-      // (1 to 250)
+
       ,
-      // Symbol used to visually display which NPC brain is currently triggered?
+
       ACTIVE_CHARACTERS_VISUAL_INDICATOR_SYMBOL: "🎭"
-      // (any text/emoji inside the "" or leave empty)
+
       ,
-      // When possible, what percentage of turns should involve an attempt to form a new thought?
+
       THOUGHT_FORMATION_CHANCE_PER_TURN: 60
-      // (0 to 100)
+
       ,
-      // Is the thought formation chance reduced by half during Do/Say/Story turns?
+
       IS_THOUGHT_CHANCE_HALF_FOR_DO_SAY_STORY: true
-      // (true or false)
+
       ,
-      // Is valid JSON shown and expected in brain card notes? Otherwise use a human-readable format
+
       IS_JSON_FORMAT_USED_FOR_BRAIN_CARD_NOTES: false
-      // (true or false)
+
       ,
-      // Should Inner Self model task outputs be displayed inline with the adventure text itself?
+
       IS_DEBUG_MODE_ENABLED_BY_DEFAULT: false
-      // (true or false)
+
       ,
-      // Is the "Configure Inner Self" story card pinned near the top of the in-game list?
+
       IS_CONFIG_CARD_PINNED_BY_DEFAULT: false
-      // (true or false)
+
       ,
-      // Is AC already enabled when the adventure begins?
+
       IS_AC_ENABLED_BY_DEFAULT: false
-      // (true or false)
+
       ,
-      }; //——————————————————————————————————————————————————————————————————————————————
+      };
 
       const version = "v1.0.2";
-      // Validate that all required AI Dungeon global properties exist
-      // Without these, Inner Self literally cannot function
+
       if (
           !globalThis.state || (typeof state !== "object") || Array.isArray(state)
           || !globalThis.info || (typeof info !== "object") || Array.isArray(info)
@@ -4173,105 +4338,78 @@ function MCPV5Create_inner_package() {
           || !Array.isArray(globalThis.history)
           || (typeof text !== "string")
       ) {
-          // Something is seriously broken in AID
+
           log("unexpected error");
           globalThis.text ||= " ";
           return;
       }
-      /**
-       * Recursively merges source object into target object
-       * Only copies properties that are undefined in target
-       * Nested objects get their own recursive treatment
-       * @param {Object} target - The object to merge into
-       * @param {Object} source - The object to merge from
-       * @returns {Object} The mutated target object
-       */
+
       const deepMerge = (target = {}, source = {}) => {
-          // Walk through every key in the source
+
           for (const key in source) {
-              // Source value is a nested object, so recurse
+
               if (source[key] && (typeof source[key] === "object") && !Array.isArray(source[key])) {
                   if (!target[key] || (typeof target[key] !== "object")) {
-                      // Target doesn't have this key or it's not an object
+
                       target[key] = {};
                   }
                   deepMerge(target[key], source[key]);
               } else if (target[key] === undefined) {
-                  // Only copy if target doesn't already have this key
+
                   target[key] = source[key];
               }
           }
           return target;
       };
-      /**
-       * Persistent state of Inner Self stored in the adventure's state object
-       * This survives across turns
-       * @type {Object}
-       */
+
       const IS = state.InnerSelf = deepMerge(state.InnerSelf || {}, {
-          // Zero-width encoded thought labels for context injection
+
           encoding: "",
-          // Currently triggered agent name (empty string = none)
+
           agent: "",
-          // Monotonically increasing thought label counter
+
           label: 0,
-          // Hash of recent history to detect retry or erase + continue turns
+
           hash: "",
-          // Total number of brain operations performed across all agents
+
           ops: 0,
-          // Auto-Cards integration state
+
           AC: {
-              // This helps avoid calling AC API functions more than necessary
+
               enabled: false,
-              // External use of the AC API force-installs so it just works
+
               forced: false,
-              // NGL this one didn't need to be stateful but I didn't feel like declaring a local so whatevs
-              // Basically AC sets this to true when it does stuff, so Inner Self can inhibit itself
+
               event: false
           }
       });
-      /**
-       * Checks if Auto-Cards is available in the global scope
-       * @returns {boolean} true if Auto-Cards is installed and callable
-       */
+
       const hasAutoCards = () => (typeof globalThis.AutoCards === "function");
       const u = "qm`x/`hetofdno/bnl.qsnghmd.MdveMd`i".replace(/./g, c => String.fromCharCode(c.charCodeAt()^1));
       if (IS.AC.enabled && (typeof hook === "string") && (hook !== "context") && hasAutoCards()) {
-          // Delegate to Auto-Cards for non-context hooks when enabled
+
           try {
               text = AutoCards(hook, text);
           } catch (error) {
               log(error.message);
           }
       }
-      /**
-       * Generates a simple hashcode of the last 50 actions in history
-       * Used to detect retry or erase + continue turns
-       * @returns {string} Hexadecimal hash string
-       */
+
       const historyHash = () => {
           let n = 0;
-          // Grab the last 50 actions and stringify them
+
           const serialized = JSON.stringify(history.slice(-50));
           for (let i = 0; i < serialized.length; i++) {
-              // Classic polynomial rolling hash, nothing fancy
+
               n = ((31 * n) + serialized.charCodeAt(i)) | 0;
           }
           return n.toString(16);
       };
-      /**
-       * Safely parses a JSON string into an object
-       * Optionally attempts to repair malformed JSON by extracting quoted content
-       * Basically I use repair mode for cute little smooth brains UwU
-       * @param {string} str - The string to parse
-       * @param {boolean} repair - Whether to attempt repair on malformed JSON
-       * @returns {Object} Parsed object or empty object on failure
-       */
+
       const deserialize = (str = "", repair = false) => {
           try {
               const parsed = JSON.parse(repair ? (() => {
-                  // All values will be strings I promise
-                  // Find the first and last quote chars
+
                   const first = str.indexOf("\"");
                   const last = str.lastIndexOf("\"");
                   return (
@@ -4280,57 +4418,22 @@ function MCPV5Create_inner_package() {
                   );
               })() : str);
               if (parsed && (typeof parsed === "object") && !Array.isArray(parsed)) {
-                  // Only return a proper object (not null, not array)
+
                   return parsed;
               }
           } catch {}
-          // That empty catch looks so dumb lol
+
           return {};
       };
-      /**
-       * Validated config settings for Inner Self
-       * Default settings are specified by creators at the scenario level
-       * Runtime settings are specified by players at the adventure level
-       * @typedef {Object} config
-       * @property {Object|null} card - Config card object reference
-       * @property {boolean} allow - Is Inner Self enabled?
-       * @property {string} player - The player character's name
-       * @property {number} pov - Is the adventure in 1st, 2nd, or 3rd person?
-       * @property {boolean} guide - Show a detailed guide
-       * @property {number} percent - Default percentage of Recent Story context length reserved for agent brains
-       * @property {number} distance - Number of previous actions to look back for agent name triggers
-       * @property {string} indicator - The visual indicator symbol used to display active brains
-       * @property {number} chance - Likelihood of performing a standard thought formation task each turn
-       * @property {boolean} half - Is the thought formation chance reduced by half during Do/Say/Story turns?
-       * @property {boolean} json - Is raw JSON syntax used to serialize NPC brains in their card notes?
-       * @property {boolean} debug - Is debug mode enabled for inline task output visibility?
-       * @property {boolean} pin - Is the config card pinned near the top of the list?
-       * @property {boolean} auto - Is Auto-Cards enabled?
-       * @property {string[]} agents - All agent names, ordered from highest to lowest trigger priority
-       */
-      /**
-       * Config class - Manages the Inner Self configuration card
-       * Handles building, finding, parsing, and validating all settings
-       * @class
-       */
+
       class Config {
-          /**
-           * Build or find the Inner Self config card
-           * Returns the card reference and all parsed settings
-           * This is the heart of the config system
-           * @param {Set<string>} [pending] - Recursion aid for tracking pending agents
-           * @returns {config} The complete validated configuration object
-           */
+
           static get(pending = new Set()) {
-          // Allow MainSettings mod to override local defaults
+
           if (typeof globalThis.MainSettings === "function") {
               new MainSettings("InnerSelf", "IS").merge(S);
           }
-          /**
-           * Fallback values when settings are missing or invalid
-           * Frozen because I hate accidental mutations
-           * @type {config}
-           */
+
           const fallback = Object.freeze({
               allow: true,
               guide: false,
@@ -4347,55 +4450,37 @@ function MCPV5Create_inner_package() {
               auto: false,
               agents: []
           });
-          /** @type {config} */
+
           const config = { card: null };
-          /**
-           * Strips a string down to lowercase letters only
-           * Used for fuzzy matching of setting names
-           * @param {string} s - Input string
-           * @returns {string} Simplified string
-           */
+
           const simplify = (s = "") => s.toLowerCase().replace(/[^a-z]+/g, "");
-          /**
-           * Cleans up an agent name by removing commas and zero-width chars
-           * Also normalizes whitespace because players are messy ;P
-           * @param {string} agent - Raw agent name
-           * @returns {string} Cleaned agent name
-           */
+
           const cleanAgent = (agent = "") => agent.replace(/[,\u200B-\u200D]+/g, "").trim().replace(/\s+/g, " ");
-          /**
-           * Factory function that creates builder/setter pairs for config fields
-           * Handles both boolean and integer settings with validation
-           * This makes me NOT want to die every time I need to add a new setting
-           * @param {string} key - Config property name
-           * @param {*} setting - Default value from scenario settings
-           * @param {Object} int - Integer constraints (lower, upper, suffix)
-           * @returns {Object} Object with builder and setter functions
-           */
+
           const factory = (key = "", setting = null, int = null) => ({
-              // Builds the display string for the config card entry
+
               builder: (cfg = {}) => ` ${config[key] ?? cfg.setter?.(setting)}${(
-                  // Fancy suffix or boring suffix
+
                   (typeof int?.suffix === "function") ? int.suffix() : int?.suffix ?? ""
               )}`,
-              // Parses and validates a value, storing it in config
+
               setter: (value = null, fallible = false) => {
-                  // Helper to clamp integers within bounds
+
                   const bound = (val = 20) => Math.min(Math.max(int?.lower ?? 1, val), int?.upper ?? 95);
                   if ((typeof value === "boolean") && !int) {
-                      // Boolean setting with a boolean value (easy case)
+
                       config[key] = value;
                   } else if (Number.isInteger(value) && int) {
-                      // Integer setting with an integer value (also easy)
+
                       config[key] = bound(value);
                   } else if (typeof value !== "string") {
-                      // Non-string non-matching type, use fallback unless fallible
+
                       if (fallible) {
                           return;
                       }
                       config[key] = fallback[key];
                   } else if (int) {
-                      // Parse integer from string, stripping decimals and non-digits
+
                       value = value.split(/[./]/, 1)[0].replace(/[^\d]+/g, "");
                       if (value !== "") {
                           config[key] = bound(parseInt(value, 10));
@@ -4403,7 +4488,7 @@ function MCPV5Create_inner_package() {
                           config[key] = bound(fallback[key]);
                       }
                   } else {
-                      // Parse boolean from string with synonym support
+
                       value = simplify(value);
                       if (["true", "t", "yes", "y", "on", "1", "enable", "enabled"].includes(value)) {
                           config[key] = true;
@@ -4416,15 +4501,11 @@ function MCPV5Create_inner_package() {
                   return config[key];
               }
           });
-          /**
-           * Template for building the Inner Self config card
-           * Contains all the user-facing text and settings
-           * @type {Object}
-           */
+
           const template = {
               type: "class",
               title: "Configure \nInner Self",
-              // The config card entry contains the main settings
+
               entry: [
                   {
                       message: "Inner Self grants story characters the ability to learn, plan, and adapt over time. Edit the entry and notes below to control how Inner Self behaves."
@@ -4510,7 +4591,7 @@ function MCPV5Create_inner_package() {
                       message: "Write the name(s) of your non-player characters at the very bottom of the \"notes\" section below. This is mandatory because it allows Inner Self to assemble independent minds for the correct individuals."
                   }
               ],
-              // Description section contains info and agent list
+
               description: [
                   {
                       message: "Please visit my profile @LewdLeah through the link above and read my bio for simple steps to add Inner Self to your own scenarios! ❤️"
@@ -4519,13 +4600,13 @@ function MCPV5Create_inner_package() {
                       message: `Inner Self ${version} is an open-source and general-purpose AI Dungeon mod by LewdLeah. You have my full permission to use it with any scenario!`
                   },
                   {
-                      // This is where players list their NPCs
+
                       message: "Write the first name of every intelligent story character on separate lines below, listed from highest to lowest trigger priority:",
                       builder: (cfg = {}) => ["", "", ...(
                           config.agents ?? cfg.setter?.(S.IMPORTANT_SCENARIO_CHARACTERS)
                       ), ""].join("\n"),
                       setter: (value = null, fallible = false) => {
-                          // Accept string (from card) or array (from code)
+
                           if (typeof value === "string") {
                               config.agents = value.split(/[,\n]/);
                           } else if (Array.isArray(value)) {
@@ -4535,7 +4616,7 @@ function MCPV5Create_inner_package() {
                           } else {
                               return (config.agents = [...fallback.agents]);
                           }
-                          // Clean, deduplicate, and remove empties
+
                           return (config.agents = [...new Set(config.agents
                               .map(agent => cleanAgent(agent))
                               .filter(agent => (agent !== ""))
@@ -4544,68 +4625,65 @@ function MCPV5Create_inner_package() {
                   }
               ]
           };
-          // Track discovered agents to avoid duplicates
+
           const agents = new Set();
-          // Simplified title for fuzzy matching
+
           const target = simplify(template.title);
-          // Scan all story cards in reverse order
-          // Looking for config cards, agent cards, and duplicates (remove the latter in-place)
+
           for (let i = storyCards.length - 1; -1 < i; i--) {
               const card = storyCards[i];
               if (!card || (typeof card !== "object") || Array.isArray(card)) {
-                  // Remove invalid cards (null, non-objects, arrays)
-                  // If this ever happens in a real situation, I will cry
+
                   storyCards.splice(i, 1);
               } else if ((typeof card.keys === "string") && card.keys.includes("\"agent\"")) {
-                  // This card has agent metadata, extract and validate it
+
                   const metadata = deserialize(card.keys);
                   if (typeof metadata.agent === "string") {
                       metadata.agent = cleanAgent(metadata.agent);
                       if (metadata.agent !== "") {
                           if (!agents.has(metadata.agent)) {
-                              // First time seeing this brain card
+
                               agents.add(metadata.agent);
                               card.keys = JSON.stringify(metadata);
                               continue;
                           } else if (typeof card.title === "string") {
-                              // Duplicate brain card, mark it as a copy
+
                               card.title = card.title.trim();
                               card.title = `Copy of ${(card.title === "") ? "Agent" : card.title}`;
                           }
                       }
                   }
-                  // Invalid agent metadata, clear it
+
                   card.keys = "";
               } else if ((typeof card.title !== "string") || (100 < card.title.length)) {
-                  // Skip cards with missing or absurdly long titles
+
                   continue;
               } else if (card.title.startsWith("@") && !card.title.includes("figure")) {
-                  // Cards starting with @ are shorthand for adding agents
+
                   const agent = cleanAgent(card.title.replace(/^[@\s]*/, ""));
                   if (agent !== "") {
                       card.title = agent;
                       pending.add(agent);
                   }
               } else if ((() => {
-                  // Fuzzy matching to find the config card even if title is slightly mangled
-                  // Because players gonna player and typos happen
+
                   const current = simplify(card.title);
                   const maxMistakes = 2;
                   let mistakes = 0;
-                  // Target index (expected title)
+
                   let t = 0;
-                  // Current index (actual title)
+
                   let c = 0;
                   while ((t < target.length) && (c < current.length)) {
                       if (current[c] === target[t]) {
-                          // Chars match, advance both
+
                           t++; c++;
                           continue;
                       } else if (maxMistakes <= mistakes) {
-                          // Too many mistakes, this isn't the config card (I hope)
+
                           return true;
                       }
-                      // Allow for insertions, deletions, or substitutions
+
                       mistakes++;
                       (current[c + 1] === target[t])
                       ? c++
@@ -4613,70 +4691,62 @@ function MCPV5Create_inner_package() {
                       ? t++
                       : (t++, c++)
                   }
-                  // Count leftover chars as mistakes
+
                   mistakes += (target.length - t) + (current.length - c);
-                  // This is basically bargain bin levenshtein distance but less costly
+
                   return (maxMistakes < mistakes);
               })()) {
-                  // Title didn't match the fuzzy search
+
                   continue;
               } else if (config.card === null) {
-                  // Found the config card
+
                   config.card = card;
               } else if (typeof removeStoryCard === "function") {
-                  // Duplicate config card, remove it properly the way Latitude intended
-                  // (I know it's just a wrapper for splice, but that may change one day lol)
+
                   removeStoryCard(i);
               } else {
-                  // Fallback removal for duplicate config cards
+
                   storyCards.splice(i, 1);
               }
           }
-          /**
-           * Builds a formatted string from template sections
-           * @param {Array} source - Array of config message objects
-           * @param {string} delimiter - String to join sections with
-           * @returns {string} Formatted config text
-           */
+
           const build = (source = [], delimiter = "\n\n") => (source
               .map(cfg => `> ${cfg.message}${cfg.builder?.(cfg) ?? ""}`)
               .join(delimiter)
           );
           if (config.card === null) {
-              // If no config card exists, create one and recurse
+
               addStoryCard(u,
                   build(template.entry, "\n"),
                   template.type,
                   template.title,
                   build(template.description, "\n\n")
               );
-              // Recurse to parse the newly created card
+
               return Config.get(pending);
           }
-          // Parse existing card content to extract user-modified settings
-          // This is where IS reads back what the player has configured
-          // Abomination :3
+
           ["entry", "description"].map(source => [source, (
               (typeof config.card[source] === "string")
-              // Split on >, filter for lines with colons, extract key-value pairs
+
               ? Object.fromEntries((config.card[source]
                   .split(/\s*>[\s>]*/)
                   .filter(block => block.includes(":"))
                   .map(block => block.split(/\s*:[\s:]*/, 2))
               ).map(pair => [simplify(pair[0]), pair[1].trimEnd()])) : {}
           )]).forEach(([source, extractive]) => template[source].forEach(cfg => (
-              // Try to set each config value from extracted content (fallible mode)
+
               cfg.setter?.(extractive[simplify(cfg.message)], true)
           )));
-          // Merge all discovered agents: config, brain card metadata, and "@" pending
+
           config.agents = [...new Set([...(config.agents ?? fallback.agents), ...agents, ...pending])];
           if (IS.AC.forced) {
-              // Handle forced Auto-Cards installation (silly API stuff)
+
               config.auto = true;
               IS.AC.forced = false;
               IS.AC.enabled = true;
           }
-          // Update the card with the canonical template format so it sticks after the hook ends
+
           config.card.type = template.type;
           config.card.title = template.title;
           config.card.entry = build(template.entry, "\n");
@@ -4684,18 +4754,13 @@ function MCPV5Create_inner_package() {
           config.card.keys = u;
           return config;
       } }
-      /**
-       * Removes the visual indicator prefix from a card title
-       * The indicator is separated by a zero-width space char
-       * @param {Object} card - Story card object to modify
-       * @returns {void}
-       */
+
       const deindicate = (card = {}) => {
           if (typeof card.title !== "string") {
-              // Cry
+
               card.title = "";
           } else if (card.title.includes("\u200B")) {
-              // Strip everything before and including the zero-width space
+
               card.title = (card.title
                   .slice(card.title.indexOf("\u200B") + 1)
                   .replaceAll("\u200B", "")
@@ -4704,58 +4769,36 @@ function MCPV5Create_inner_package() {
           }
           return;
       };
-      /**
-       * Agent class - Represents an NPC with a simulated brain
-       * Each agent has their own story card that stores their thoughts
-       * The brain is a key-value store of labeled thoughts
-       * @class
-       */
+
       class Agent {
-          // Private fields for encapsulation
-          // Percentage of context reserved for this agent's brain
+
           #percent;
-          // Visual indicator symbol shown when agent is triggered
+
           #indicator;
-          // Cached reference to the agent's brain card
+
           #card = null;
-          // Cached parsed brain contents
+
           #brain = null;
-          // Cached parsed metadata
+
           #metadata = null;
-          /**
-           * Creates a new Agent instance
-           * The agent will find or create their brain card automatically
-           * @param {string} name - The name of the agent (used for triggering)
-           * @param {Object} [options] - Optional settings for the agent
-           * @param {number} [options.percent=30] - Context reserved for brain contents
-           * @param {string} [options.indicator=null] - Visual indicator when triggered
-           */
+
           constructor(name = "", { percent = 30, indicator = null } = {}) {
               this.#indicator = indicator;
               this.#percent = percent;
               this.name = name;
               return this;
           }
-          /**
-           * Gets or creates the agent's brain card
-           * Uses lazy initialization and caching
-           * @returns {Object} The agent's story card
-           */
+
           get card() {
               if (this.#card !== null) {
-                  // Return cached card if stored
+
                   return this.#card;
               }
-              /**
-               * Creates a new brain card for this agent
-               * Includes a timestamp for debugging purposes
-               * @param {string} name - Display name for the card
-               * @returns {Object} The newly created card
-               */
+
               const buildCard = (name = this.name) => addStoryCard(
                   JSON.stringify({ agent: this.name }),
                   (() => {
-                      // Generate a pretty timestamp for the initialization comment
+
                       const time = new Date();
                       const match = time.toLocaleString("en-US", {
                           timeZone: "UTC",
@@ -4775,41 +4818,36 @@ function MCPV5Create_inner_package() {
                   "Brain",
                   name,
                   JSON.stringify({}),
-                  // Thank you Mavrick
+
                   { returnCard: true }
               );
-              /**
-               * Checks if a card belongs to this agent
-               * @param {Object} card - Card to check
-               * @returns {boolean} true if this is the right card
-               */
+
               const isAgent = (card = {}) => (
                   (typeof card.keys === "string")
                   && card.keys.includes("\"agent\"")
                   && (deserialize(card.keys).agent === this.name)
               );
               if (typeof this.#indicator !== "string") {
-                  // If no indicator is set, just find or create the card
+
                   for (const card of storyCards) {
                       if (isAgent(card)) {
-                          // Found an existing card
+
                           this.#card = card;
                           return this.#card;
                       }
                   }
-                  // No existing card found, create one
+
                   this.#card = buildCard();
                   return this.#card;
               }
-              // The Agent class instance was constructed with an indicator
-              // Update card titles during the same iteration because reasons
+
               this.#indicator = this.#indicator.trim();
               const prefix = `${this.#indicator}\u200B`;
               for (const card of storyCards) {
-                  // Remove indicators from all cards
+
                   deindicate(card);
                   if ((this.#card === null) && isAgent(card)) {
-                      // Found the brain card, add the indicator prefix
+
                       if (this.#indicator !== "") {
                           card.title = (card.title === "") ? prefix : `${prefix} ${card.title}`;
                       }
@@ -4817,56 +4855,46 @@ function MCPV5Create_inner_package() {
                   }
               }
               if (this.#card === null) {
-                  // Still no card? Create one with the indicator
+
                   this.#card = (this.#indicator === "") ? buildCard() : buildCard(`${prefix} ${this.name}`);
               }
               return this.#card;
           }
-          /**
-           * Gets the agent's metadata from their card
-           * Contains per-agent configurable settings like context percentage
-           * @returns {Object} metadata object with validated percent
-           */
+
           get metadata() {
               if (this.#metadata !== null) {
-                  // Return cached metadata if available
+
                   return this.#metadata;
               }
-              // Valid range for brain size percentage (inclusive)
+
               const [lower, upper] = [1, 95];
               this.#metadata = deserialize(this.card.keys);
-              // Validate and normalize the percent value
+
               if (!Number.isInteger(this.#metadata.percent)) {
-                  // Uh oh
+
                   this.#metadata.percent = (
                       ((typeof this.#metadata.percent === "number") && Number.isFinite(this.#metadata.percent))
                       ? Math.min(Math.max(lower, Math.round(this.#metadata.percent)), upper)
                       : this.#percent
                   );
               } else if (this.#metadata.percent < lower) {
-                  // Clamp to minimum
+
                   this.#metadata.percent = lower;
               } else if (upper < this.#metadata.percent) {
-                  // Clamp to maximum
+
                   this.#metadata.percent = upper;
               } else {
-                  // Yippee
+
                   return this.#metadata;
               }
-              // Save the normalized metadata back to the card
+
               this.#card.keys = JSON.stringify(this.#metadata);
               return this.#metadata;
           }
-          /**
-           * Gets the agent's brain (thought storage)
-           * Parses from the card description with repair mode enabled
-           * Accepts both JSON and simplified formats for deserialization
-           * Auto-detects format for backward (and forward) compatibile conversion
-           * @returns {Object} Key-value store of thoughts
-           */
+
           get brain() {
               if (this.#brain !== null) {
-                  // Return the cached brain if available
+
                   return this.#brain;
               } else if (typeof this.card.description === "string") {
                   this.card.description = this.card.description.trim();
@@ -4876,74 +4904,64 @@ function MCPV5Create_inner_package() {
               this.#brain = {};
               if (/^[\s{,]*"/.test(this.card.description) || /"[\s},]*$/.test(this.card.description)) {
                   let parsed = false;
-                  // Parse the brain as JSON from the card description, with repairs allowed
+
                   const source = deserialize(this.card.description, true);
                   for (const key in source) {
-                      // Only keep string values (the actual thoughts)
+
                       (typeof source[key] === "string") && ((this.#brain[key] = source[key]), (parsed = true));
                   }
                   if (parsed) {
-                      // Conclude if the brain contains any string-valued properties
+
                       return this.#brain;
                   }
-                  // Failed to parse any meaningful thoughts, try the simple format instead
+
               }
-              // Parse the brain from the card description using the simple format
+
               for (const line of this.card.description.split("\n")) {
                   const clean = line.trim();
                   if (clean === "") {
                       continue;
                   }
-                  // Find the first colon (allows colons in values like "5:30 PM")
+
                   const bisector = clean.indexOf(":");
                   if (bisector === -1) {
-                      // No key-value pair on this line
+
                       continue;
                   }
-                  // Remove unwanted leading/trailing chars from both key and value
+
                   const [key, value] = [
-                      // Left of colon
+
                       clean.slice(0, bisector),
-                      // Right of colon
+
                       clean.slice(bisector + 1)
                   ].map(twin => twin.replace(/(?:^[\s{},"_\\]*|[\s{},"_\\]*$)/g, ""));
                   if ((key !== "") && (value !== "")) {
-                      // Only add if key and value are both non-empty
+
                       this.#brain[key] = value;
                   }
               }
               return this.#brain;
           }
-          /**
-           * Clears the cached brain, forcing a re-parse on next access
-           * Head empty UwU
-           * @returns {void}
-           */
+
           lobotomize() {
               this.#brain = null;
               return;
           }
       }
-      /**
-       * Gets the most recent non-empty action from history
-       * Ignores actions that are just zero-width chars >:3
-       * @returns {Object|undefined} The previous action or undefined
-       */
+
       const getPrevAction = () => history.findLast(a => !/^[\u200B-\u200D]*$/.test(a?.text ?? a?.rawText ?? ""));
-      // ==================== CONTEXT HOOK ====================
-      // This is where (half) of the magic happens: Inner Self injects brains and tasks into context
-      // Infer the current lifecycle hook
+
       if ((hook === "context") || Number.isInteger(info.maxChars)) {
-          // Calculate the player's context limit with a small buffer
+
           const limit = Math.max((Math.min(text.length, info.maxChars) - 10), 4500);
-          // Ensure stop variable exists (the AID script sandbox is silly)
+
           globalThis.stop ??= false;
-          // Reset agent trigger for this turn
+
           IS.agent = "";
-          /** @type {config} */
+
           const config = Config.get();
           if (config.pin) {
-              // Move config card to top of list if pinning is enabled
+
               const index = storyCards.indexOf(config.card);
               if (0 < index) {
                   storyCards.splice(index, 1);
@@ -4951,13 +4969,13 @@ function MCPV5Create_inner_package() {
               }
           }
           const unzero = () => ((text = text.replace(/[\u200B-\u200D]+/g, "") || " "), (IS.encoding = ""));
-          // Handle Auto-Cards integration when enabled
+
           if (config.auto && hasAutoCards()) {
               try {
                   if (!IS.AC.enabled) {
-                      // It's my first time enabling AC, please be gentle :3
+
                       const api = AutoCards().API;
-                      // Prevent AC from generating cards with reserved titles
+
                       api.setBannedTitles([
                           "Inner",
                           "Self",
@@ -4966,7 +4984,7 @@ function MCPV5Create_inner_package() {
                           ...api.getBannedTitles(),
                       ]);
                   }
-                  // Run AC's context branch
+
                   AutoCards(null);
                   IS.AC.event = false;
                   [text, stop] = AutoCards("context", text, stop);
@@ -4975,16 +4993,16 @@ function MCPV5Create_inner_package() {
               }
               IS.AC.enabled = true;
               if (IS.AC.event || (stop === true)) {
-                  // If AC triggered an event or stop, we're done here
+
                   config.allow ? unzero() : ((IS.encoding = ""), (text ||= " "));
                   return;
               }
           } else if (IS.AC.enabled) {
               IS.AC.enabled = false;
-              // AC was just disabled, clean up its cards ;)
+
               for (let i = storyCards.length - 1; -1 < i; i--) {
                   const card = storyCards[i];
-                  // Check if this is an AC-related card that should be removed
+
                   if (!([
                       "Shared Library",
                       "Input Modifier",
@@ -5009,16 +5027,12 @@ function MCPV5Create_inner_package() {
               }
           }
           if (!config.allow) {
-              // Early exit if Inner Self is disabled
+
               IS.encoding = "";
               text ||= " ";
               return;
           }
-          /**
-           * Removes visual indicators from all story cards
-           * Called when no agent is triggered or Inner Self is disabled
-           * @returns {void}
-           */
+
           const deindicateAll = () => {
               for (const card of storyCards) {
                   deindicate(card);
@@ -5026,16 +5040,12 @@ function MCPV5Create_inner_package() {
               return;
           };
           if (config.agents.length === 0) {
-              // No agents are configured
+
               deindicateAll();
               unzero();
               return;
           }
-          // ==================== AGENT TRIGGER DETECTION ====================
-          // Scan config.distance actions back through history to find the most recent agent trigger
-          // Tie-break same-action name triggers based on RNG and their order-of-priority in config.agents
-          // Do it all without using ANY RegEx because I'm extra like that :3
-          // (this block is blazingly fast)
+
           const possibilities = [];
           for (
               let [i, remaining] = [history.length - 1, config.distance];
@@ -5044,39 +5054,39 @@ function MCPV5Create_inner_package() {
           ) {
               const actionText = history[i]?.text ?? history[i]?.rawText;
               if ((typeof actionText !== "string") || (actionText.indexOf(">>>") !== -1)) {
-                  // Skip invalid actions or Auto-Cards thingies
+
                   continue;
               }
               scan: {
-                  // Check if this action has any meaningful content
+
                   for (let j = actionText.length - 1; -1 < j; j--) {
                       const c = actionText.charCodeAt(j);
                       if ((0x20 < c) && (c !== 0x200B) && (c !== 0x200C) && (c !== 0x200D)) {
-                          // Fast accept any non-whitespace + non-zero-width char
+
                           break scan;
                       }
                   }
-                  // Byeee
+
                   continue;
               }
               remaining--;
-              // Lowercase for case-insensitive matching
+
               const lower = actionText.toLowerCase();
-              // Check each agent in priority order
+
               for (let [a, n] = [0, config.agents.length]; a < n; a++) {
                   const agentLower = config.agents[a].toLowerCase();
-                  // Scan for all occurrences of agentLower in lower
+
                   for (
                       let p = lower.indexOf(agentLower);
                       (p !== -1);
                       p = lower.indexOf(agentLower, p + 1)
                   ) {
-                      // Ensure word boundaries (not a-z before or after)
+
                       if ([((0 < p) ? lower.charCodeAt(p - 1) : 0), (
                           ((p + agentLower.length) < lower.length)
                           ? lower.charCodeAt(p + agentLower.length) : 0
                       )].every(c => ((c < 97) || (122 < c)))) {
-                          // Found a valid trigger
+
                           possibilities.push(config.agents[a]);
                           break;
                       }
@@ -5084,19 +5094,18 @@ function MCPV5Create_inner_package() {
               }
           }
           if (possibilities.length === 0) {
-              // No agent triggered, clean up and exit
-              // Strip zero-width chars and end with a single space
+
               text = `${text.replace(/\s*[\u200B-\u200D][\s\u200B-\u200D]*/g, "\n\n").trim()} `;
               deindicateAll();
-              // Do fancy standoff spacing leading ahead of the next output
+
               IS.encoding = "";
               IS.agent = " ";
               text ||= " ";
               return;
           } else {
-              // Use RNG for tie-breaking name triggers with some priority bias
+
               const n = possibilities.length;
-              // Sum of weights
+
               const total = (n * (n + 1)) / 2;
               for (let [i, r] = [0, Math.random() * total]; i < n; i++) {
                   r -= (n - i);
@@ -5106,134 +5115,121 @@ function MCPV5Create_inner_package() {
                   }
               }
           }
-          // Temporary markers used to reliably identify sections of the context for later calculations
+
           const boundary = Object.freeze({
-              // Hardcoded AID context header
+
               needle: "Recent Story:",
-              // Marks start of recent story
+
               upper: "<|story|>",
-              // Marks start of task instructions
+
               lower: "<|task|>"
           });
-          /**
-           * Replaces a substring in text with a replacement string
-           * Expands to consume surrounding whitespace
-           * @param {string} substring - String to find and replace
-           * @param {string} replacement - String to replace with
-           * @param {Function} fallback - Called if substring not found
-           * @returns {void}
-           */
+
           const setMarker = (substring = "", replacement = "", fallback = () => {}) => {
               let start = text.indexOf(substring);
               if (start === -1) {
-                  // Do stuff
+
                   fallback();
                   return;
               }
               let end = start + substring.length;
-              // Expand left over whitespace
+
               while ((0 < start) && (text.charCodeAt(start - 1) < 33)) {
                   start--;
               }
-              // Expand right over whitespace
+
               while ((end < text.length) && (text.charCodeAt(end) < 33)) {
                   end++;
               }
               text = `${text.slice(0, start)}${replacement}${text.slice(end)}`;
               return;
           };
-          // Replace "Recent Story:" with the upper boundary marker
+
           setMarker(boundary.needle, boundary.upper, () => {
-              // No needle found, append marker to end
+
               text = `${text.trimEnd()}${boundary.upper}`;
               return;
           });
           if (config.debug) {
               const start = text.indexOf(boundary.upper);
               if (start !== -1) {
-                  // In debug mode, strip out parenthetical task outputs from the recent story context
+
                   text = `${text.slice(0, start + boundary.upper.length)}${(text
                       .slice(start + boundary.upper.length)
                       .replace(/\s*\([\s\S]*?\)\s*/g, "\n\n")
                   )}`;
               }
           }
-          // Construct the agent instance for the triggered NPC
+
           const agent = new Agent(IS.agent, { percent: config.percent, indicator: config.indicator });
-          // Whitelist of thought labels allowed in this context
+
           const whitelist = new Set();
-          /**
-           * Builds the mind array from the agent's brain
-           * Sorts thoughts and prepares them for context injection
-           * @returns {Array} An array of [label, key, thought] triplets
-           */
+
           const mind = (() => {
-              // Sort direction: ascending (70%) or descending (30%)
-              // Keeps things fresh and prevents bias toward recent or old thoughts
+
               const direction = (Math.random() < 0.7) ? 1 : -1;
               const brain = agent.brain;
-              // Separate thoughts into numbered and unlabeled
+
               const unknowns = [];
               const numbered = [];
-              // Parse each thought and extract label/content
+
               for (const key in brain) {
                   const value = brain[key];
-                  // Clear from brain (keep instantaneous memory use low)
+
                   delete brain[key];
-                  // Arrow separates label from thought content
+
                   const sliceIndex = value.indexOf("→");
                   const unknown = "*";
-                  // Parse label and thought, handle malformed values
+
                   const [label, thought] = (sliceIndex === -1) ? [unknown, value.trim()] : [
                       parseInt(value.slice(0, sliceIndex), 10) || unknown,
                       value.slice(sliceIndex + 1).trim()
                   ];
                   const triplet = [label, key, thought];
                   if (!Number.isInteger(label)) {
-                      // No valid label, insert at random position in unknowns
+
                       unknowns.splice(Math.floor(Math.random() * (unknowns.length + 1)), 0, triplet);
                       continue;
                   }
-                  // Track valid labels for the whitelist
+
                   whitelist.add(label);
-                  // Insert in sorted order (ascending or descending)
+
                   let i = numbered.length;
                   while (i-- && ((direction * label) < (direction * numbered[i][0])));
                   numbered.splice(i + 1, 0, triplet);
               }
-              // Teehee
+
               agent.lobotomize();
               if (unknowns.length === 0) {
-                  // All thoughts have labels, nice and clean UwU
+
                   return numbered;
               }
-              // Thoughts without integer labels ("[*]") are placed above (60%) or below (40%) the rest
+
               return (Math.random() < 0.6) ? [...unknowns, ...numbered] : [...numbered, ...unknowns];
           })();
-          // Process context and decode any embedded thought labels
-          // Zero-width chars encode thought labels that link story events to brain contents
+
           text = text.replace((
-              // Normalize spacing around zero-width chars
+
               /\s*[\u200B-\u200D][\s\u200B-\u200D]*/g
           ), z => `\n\n${z.replace(/\s+/g, "")}`).replace((
-              // Decode binary-encoded thought labels
+
               /\u200B*((?:[\u200C\u200D]+\u200B+)*[\u200C\u200D]+)\u200B*/g
           ), (_, encoded) => {
               let n = 0;
               let bits = false;
               let decoded = "";
-              // Parse binary encoding: ZWSP = separator, ZWNJ = 0, ZWJ = 1
+
               for (let i = 0; i <= encoded.length; i++) {
                   const c = encoded.charCodeAt(i);
                   if ((c === 0x200C) || (c === 0x200D)) {
-                      // Accumulate bits
+
                       n = (n << 1) | (c === 0x200D);
                       bits = true;
                   } else if (bits) {
-                      // End of a number, check if it's in the whitelist
+
                       bits = false;
                       if (whitelist.has(n)) {
-                          // This thought label is visible to the story model in context
+
                           decoded += `[${n}]`;
                       }
                       n = 0;
@@ -5241,102 +5237,68 @@ function MCPV5Create_inner_package() {
               }
               return (decoded === "") ? "" : `${decoded}\n\n`;
           }).replace(/[\u200B-\u200D]+/g, "");
-          /**
-           * Generates possessive form of a name
-           * Handles names ending in s or already possessive
-           * @param {string} name - The name to make possessive
-           * @returns {string} Possessive form (e.g., "Iris'" or "Leah's")
-           */
+
           const ownership = (name = "") => `${name}${(
               (name.endsWith("'") || name.endsWith("'s"))
               ? "" : name.toLowerCase().endsWith("s")
               ? "'" : "'s"
           )}`;
-          // Point of view string for prompt templates
+
           const pov = ["first", "second", "third"][config.pov - 1] ?? "second";
-          /**
-           * Generates a simple PoV directive for non-task turns
-           * @returns {string} System prompt for PoV guidance
-           */
+
           const nondirective = () => (
               `<SYSTEM>\n# Always continue the story from ${ownership(config.player)} ${pov} person perspective.\n</SYSTEM>`
           );
-          /**
-           * Wraps the agent's thoughts into a context-friendly format
-           * Also clears the mind array as a side effect
-           * @param {string} joined - Pre-joined thought strings
-           * @returns {string} Formatted brain context block
-           */
+
           const bindSelf = (joined = "") => ((mind.length = 0) || (joined === "")) ? "\n\n" : (
               `\n\n# ${ownership(agent.name)} brain and inner self: [\n${joined}\n]\n\n`
           );
-          // Check if the current turn is a retry or erase + continue following a previous task completion
+
           if (IS.hash === historyHash()) {
-              // Same history, just inject the contextualized brain without a new task
+
               text = `${nondirective()}${bindSelf(mind
                   .map(([label, key, thought]) => `- ${key}: ${thought} [${label}]`)
                   .join("\n")
               )}${text.trim()} `;
           } else {
-              // Prepare for a possible task request
+
               IS.encoding = "";
-              /**
-               * Build the brain context and determine if constrained
-               * Being constrained means the agent's brain is too large relative to the story context
-               */
+
               const [self, full] = (() => {
-                  /**
-                   * Joins the mind array into a formatted string
-                   * @param {boolean} unlabeled - Omit labels if true
-                   * @returns {string} Formatted thoughts
-                   */
+
                   const joinMind = (unlabeled = false) => mind.map(([label, key, thought]) => (
                       `${unlabeled ? "" : `[${label}] `}(${key}: \`${thought}\`)`
                   )).join("\n");
                   const joined = joinMind();
-                  // Check if brain exceeds the allowed percentage of context
-                  // Only applies when brain is at least 800 chars
+
                   const constrained = ((800 < joined.length) && (
                       ((agent.metadata.percent / 100) * (
                           text.length - text.indexOf(boundary.upper) + boundary.upper.length
                       )) < joined.length
                   ));
                   if (!constrained || (Math.random() < 0.4)) {
-                      // Unconstrained brains stay in sorted order
-                      // Constrained brains keep order 40% of the time
+
                       return [bindSelf(joined), constrained];
                   }
-                  // Constrained brains are contextualized in random order 60% of the time
-                  // This regulates long-term bias against middle thoughts, when choosing keys to forget
+
                   for (let i = mind.length - 1; 0 < i; i--) {
-                      // Swap with a random element
+
                       const j = Math.floor(Math.random() * (i + 1));
                       [mind[i], mind[j]] = [mind[j], mind[i]];
                   }
-                  // Randomized brains are contextualized without labels 80% of the time
-                  // (Because free models are too dumb to be trusted with labels when deleting thoughts)
+
                   return [bindSelf(joinMind(
                       (Math.random() < 0.8)
                       && (text = text.replace(/\n?(?:\[\d+\])+\n?/g, ""))
                   )), true];
               })();
-              /**
-               * Occasionally adds a self-reflection prompt to thoughts
-               * Keeps the agent from being too present-focused
-               * But they become insufferable if always applicable
-               * @param {boolean} fancy - Use fancier wording if true
-               * @returns {string} Refocus instruction or empty string
-               */
+
               const refocus = (fancy = false) => (Math.random() < 0.2) ? (
                   `\n  - Never focus on the present, instead focus ${ownership(agent.name)} thought on self-reflection or ${fancy ? "an actionable future plan." : "future plans"}`
               ) : "";
-              /**
-               * Prompt templates for different task types and PoV combinations
-               * Wrapped in a Proxy for auto-trimming and nested access because it's pretty :3
-               * @type {Object}
-               */
+
               const prompt = new Proxy({
-                  // Operating environment prompts (one per PoV)
+
                   directive: {
                       first: () => `
   <SYSTEM>
@@ -5376,7 +5338,7 @@ function MCPV5Create_inner_package() {
   </SYSTEM>
                       `
                   },
-                  // Forget prompts for when the brain is full and needs pruning
+
                   forget: {
                       first: () => `
   <SYSTEM>
@@ -5442,7 +5404,7 @@ function MCPV5Create_inner_package() {
   </SYSTEM>
                       `
                   },
-                  // Assign prompts for adding/updating a single thought
+
                   assign: {
                       first: () => `
   <SYSTEM>
@@ -5553,8 +5515,7 @@ function MCPV5Create_inner_package() {
   </SYSTEM>
                       `
                   },
-                  // Choice prompts for advanced operations (assign, rename, or delete)
-                  // Used at high context when we trust the model more
+
                   choice: {
                       first: () => `
   <SYSTEM>
@@ -5884,62 +5845,59 @@ function MCPV5Create_inner_package() {
   </SYSTEM>
                       `
                   }
-              // Proxy handler for auto-trimming and nested access
+
               }, { get(t, p) { return (
-                  // Functions get called and trimmed
+
                   (typeof t[p] === "function")
                   ? t[p]().trim()
-                  // Objects get wrapped in their own Proxy
+
                   : (t[p] && (typeof t[p] === "object"))
                   ? new Proxy(t[p], this)
-                  // Primitives pass through
+
                   : t[p]
               ); } });
-              // Build the final context with appropriate prompts
+
               text = full ? (
-                  // Brain is full, prompt for deletion
+
                   `${prompt.directive[pov]}${self}${text.trim()}${boundary.lower}${prompt.forget[pov]}\n\n`
               ) : ((config.chance / ((config.half && [
-                  // config.half -> reduce task chance after Do/Say/Story actions (player is driving)
+
                   "do", "say", "story"
               ].includes(getPrevAction()?.type)) ? 200 : 100)) < Math.random()) ? (
-                  // Sometimes do nothing and emit a side effect on IS.agent
+
                   (IS.agent = " "),
                   `${nondirective()}${self}${text.trim()} `
               ) : `${prompt.directive[pov]}${self}${text.trim()}${boundary.lower}${(
-                  // Low context = simple prompt, high context = advanced prompt
+
                   (limit < 20000) ? prompt.assign[pov] : prompt.choice[pov]
               )}\n\n`;
           }
-          // ==================== CONTEXT TRUNCATION ====================
-          // Three-phase truncation to fit within AID's context limit
+
           truncate: {
-              // Precalculate how much needs to be trimmed
+
               let excess = text.length - limit;
               if (excess < 1) {
-                  // Under the limit, no truncation required
+
                   break truncate;
               }
-              // Find boundary markers
+
               const upperIndex = text.indexOf(boundary.upper);
               const lowerIndex = (
                   (upperIndex !== -1)
                   ? text.indexOf(boundary.lower, upperIndex + boundary.upper.length)
                   : -1
               );
-              // Phase 1: Truncate the recent story
-              // Between boundary.upper and boundary.lower
-              // Remove from left to right
+
               if ((upperIndex !== -1) && ((lowerIndex === -1) || (upperIndex < lowerIndex))) {
                   const storyStart = upperIndex + boundary.upper.length;
                   const storyLength = ((lowerIndex === -1) ? text.length : lowerIndex) - storyStart;
                   if (0 < storyLength) {
                       const remove = Math.min(
-                          // Never remove more than 85% of recent story context
+
                           Math.floor(storyLength * 0.85),
-                          // Keep at least 2000 chars of recent story context
+
                           Math.max(0, storyLength - 2000),
-                          // But don't remove more than needed
+
                           excess
                       );
                       if (0 < remove) {
@@ -5949,12 +5907,10 @@ function MCPV5Create_inner_package() {
                   }
               }
               if (excess < 1) {
-                  // Phase 1 was enough
+
                   break truncate;
               }
-              // Phase 2: Truncate above the recent story
-              // Between the start and boundary.upper
-              // Remove from right to left
+
               const newUpperIndex = text.indexOf(boundary.upper);
               if (0 < newUpperIndex) {
                   const remove = Math.min(excess, newUpperIndex);
@@ -5962,29 +5918,25 @@ function MCPV5Create_inner_package() {
                   excess -= remove;
               }
               if (excess < 1) {
-                  // Phase 2 was enough
+
                   break truncate;
               }
-              // Phase 3: I don't care anymore, just make it fit
-              // Remove from left to right as a final fallback
-              // (I've never seen this situation happen before, but I guard it anyway)
+
               text = text.slice(text.length - limit);
           }
-          // Replace transient boundary markers with proper formatting
+
           setMarker(boundary.upper, `\n\n${boundary.needle}\n`);
           setMarker(boundary.lower, "\n\n")
           text = text.trimStart() || " ";
           return;
       } else if (hook === "input") {
-          // ==================== INPUT HOOK ====================
-          // Check for /AC command to force-enable Auto-Cards
+
           if (IS.AC.enabled || !/\/\s*A\s*C/i.test(text) || !hasAutoCards()) {
-              // Normal input processing
-              // Append a linebreak to the opening because I said so
+
               text = (history.length === 0) ? `${text.trimEnd()}\n\n` : text || "\u200B";
               return;
           }
-          // Player used a /AC command, force-enable Auto-Cards
+
           IS.AC.forced = true;
           try {
               text = AutoCards("input", text);
@@ -5994,35 +5946,27 @@ function MCPV5Create_inner_package() {
           text ||= "\u200B";
           return;
       } else if ((text.includes(">>>") && text.includes("<<<")) || (3000 < text.length)) {
-          // Output contains an Auto-Cards thingy or is suspiciously long
-          // Safer to leave untouched
+
           IS.agent = "";
           return;
       }
-      // ==================== OUTPUT HOOK ====================
-      // Process model output and implement brain operations
-      /** @type {config} */
+
       const config = Config.get();
-      /**
-       * Ensures clean visual separation between actions
-       * Only applies after "continue" or "story" actions
-       * Does NOT trim leading whitespace from text
-       * @returns {void}
-       */
+
       const prespace = () => {
           const action = getPrevAction();
           if (!["continue", "story"].includes(action?.type)) {
-              // Only adjust spacing after continue or story actions
+
               return;
           }
-          // Get the previous action text
+
           const prevText = (action?.text ?? action?.rawText ?? "").replace(/\n +/g, "\n");
-          // Add appropriate leading newlines based on how the previous action text ended
+
           text = !prevText.endsWith("\n") ? `\n\n${text}` : !prevText.endsWith("\n\n") ? `\n${text}` : text;
           return;
       };
       if (config.guide) {
-          // Print the detailed guide
+
           text = `
   >>> Guide:
   Inner Self was made by LewdLeah ❤️
@@ -6137,52 +6081,48 @@ function MCPV5Create_inner_package() {
           IS.agent = "";
           return;
       } else if (!config.allow) {
-          // Early exit if Inner Self is disabled
+
           text ||= "\u200B";
           IS.agent = "";
           return;
       }
-      // Strip zero-width chars from the model output before processing
+
       text = text.replace(/[\u200B-\u200D]+/g, "");
-      // Check if output looks like an unenclosed operation
-      // Models sometimes forget their parentheses, the poor dears
+
       if (!/[()\[\]{}]/.test(text) && ((
           /^\s*(?:del(?:et(?:e[ds]?|ing))?|for(?:get(?:s|ting)?|got(?:ten)?)|remov(?:e[ds]?|ing))(?:[\s_]*(?:key(?:_name)?|thought|memory|unwanted(?:_key)?))?[\s=:]*[a-z0-9A-Z]*_+[a-z0-9A-Z]/i
       ).test(text) || /^\s*[a-z0-9A-Z_]+\s*=/.test(text))) {
-          // (?:del|delete|deleted|deletes|deleting|forget|forgets|forgetting|forgot|forgotten|remove|removed|removes|removing)
-          // Fully unenclosed block resembles a known pattern
-          // Add an opening parentheses so the block parser can handle it
+
           text = `(${text.trimStart()}`;
       }
-      // ==================== BLOCK PARSER ====================
-      // Parse enclosed blocks from the output
+
       const blocks = [];
       for (const [open, close] of [
-          // Try each container type in order of preference
+
           ["(", ")"],
           ["[", "]"],
           ["{", "}"]
       ]) {
-          // Attempt to repair unclosed blocks
+
           const pass = (() => {
               if (!text.includes(open)) {
-                  // No opening bracket, skip this type
+
                   return true;
               }
-              // Check if the last opening bracket is closed
+
               const rightIndex = text.lastIndexOf(open);
               const rightOfOpen = text.slice(rightIndex);
               if (rightOfOpen.includes(close)) {
-                  // Already closed, proceed with block parsing
+
                   return false;
               }
-              // Try to find where the close bracket should go
+
               for (const pattern of [
-                  // After the deleted key name
+
                   /^[(\[{]\s*(?:del(?:et(?:e[ds]?|ing))?|for(?:get(?:s|ting)?|got(?:ten)?)|remov(?:e[ds]?|ing))(?:[\s_]*(?:key(?:_name)?|thought|memory|unwanted(?:_key)?))?[\s=:]*[a-z0-9A-Z]*_[a-z0-9A-Z_]+/i,
-                  // After the renamed old key name
+
                   /^[(\[{]\s*[a-z0-9A-Z_]+\s*=+\s*[a-z0-9A-Z]*_[a-z0-9A-Z_]+/,
-                  // After the triple-redundant punctuation boundary
+
                   /[.?!‽…。！？‼⁇⁈⁉¿*¡%_–−‒—~-]["'`«»„“”「」´‘’‟‚‛]/
               ]) {
                   const match = rightOfOpen.match(pattern);
@@ -6387,22 +6327,18 @@ function MCPV5Create_inner_package() {
                   // Doesn't look like a common hallucination, might be invalid
                   return null;
               }
-              // Try again with stricter matching
+
               const delMatch2 = str.match(
                   /^(?:del(?:et(?:e[ds]?|ing))?|for(?:get(?:s|ting)?|got(?:ten)?)|remov(?:e[ds]?|ing))[\s=:]*([\s\S]*)$/i
               );
               return delMatch2 ? formatKey(delMatch2[1]) : null;
           })();
-          /**
-           * Generates a delete log statement
-           * @param {string} k - Key being deleted
-           * @returns {string} JavaScript delete statement
-           */
+
           const logDelete = (k = "") => `delete ${path()}${(k === "") ? "[\"\"]" : `.${k}`};`;
           if ((typeof delKey === "string") && (delKey in agent.brain)) {
-              // Valid delete statement
+
               if (!altered.has(delKey)) {
-                  // Queue the delete operation
+
                   operations.push(() => {
                       delete agent.brain[delKey];
                       return logDelete(delKey);
@@ -6411,23 +6347,17 @@ function MCPV5Create_inner_package() {
               }
               continue;
           } else if (!/\S\s*[=:]+\s*\S/.test(str)) {
-              // No assignment pattern, skip
+
               continue;
           }
-          // ==================== KEY EXTRACTION ====================
-          /**
-           * Gets everything after the last colon in a string
-           * @param {string} s - Input string
-           * @returns {string} Content after last colon
-           */
+
           const rightOfColon = (s = "") => s.slice(s.lastIndexOf(":") + 1);
-          // Extract and clean the key name
+
           const key = (() => {
               const raw = formatKey((
                   (delimiter === "=") ? rightOfColon(str.split("=", 1)[0]) : str.split(":", 1)[0]
               ).trim().replaceAll(" ", "_"));
-              // If key exists in brain, use it as-is
-              // Otherwise strip common prefixes/suffixes models tend to add
+
               return (raw in agent.brain) ? raw : (raw
                   .replace(/^th(?:oughts?|ink(?:ing))_(?:(?:o[nfr]|a(?:bout|nd)|with|for)_)?/, "")
                   .replace(/(?:_(?:and|or))?_th(?:oughts?|ink(?:ing))$/, "")
@@ -6438,14 +6368,13 @@ function MCPV5Create_inner_package() {
               || ["thought", "thoughts", "think", "thinking", "any_name", "example_name"].includes(key)
               || ["any_key", "key_name", "example_key"].some(s => key.includes(s))
           ) && !(key in agent.brain))) {
-              // Skip invalid or placeholder keys copied from the task prompts
+
               continue;
           }
-          // ==================== VALUE EXTRACTION ====================
-          // Extract and clean the value
+
           const value = (
               (str.split(delimiter, 2)[1] || "")
-              // Strip leading/trailing quotes and whitespace
+
               .replace(/^[\s"'`«»„“”「」´‘’‟‚‛]+|[\s"'`«»„“”「」´‘’‟‚‛]+$/g, "")
               .replace(/\s+/g, " ")
           );
@@ -6488,52 +6417,48 @@ function MCPV5Create_inner_package() {
           } else if (!(key in agent.brain)) {
               // Check for duplicate thought values (don't store the same thing twice)
               const last = thought.length - 1;
-              // Potentially hot loop so avoid excessive get() calls
+
               const brain = agent.brain;
               for (const key in brain) {
                   const existing = brain[key];
                   if (
-                      // This shouldn't be possible but whatevs
+
                       (typeof existing === "string")
-                      // Short-circuit on impossible relative lengths for speed
+
                       && (last < existing.length)
-                      // Fast check inclusion
+
                       && (existing.indexOf(thought) !== -1)
                   ) {
-                      // This thought already exists within some thought associated with another key
+
                       continue interpreter;
                   }
               }
           }
-          // Queue an assign operation
+
           operations.push(() => {
-              // Increment the global label counter
+
               IS.label++;
-              // Encode the label as zero-width chars for context tracking
+
               IS.encoding = `${(IS.encoding === "") ? "\u200B" : IS.encoding}${(() => {
                   let n = IS.label;
                   let out = "";
-                  // Convert label to binary using ZWNJ (0) and ZWJ (1)
+
                   while (0 < n) {
                       out = `${(n & 1) ? "\u200D" : "\u200C"}${out}`;
                       n >>>= 1;
                   }
                   return out || "\u200C";
               })()}\u200B`;
-              // Inject the encoding into the output text
+
               text = (text
                   .replace(/[\u200B-\u200D]+/g, "")
                   .replace(/^\s*/, leadingWhitespace => `${leadingWhitespace}${IS.encoding}`)
               );
-              // One common complaint from playtesters was that models were storing repeated thoughts
-              // Upon further investigation, I discovered this was actually miscommunication on my part
-              // Players assumed the operation log (card entry) was a reflection of the brain (card notes)
-              // Thus players (reasonably) misinterpreted label updates as repetition
-              // Solution: Log distinct relabel syntax to improve non-verbal communication
+
               const target = `${path()}.${key}`;
               const old = agent.brain[key];
               agent.brain[key] = `${IS.label} → ${thought}`;
-              // Determine if this is a relabel of the same thought value
+
               const relabel = (
                   (typeof old === "string")
                   && (thought === old.slice(old.indexOf("→") + 1).trim())
@@ -6548,18 +6473,16 @@ function MCPV5Create_inner_package() {
           });
           altered.add(key);
       }
-      // ==================== OUTPUT TEXT SANITIZATION ====================
-      // Clean up the model's output text before finalizing
-      // This removes artifacts, formatting issues, and unwanted patterns
+
       text = (simplify(config.debug ? text : text.replaceAll("_", ""))
           .trim()
           .split("\n")
           .filter(line => {
               const lower = line.toLowerCase();
               return !(
-                  // The nuclear option
+
                   /(?:^|[^a-zA-Z])(?:task|output)(?:$|[^a-zA-Z])/.test(lower)
-                  // Common AI hallucinations
+
                   || [
                       "STRICT",
                       "OUTPUT",
@@ -6570,96 +6493,85 @@ function MCPV5Create_inner_package() {
                       "inner self",
                       `You are ${config.player}.`
                   ].some(naughty => line.includes(naughty))
-                  // Remove "story continues" type artifacts from task prompts bleeding through
+
                   || (lower.includes("story") && lower.includes("continu"))
-                  // Remove numbered list items (e.g., "1.", "[1]", "2.")
+
                   || /^\[?\d+(?:\.?\]|\.)/.test(lower)
-                  // Remove stray "user" labels from ChatML imitation
+
                   || /^\s*user(?:$|[^a-z])/.test(lower)
-                  // Remove lines containing only " " and/or "-"
+
                   || /^[ -]+$/.test(lower)
               );
           })
           .join("\n")
           .trim()
-          // Collapse excessive newlines to a maximum of two
+
           .replace(/\n\n\n+/g, "\n\n")
       );
-      // ==================== OUTPUT FINALIZATION ====================
-      // Handle empty outputs and ensure proper spacing between actions
+
       if (text === "") {
-          // AID does not tolerate empty string outputs and "please select continue" messages are cringe
-          // Return encoding if available, otherwise a zero-width space placeholder
+
           text = (IS.encoding === "") ? "\u200B" : IS.encoding;
       } else {
-          // Prepend the thought label encoding to the output text
+
           text = `${IS.encoding}${text}`;
-          // Ensure all between-action linebreaks are equally spaced
+
           prespace();
       }
-      // ==================== OPERATION EXECUTOR ====================
-      // Execute queued brain operations and persist changes
+
       if ((operations.length === 0) || (agent === null)) {
-          // No operations to execute, we're done
+
           return;
       }
       const hash = historyHash();
       if (IS.hash === hash) {
-          // Same history hash means this turn was a retry or erase + continue
-          // This prevents duplicate brain modifications on retry (cached outputs cause problems)
+
           return;
       } else if (typeof agent.card.entry !== "string") {
-          // Initialize the brain card entry if it's not a string (shouldn't happen, but safety first)
+
           agent.card.entry = "";
       } else if (agent.card.entry.endsWith("UTC") && agent.card.entry.startsWith("// initialized @")) {
-          // This is a fresh brain card with only the timestamp comment
-          // I prefer logging this info immediately before processing the first valid operation
-          // Add metadata and initialize the brain object in the log
+
           agent.card.entry = `${agent.card.entry.trimStart()}\n${path("metadata")} = ${(
               JSON.stringify(agent.metadata, null, 2)
           )};\n${path()} = {};\n// Entry: Displays recent brain operations to the player\n// Triggers: Configurable settings for this NPC alone\n// Notes: Allows the player to view/edit actual brain contents`;
       }
-      // Update the hashcode to mark this history state as processed
+
       IS.hash = hash;
-      // Clear the previous encoding since new operations are being committed
+
       IS.encoding = "";
-      // Execute each queued operation and append to the operation log
+
       for (const operation of operations) {
-          // Increment global operation counter
+
           IS.ops++;
-          // Execute the operation (modifies agent.brain) and get the log message
-          // Append the message to the agent's brain card entry
+
           agent.card.entry = `${agent.card.entry}\n\n// operation ${IS.ops}\n${operation()}`.trimStart();
       }
       text ||= "\u200B";
-      // Keep the operation log from growing unbounded
-      // Limit to approximately 2000 chars to satisfy AID's soft entry limit
+
       agent.card.entry = agent.card.entry.split(/\n\n/).slice(-2000).reduceRight((out, op) => (
-          // Only include operations that fit within the char limit
+
           ((out.length + op.length + 2) < 2001) ? `${op}${out ? `\n\n${out}` : ""}` : out
       ), "");
-      // ==================== BRAIN SERIALIZATION ====================
-      // Rapidly reserialize a flat representation of the modified brain, without heavy memory allocations
-      // This custom serialization is faster than JSON.stringify for flat objects
-      // It also produces a more readable format in the story card notes
+
       const brain = agent.brain;
       const keys = Object.keys(brain);
       if (keys.length === 0) {
           agent.card.description = "{}";
           return;
       }
-      // Build the JSON-like string manually for each key-value pair
+
       let serialized = "";
       const appendPair = config.json ? ((
           serialized = `"${keys[0]}": ${JSON.stringify(brain[keys[0]])}`
       ), (key = "") => {
-          // Format -> "key": "value",\n\n (JSON with linebreaks)
+
           serialized += `,\n\n"${key}": ${JSON.stringify(brain[key])}`;
           return;
       }) : ((
           serialized = `${keys[0]}: ${brain[keys[0]]}`
       ), (key = "") => {
-          // Format -> key: value\n\n (simple user-friendly format)
+
           serialized += `\n\n${key}: ${brain[key]}`;
           return;
       });
@@ -6670,75 +6582,61 @@ function MCPV5Create_inner_package() {
       return;
   }
 
-  //—————————————————————————————————————————————————————————————————————————————————————
-
-  /**
-   * Auto-Cards v1.1.3
-   * Made by LewdLeah on May 21, 2025
-   * This AI Dungeon script automatically creates and updates plot-relevant story cards while you play
-   * General-purpose usefulness and compatibility with other scenarios/scripts were my design priorities
-   * Auto-Cards is fully open-source, please copy for use within your own projects! ❤️
-   */
   function AutoCards(inHook, inText, inStop) {
       "use strict"; const S = {
-      /*
-      Default Auto-Cards settings
-      Feel free to change these settings to customize your scenario's default gameplay experience
-      The default values for your scenario are specified below:
-      */
-      // Is Auto-Cards already enabled when the adventure begins?
+
       DEFAULT_DO_AC: true
-      // (true or false)
+
       ,
-      // Pin the "Configure Auto-Cards" story card at the top of the player's story cards list?
+
       DEFAULT_PIN_CONFIGURE_CARD: false
-      // (true or false)
+
       ,
-      // Minimum number of turns in between automatic card generation events?
+
       DEFAULT_CARD_CREATION_COOLDOWN: 40
-      // (0 to 9999)
+
       ,
-      // Use a bulleted list format for newly generated card entries?
+
       DEFAULT_USE_BULLETED_LIST_MODE: true
-      // (true or false)
+
       ,
-      // Maximum allowed length for newly generated story card entries?
+
       DEFAULT_GENERATED_ENTRY_LIMIT: 600
-      // (200 to 2000)
+
       ,
-      // Do newly generated cards have memory updates enabled by default?
+
       DEFAULT_NEW_CARDS_DO_MEMORY_UPDATES: false
-      // (true or false)
+
       ,
-      // Default character limit before the card's memory bank is summarized?
+
       DEFAULT_NEW_CARDS_MEMORY_LIMIT: 3200
-      // (1750 to 9900)
+
       ,
-      // Approximately how much shorter should recently compressed memories be? (ratio = 10 * old / new)
+
       DEFAULT_MEMORY_COMPRESSION_RATIO: 25
-      // (20 to 1250)
+
       ,
-      // Ignore all-caps during title candidate detection?
+
       DEFAULT_IGNORE_ALL_CAPS_TITLES: true
-      // (true or false)
+
       ,
-      // Should player input actions (Do/Say/Story) be considered during title detection?
+
       DEFAULT_DETECT_TITLES_FROM_INPUTS: false
-      // (true or false)
+
       ,
-      // How many (minimum) actions in the past does Auto-Cards look for named entities?
+
       DEFAULT_MINIMUM_LOOK_BACK_DISTANCE: 7
-      // (2 to 88)
+
       ,
-      // Is Live Script Interface v2 enabled?
+
       DEFAULT_DO_LSI_V2: false
-      // (true or false)
+
       ,
-      // Should the "Debug Data" story card be visible?
+
       DEFAULT_SHOW_DEBUG_DATA: false
-      // (true or false)
+
       ,
-      // AI prompt used to generate new story card entries?
+
       DEFAULT_CARD_GENERATION_PROMPT: [
           "-----",
           "",
@@ -6756,9 +6654,9 @@ function MCPV5Create_inner_package() {
           "</SYSTEM>",
           "Continue the entry for %{title} below while avoiding repetition:",
           "%{entry}"
-       ] // (mimic this multi-line "text" format)
+       ]
       ,
-      // AI prompt used to summarize a given story card's memory bank?
+
       DEFAULT_CARD_MEMORY_COMPRESSION_PROMPT: [
           "-----",
           "",
@@ -6778,418 +6676,59 @@ function MCPV5Create_inner_package() {
           "%{memory}",
           "\"\"\"",
           "Summarize below:"
-      ] // (mimic this multi-line "text" format)
+      ]
       ,
-      // Titles banned from future card generation attempts?
+
       DEFAULT_BANNED_TITLES_LIST: (
           "North, East, South, West, Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, January, February, March, April, May, June, July, August, September, October, November, December"
-      ) // (mimic this comma-list "text" format)
+      )
       ,
-      // Default story card "type" used by Auto-Cards? (does not matter)
+
       DEFAULT_CARD_TYPE: "class"
-      // ("text")
+
       ,
-      // Should titles mentioned in the "opening" plot component be banned from future card generation by default?
+
       DEFAULT_BAN_TITLES_FROM_OPENING: false
-      // (true or false)
+
       ,
-      }; //——————————————————————————————————————————————————————————————————————————————
+      };
 
-      /*
-      Useful API functions for coders (otherwise ignore)
-      Here's what each one does in plain terms:
-
-      AutoCards().API.postponeEvents();
-      Pauses Auto-Cards activity for n many turns
-
-      AutoCards().API.emergencyHalt();
-      Emergency stop or resume
-
-      AutoCards().API.suppressMessages();
-      Hides Auto-Cards toasts by preventing assignment to state.message
-
-      AutoCards().API.debugLog();
-      Writes to the debug log card
-
-      AutoCards().API.toggle();
-      Turns Auto-Cards on/off
-
-      AutoCards().API.generateCard();
-      Initiates AI generation of the requested card
-
-      AutoCards().API.redoCard();
-      Regenerates an existing card
-
-      AutoCards().API.setCardAsAuto();
-      Flags or unflags a card as automatic
-
-      AutoCards().API.addCardMemory();
-      Adds a memory to a specific card
-
-      AutoCards().API.eraseAllAutoCards();
-      Deletes all auto-cards
-
-      AutoCards().API.getUsedTitles();
-      Lists all current card titles
-
-      AutoCards().API.getBannedTitles();
-      Shows your current banned titles list
-
-      AutoCards().API.setBannedTitles();
-      Replaces the banned titles list with a new list
-
-      AutoCards().API.buildCard();
-      Makes a new card from scratch, using exact parameters
-
-      AutoCards().API.getCard();
-      Finds cards that match a filter
-
-      AutoCards().API.eraseCard();
-      Deletes cards matching a filter
-      */
-
-      /*** Postpones internal Auto-Cards events for a specified number of turns
-      * 
-      * @function
-      * @param {number} turns A non-negative integer representing the number of turns to postpone events
-      * @returns {Object} An object containing cooldown values affected by the postponement
-      * @throws {Error} If turns is not a non-negative integer
-      */
-      // AutoCards().API.postponeEvents();
-
-      /*** Sets or clears the emergency halt flag to pause Auto-Cards operations
-      * 
-      * @function
-      * @param {boolean} shouldHalt A boolean value indicating whether to engage (true) or disengage (false) emergency halt
-      * @returns {boolean} The value that was set
-      * @throws {Error} If called from within isolateLSIv2 scope or with a non-boolean argument
-      */
-      // AutoCards().API.emergencyHalt();
-
-      /*** Enables or disables state.message assignments from Auto-Cards
-      * 
-      * @function
-      * @param {boolean} shouldSuppress If true, suppresses all Auto-Cards messages; false enables them
-      * @returns {Array} The current pending messages after setting suppression
-      * @throws {Error} If shouldSuppress is not a boolean
-      */
-      // AutoCards().API.suppressMessages();
-
-      /*** Logs debug information to the "Debug Log card console
-      * 
-      * @function
-      * @param {...any} args Arguments to log for debugging purposes
-      * @returns {any} The story card object reference
-      */
-      // AutoCards().API.debugLog();
-
-      /*** Toggles Auto-Cards behavior or sets it directly
-      * 
-      * @function
-      * @param {boolean|null|undefined} toggleType If undefined, toggles the current state. If boolean or null, sets the state accordingly
-      * @returns {boolean|null|undefined} The state that was set or inferred
-      * @throws {Error} If toggleType is not a boolean, null, or undefined
-      */
-      // AutoCards().API.toggle();
-
-      /*** Generates a new card using optional prompt details or a card request object
-      * 
-      * This function supports two usage modes:
-      * 
-      * 1. Object Mode:
-      *    Pass a single object containing card request parameters. The only mandatory property is "title"
-      *    All other properties are optional and customize the card generation
-      * 
-      *    Example:
-      *    AutoCards().API.generateCard({
-      *      type: "character",         // The category or type of the card; defaults to "class" if omitted
-      *      title: "Leah the Lewd",    // The card's title (required)
-      *      keysStart: "Lewd,Leah",    // Optional trigger keywords associated with the card
-      *      entryStart: "You are a woman named Leah.", // Existing content to prepend to the AI-generated entry
-      *      entryPrompt: "",           // Global prompt guiding AI content generation
-      *      entryPromptDetails: "Focus on Leah's works of artifice and ingenuity", // Additional prompt info
-      *      entryLimit: 600,           // Target character length for the AI-generated entry
-      *      description: "Player character!", // Freeform notes
-      *      memoryStart: "Leah purchased a new sweater.", // Existing memory content
-      *      memoryUpdates: true,       // Whether the card's memory bank will update on its own
-      *      memoryLimit: 3200          // Preferred memory bank size before summarization/compression
-      *    });
-      * 
-      * 2. String Mode:
-      *    Pass a string as the title and optionally two additional strings to specify prompt details
-      *    This mode is shorthand for quick card generation without an explicit card request object
-      * 
-      *    Examples:
-      *    AutoCards().API.generateCard("Leah the Lewd");
-      *    AutoCards().API.generateCard("Leah the Lewd", "Focus on Leah's works of artifice and ingenuity");
-      *    AutoCards().API.generateCard(
-      *      "Leah the Lewd",
-      *      "Focus on Leah's works of artifice and ingenuity",
-      *      "You are a woman named Leah."
-      *    );
-      * 
-      * @function
-      * @param {Object|string} request Either a fully specified card request object or a string title
-      * @param {string} [extra1] Optional detailed prompt text when using string mode
-      * @param {string} [extra2] Optional entry start text when using string mode
-      * @returns {boolean} Returns true if the generation attempt succeeded, false otherwise
-      * @throws {Error} Throws if called with invalid arguments or missing a required title property
-      */
-      // AutoCards().API.generateCard();
-
-      /*** Regenerates a card by title or object reference, optionally preserving or modifying its input info
-      *
-      * @function
-      * @param {Object|string} request Either a fully specified card request object or a string title for the card to be regenerated
-      * @param {boolean} [useOldInfo=true] If true, preserves old info in the new generation; false omits it
-      * @param {string} [newInfo=""] Additional info to append to the generation prompt
-      * @returns {boolean} True if regeneration succeeded; false otherwise
-      * @throws {Error} If the request format is invalid, or if the second or third parameters are the wrong types
-      */
-      // AutoCards().API.redoCard();
-
-      /*** Flags or unflags a card as an auto-card, controlling its automatic generation behavior
-      *
-      * @function
-      * @param {Object|string} targetCard The card object or title to mark/unmark as an auto-card
-      * @param {boolean} [setOrUnset=true] If true, marks the card as an auto-card; false removes the flag
-      * @returns {boolean} True if the operation succeeded; false if the card was invalid or already matched the target state
-      * @throws {Error} If the arguments are invalid types
-      */
-      // AutoCards().API.setCardAsAuto();
-
-      /*** Appends a memory to a story card's memory bank
-      *
-      * @function
-      * @param {Object|string} targetCard A card object reference or title string
-      * @param {string} newMemory The memory text to add
-      * @returns {boolean} True if the memory was added; false if it was empty, already present, or the card was not found
-      * @throws {Error} If the inputs are not a string or valid card object reference
-      */
-      // AutoCards().API.addCardMemory();
-
-      /*** Removes all previously generated auto-cards and resets various states
-      *
-      * @function
-      * @returns {number} The number of cards that were removed
-      */
-      // AutoCards().API.eraseAllAutoCards();
-
-      /*** Retrieves an array of titles currently used by the adventure's story cards
-      *
-      * @function
-      * @returns {Array<string>} An array of strings representing used titles
-      */
-      // AutoCards().API.getUsedTitles();
-
-      /*** Retrieves an array of banned titles
-      *
-      * @function
-      * @returns {Array<string>} An array of banned title strings
-      */
-      // AutoCards().API.getBannedTitles();
-
-      /*** Sets the banned titles array, replacing any previously banned titles
-      *
-      * @function
-      * @param {string|Array<string>} titles A comma-separated string or array of strings representing titles to ban
-      * @returns {Object} An object containing oldBans and newBans arrays
-      * @throws {Error} If the input is neither a string nor an array of strings
-      */
-      // AutoCards().API.setBannedTitles();
-
-      /*** Creates a new story card with the specified parameters
-      *
-      * @function
-      * @param {string|Object} title Card title string or full card template object containing all fields
-      * @param {string} [entry] The entry text for the card
-      * @param {string} [type] The card type (e.g., "character", "location")
-      * @param {string} [keys] The keys (triggers) for the card
-      * @param {string} [description] The notes or memory bank of the card
-      * @param {number} [insertionIndex] Optional index to insert the card at a specific position within storyCards
-      * @returns {Object|null} The created card object reference, or null if creation failed
-      */
-      // AutoCards().API.buildCard();
-
-      /*** Finds and returns story cards satisfying a user-defined condition
-      * Example:
-      * const leahCard = AutoCards().API.getCard(card => (card.title === "Leah"));
-      *
-      * @function
-      * @param {Function} predicate A function which takes a card and returns true if it matches
-      * @param {boolean} [getAll=false] If true, returns all matching cards; otherwise returns the first match
-      * @returns {Object|Array<Object>|null} A single card object reference, an array of cards, or null if no match is found
-      * @throws {Error} If the predicate is not a function or getAll is not a boolean
-      */
-      // AutoCards().API.getCard();
-
-      /*** Removes story cards based on a user-defined condition or by direct reference
-      * Example:
-      * AutoCards().API.eraseCard(card => (card.title === "Leah"));
-      *
-      * @function
-      * @param {Function|Object} predicate A predicate function or a card object reference
-      * @param {boolean} [eraseAll=false] If true, removes all matching cards; otherwise removes the first match
-      * @returns {boolean|number} True if a single card was removed, false if none matched, or the number of cards erased
-      * @throws {Error} If the inputs are not a valid predicate function, card object, or boolean
-      */
-      // AutoCards().API.eraseCard();
-
-      //—————————————————————————————————————————————————————————————————————————————————
-
-      /*
-      To everyone who helped, thank you:
-
-      AHotHamster22
-      Most extensive testing, feedback, ideation, and kindness
-
-      BinKompliziert
-      UI feedback
-
-      Boo
-      Discord communication
-
-      bottledfox
-      API ideas for alternative card generation use-cases
-
-      Bruno
-      Most extensive testing, feedback, ideation, and kindness
-      https://play.aidungeon.com/profile/Azuhre
-
-      Burnout
-      Implementation improvements, algorithm ideas, script help, and LSIv2 inspiration
-
-      bweni
-      Testing
-
-      DebaczX
-      Most extensive testing, feedback, ideation, and kindness
-
-      Dirty Kurtis
-      Card entry generation prompt engineering
-
-      Dragranis
-      Provided the memory dataset used for boundary calibration
-
-      effortlyss
-      Data, testing, in-game command ideas, config settings, and other UX improvements
-
-      Hawk
-      Grammar and special-cased proper nouns
-
-      Idle Confusion
-      Testing
-      https://play.aidungeon.com/profile/Idle%20Confusion
-
-      ImprezA
-      Most extensive testing, feedback, ideation, and kindness
-      https://play.aidungeon.com/profile/ImprezA
-
-      Kat-Oli
-      Title parsing, grammar, and special-cased proper nouns
-
-      KryptykAngel
-      LSIv2 ideas
-      https://play.aidungeon.com/profile/KryptykAngel
-
-      Mad19pumpkin
-      API ideas
-      https://play.aidungeon.com/profile/Mad19pumpkin
-
-      Magic
-      Implementation and syntax improvements
-      https://play.aidungeon.com/profile/MagicOfLolis
-
-      Mirox80
-      Testing, feedback, and scenario integration ideas
-      https://play.aidungeon.com/profile/Mirox80
-
-      Nathaniel Wyvern
-      Testing
-      https://play.aidungeon.com/profile/NathanielWyvern
-
-      NobodyIsUgly
-      All-caps title parsing feedback
-
-      OnyxFlame
-      Card memory bank implementation ideas and special-cased proper nouns
-
-      Purplejump
-      API ideas for deep integration with other AID scripts
-
-      Randy Viosca
-      Context injection and card memory bank structure
-      https://play.aidungeon.com/profile/Random_Variable
-
-      RustyPawz
-      API ideas for simplified card interaction
-      https://play.aidungeon.com/profile/RustyPawz
-
-      sinner
-      Testing
-
-      Sleepy pink
-      Testing and feedback
-      https://play.aidungeon.com/profile/Pinkghost
-
-      Vutinberg
-      Memory compression ideas and prompt engineering
-
-      Wilmar
-      Card entry generation and memory summarization prompt engineering
-
-      Yi1i1i
-      Idea for the redoCard API function and "/ac redo" in-game command
-
-      A note to future individuals:
-      If you fork or modify Auto-Cards... Go ahead and put your name here too! Yay! 🥰
-      */
-
-      //—————————————————————————————————————————————————————————————————————————————————
-
-      /*
-      The code below implements Auto-Cards
-      Enjoy! ❤️
-      */
-
-      // My class definitions are hoisted by wrapper functions because it's less ugly (lol)
       const Const = hoistConst();
       const O = hoistO();
       const Words = hoistWords();
       const StringsHashed = hoistStringsHashed();
       const Internal = hoistInternal();
-      // AutoCards has an explicitly immutable domain: HOOK, TEXT, and STOP
+
       const HOOK = inHook;
       const TEXT = ((typeof inText === "string") && inText) || "\n";
       const STOP = (inStop === true);
-      // AutoCards returns a pseudoimmutable codomain which is initialized only once before being read and returned
+
       const CODOMAIN = new Const().declare();
-      // Transient sets for high-performance lookup
+
       const [used, bans, auto, forenames, surnames] = Array.from({length: 5}, () => new Set());
       const memoized = new Map();
-      // Holds a reference to the data card singleton, remains unassigned unless required
+
       let data = null;
-      // Validate globalThis.text
+
       text = ((typeof text === "string") && text) || "\n";
-      // Main settings override local settings
+
       if (typeof globalThis.MainSettings === "function") {
           new MainSettings("AutoCards", "AC").merge(S);
       }
-      // Container for the persistent state of AutoCards
+
       const AC = (function() {
           if (state.LSIv2) {
-              // The Auto-Cards external API is also available from within the inner scope of LSIv2
-              // Call with AutoCards().API.nameOfFunction(yourArguments);
+
               return state.LSIv2;
           } else if (state.AutoCards) {
-              // state.AutoCards is prioritized for performance
+
               const ac = state.AutoCards;
               delete state.AutoCards;
               return ac;
           }
           const dataVariants = getDataVariants();
           data = getSingletonCard(false, O.f({...dataVariants.critical}), O.f({...dataVariants.debug}));
-          // Deserialize the state of Auto-Cards from the data card
+
           const ac = (function() {
               try {
                   return JSON.parse(data?.description);
@@ -7197,7 +6736,7 @@ function MCPV5Create_inner_package() {
                   return null;
               }
           })();
-          // If the deserialized state fails to match the following structure, fallback to defaults
+
           if (validate(ac, O.f({
               config: [
                   "doAC", "deleteAllAutoCards", "pinConfigureCard", "addCardCooldown", "bulletedListMode", "defaultEntryLimit", "defaultCardsDoMemoryUpdates", "defaultMemoryLimit", "memoryCompressionRatio", "ignoreAllCapsTitles", "readFromInputs", "minimumLookBackDistance", "LSIv2", "showDebugData", "generationPrompt", "compressionPrompt", "defaultCardType"
@@ -7226,7 +6765,7 @@ function MCPV5Create_inner_package() {
                   ]
               }
           }))) {
-              // The deserialization was a success
+
               return ac;
           }
           function validate(obj, finalKeys) {
@@ -7246,68 +6785,68 @@ function MCPV5Create_inner_package() {
                   });
               }
           }
-          // AC is malformed, reinitialize with default values
+
           return {
-              // In-game configurable parameters
+
               config: getDefaultConfig(),
-              // Collection of various short-term signals passed forward in time
+
               signal: {
-                  // API: Suspend nearly all Auto-Cards processes
+
                   emergencyHalt: false,
-                  // API: Forcefully toggle Auto-Cards on or off
+
                   forceToggle: null,
-                  // API: Banned titles were externally overwritten
+
                   overrideBans: 0,
-                  // Signal the construction of the opposite control card during the upcoming onOutput hook
+
                   swapControlCards: false,
-                  // Signal a limited recheck of recent title candidates following a retry or erase
+
                   recheckRetryOrErase: false,
-                  // Signal an upcoming onOutput text replacement
+
                   outputReplacement: "",
-                  // info.maxChars is only defined onContext but must be accessed during other hooks too
+
                   maxChars: Math.abs(info?.maxChars || 3200),
-                  // An error occured within the isolateLSIv2 scope during an earlier hook
+
                   upstreamError: ""
               },
-              // Moderates the generation of new story card entries
+
               generation: {
-                  // Number of story progression turns between card generations
+
                   cooldown: validateCooldown(
                       underQuarterInteger(validateCooldown(S.DEFAULT_CARD_CREATION_COOLDOWN))
                   ),
-                  // Continues prompted so far
+
                   completed: 0,
-                  // Upper limit on consecutive continues
+
                   permitted: 34,
-                  // Properties of the incomplete story card
+
                   workpiece: O.f({}),
-                  // Pending card generations
+
                   pending: [],
               },
-              // Moderates the compression of story card memories
+
               compression: {
-                  // Continues prompted so far
+
                   completed: 0,
-                  // A title header reference key for this auto-card
+
                   titleKey: "",
-                  // The full and proper title
+
                   vanityTitle: "",
-                  // Response length estimate used to compute # of outputs remaining
+
                   responseEstimate: 1400,
-                  // Indices [0, n] of oldMemoryBank memories used to build the current memory construct
+
                   lastConstructIndex: -1,
-                  // Bank of card memories awaiting compression
+
                   oldMemoryBank: [],
-                  // Incomplete bank of newly compressed card memories
+
                   newMemoryBank: [],
               },
-              // Prevents incompatibility issues borne of state.message modification
+
               message: {
-                  // Last turn's state.message
+
                   previous: getStateMessage(),
-                  // API: Allow Auto-Cards to post messages?
+
                   suppress: false,
-                  // Pending Auto-Cards message(s)
+
                   pending: (function() {
                       if (S.DEFAULT_DO_AC !== false) {
                           const startupMessage = "Enabled! You may now edit the \"Configure Auto-Cards\" story card";
@@ -7317,44 +6856,44 @@ function MCPV5Create_inner_package() {
                           return [];
                       }
                   })(),
-                  // Counter to track all Auto-Cards message events
+
                   event: 0
               },
-              // Timekeeper used for temporal events
+
               chronometer: {
-                  // Previous turn's measurement of info.actionCount
+
                   turn: getTurn(),
-                  // Whether or not various turn counters should be stepped (falsified by retry actions)
+
                   step: true,
-                  // Number of consecutive turn interruptions
+
                   amnesia: 0,
-                  // API: Postpone Auto-Cards externalities for n many turns
+
                   postpone: 0,
               },
-              // Scalable atabase to store dynamic game information
+
               database: {
-                  // Words are pale shadows of forgotten names. As names have power, words have power
+
                   titles: {
-                      // A transient array of known titles parsed from card titles, entry title headers, and trigger keywords
+
                       used: [],
-                      // Titles banned from future card generation attempts and various maintenance procedures
+
                       banned: getDefaultConfigBans(),
-                      // Potential future card titles and their turns of occurrence
+
                       candidates: [],
-                      // Helps avoid rechecking the same action text more than once, generally
+
                       lastActionParsed: -1,
-                      // Ensures weird combinations of retry/erase events remain predictable
+
                       lastTextHash: "%@%",
-                      // Newly banned titles which will be added to the config card
+
                       pendingBans: [],
-                      // Currently banned titles which will be removed from the config card
+
                       pendingUnbans: []
                   },
-                  // Memories are parsed from context and handled by various operations (basically magic)
+
                   memories: {
-                      // Dynamic store of 'story card -> memory' conceptual relations
+
                       associations: {},
-                      // Serialized hashset of the 2000 most recent near-duplicate memories purged from context
+
                       duplicates: "%@%"
                   }
               }
@@ -7377,14 +6916,11 @@ function MCPV5Create_inner_package() {
           AC.signal.maxChars = Math.abs(info?.maxChars || AC.signal.maxChars);
           if (HOOK === null) {
               if (Number.isInteger(info.maxChars)) {
-                  // AutoCards(null) is always invoked once after being declared within the shared library
-                  // Context must be cleaned before passing text to the context modifier
-                  // This measure is taken to ensure compatability with other scripts
-                  // First, remove all command, continue, and comfirmation messages from the context window
+
                   text = (text
-                      // Remove all /ac commands
+
                       .replace(/\s*^.*\/\s*A\s*C.*$\s*/gmi, "\n\n")
-                      // Remove all comfirmation requests and responses
+
                       .replace(/\s*\n*.*CONFIRM\s*DELETE.*\n*\s*/gi, confirmation => {
                           if (confirmation.includes("<<<")) {
                               return "\n\n";
@@ -7392,8 +6928,7 @@ function MCPV5Create_inner_package() {
                               return "";
                           }
                       })
-                      // Remove dumb memories from the context window
-                      // (Latitude, if you're reading this, please give us memoryBank read/write access 😭)
+
                       .replace(/(Memories:)\s*([\s\S]*?)\s*(Recent Story:|$)/i, (_, left, memories, right) => {
                           return (left + "\n" + (memories
                               .split("\n")
@@ -7408,33 +6943,26 @@ function MCPV5Create_inner_package() {
                               .join("\n")
                           ) + (right !== "") ? ("\n\n" + right) : "");
                       })
-                      // Remove various Auto-Cards messages
+
                       .replace(/(?:\s*>>>[\s\S]*?<<<\s*)+/g, "\n\n")
                   );
                   if (!shouldProceed()) {
-                      // Whenever Auto-Cards is inactive, remove auto card title headers from contextualized story card entries
+
                       text = (text
                           .replace(/\s*{\s*titles?\s*:[\s\S]*?}\s*/gi, "\n\n")
                           .replace(/World Lore:\s*/i, "World Lore:\n")
                       );
-                      // Otherwise, implement a more complex version of this step within the (HOOK === "context") scope of AutoCards
+
                   }
               }
               CODOMAIN.initialize(null);
           } else {
-              // AutoCards was (probably) called without arguments, return an external API to allow other script creators to programmatically govern the behavior of Auto-Cards from elsewhere within their own scripts
+
               state.InnerSelf ??= {};
               state.InnerSelf.AC ??= {};
               state.InnerSelf.AC.forced = true;
               CODOMAIN.initialize({API: O.f(Object.fromEntries(Object.entries({
-                  // Call these API functions like so: AutoCards().API.nameOfFunction(argumentsOfFunction)
-                  /*** Postpones internal Auto-Cards events for a specified number of turns
-                  * 
-                  * @function
-                  * @param {number} turns A non-negative integer representing the number of turns to postpone events
-                  * @returns {Object} An object containing cooldown values affected by the postponement
-                  * @throws {Error} If turns is not a non-negative integer
-                  */
+
                   postponeEvents: function(turns) {
                       if (Number.isInteger(turns) && (0 <= turns)) {
                           AC.chronometer.postpone = turns;
@@ -7449,13 +6977,7 @@ function MCPV5Create_inner_package() {
                           addCardNextCooldown: AC.config.addCardCooldown
                       };
                   },
-                  /*** Sets or clears the emergency halt flag to pause Auto-Cards operations
-                  * 
-                  * @function
-                  * @param {boolean} shouldHalt A boolean value indicating whether to engage (true) or disengage (false) emergency halt
-                  * @returns {boolean} The value that was set
-                  * @throws {Error} If called from within isolateLSIv2 scope or with a non-boolean argument
-                  */
+
                   emergencyHalt: function(shouldHalt) {
                       const scopeRestriction = new Error();
                       if (scopeRestriction.stack && scopeRestriction.stack.includes("isolateLSIv2")) {
@@ -7471,13 +6993,7 @@ function MCPV5Create_inner_package() {
                       }
                       return shouldHalt;
                   },
-                  /*** Enables or disables state.message assignments from Auto-Cards
-                  * 
-                  * @function
-                  * @param {boolean} shouldSuppress If true, suppresses all Auto-Cards messages; false enables them
-                  * @returns {Array} The current pending messages after setting suppression
-                  * @throws {Error} If shouldSuppress is not a boolean
-                  */
+
                   suppressMessages: function(shouldSuppress) {
                       if (typeof shouldSuppress === "boolean") {
                           AC.message.suppress = shouldSuppress;
@@ -7488,22 +7004,11 @@ function MCPV5Create_inner_package() {
                       }
                       return AC.message.pending;
                   },
-                  /*** Logs debug information to the "Debug Log" console card
-                  * 
-                  * @function
-                  * @param {...any} args Arguments to log for debugging purposes
-                  * @returns {any} The story card object reference
-                  */
+
                   debugLog: function(...args) {
                       return Internal.debugLog(...args);
                   },
-                  /*** Toggles Auto-Cards behavior or sets it directly
-                  * 
-                  * @function
-                  * @param {boolean|null|undefined} toggleType If undefined, toggles the current state. If boolean or null, sets the state accordingly
-                  * @returns {boolean|null|undefined} The state that was set or inferred
-                  * @throws {Error} If toggleType is not a boolean, null, or undefined
-                  */
+
                   toggle: function(toggleType) {
                       if (toggleType === undefined) {
                           if (AC.signal.forceToggle !== null) {
@@ -7522,31 +7027,9 @@ function MCPV5Create_inner_package() {
                       }
                       return toggleType;
                   },
-                  /*** Generates a new card using optional prompt details or a request object
-                  * 
-                  * @function
-                  * @param {Object|string} request A request object with card parameters or a string representing the title
-                  * @param {string} [extra1] Optional entryPromptDetails if using string mode
-                  * @param {string} [extra2] Optional entryStart if using string mode
-                  * @returns {boolean} Did the generation attempt succeed or fail
-                  * @throws {Error} If the request is not valid or missing a title
-                  */
+
                   generateCard: function(request, extra1, extra2) {
-                      // Function call guide:
-                      // AutoCards().API.generateCard({
-                      //     // All properties except 'title' are optional
-                      //     type: "card type, defaults to 'class' for ease of filtering",
-                      //     title: "card title",
-                      //     keysStart: "preexisting card triggers",
-                      //     entryStart: "preexisting card entry",
-                      //     entryPrompt: "prompt the AI will use to complete this entry",
-                      //     entryPromptDetails: "extra details to include with this card's prompt",
-                      //     entryLimit: 600, // target character count for the generated entry
-                      //     description: "card notes",
-                      //     memoryStart: "preexisting card memory",
-                      //     memoryUpdates: true, // card updates when new relevant memories are formed
-                      //     memoryLimit: 3200, // max characters before the card memory is compressed
-                      // });
+
                       if (typeof request === "string") {
                           request = {title: request};
                           if (typeof extra1 === "string") {
@@ -7564,15 +7047,7 @@ function MCPV5Create_inner_package() {
                       Internal.getUsedTitles(true);
                       return Internal.generateCard(request);
                   },
-                  /*** Regenerates a card by title or object reference, optionally preserving or modifying its input info
-                  *
-                  * @function
-                  * @param {Object|string} request A card object reference or title string for the card to be regenerated
-                  * @param {boolean} [useOldInfo=true] If true, preserves old info in the new generation; false omits it
-                  * @param {string} [newInfo=""] Additional info to append to the generation prompt
-                  * @returns {boolean} True if regeneration succeeded; false otherwise
-                  * @throws {Error} If the request format is invalid, or if the second or third parameters are the wrong types
-                  */
+
                   redoCard: function(request, useOldInfo = true, newInfo = "") {
                       if (typeof request === "string") {
                           request = {title: request};
@@ -7592,14 +7067,7 @@ function MCPV5Create_inner_package() {
                       }
                       return Internal.redoCard(request, useOldInfo, newInfo);
                   },
-                  /*** Flags or unflags a card as an auto-card, controlling its automatic generation behavior
-                  *
-                  * @function
-                  * @param {Object|string} targetCard The card object or title to mark/unmark as an auto-card
-                  * @param {boolean} [setOrUnset=true] If true, marks the card as an auto-card; false removes the flag
-                  * @returns {boolean} True if the operation succeeded; false if the card was invalid or already matched the target state
-                  * @throws {Error} If the arguments are invalid types
-                  */
+
                   setCardAsAuto: function(targetCard, setOrUnset = true) {
                       if (isTitleInObj(targetCard)) {
                           targetCard = targetCard.title;
@@ -7636,14 +7104,7 @@ function MCPV5Create_inner_package() {
                       }
                       return true;
                   },
-                  /*** Appends a memory to a story card's memory bank
-                  *
-                  * @function
-                  * @param {Object|string} targetCard A card object reference or title string
-                  * @param {string} newMemory The memory text to add
-                  * @returns {boolean} True if the memory was added; false if it was empty, already present, or the card was not found
-                  * @throws {Error} If the inputs are not a string or valid card object reference
-                  */
+
                   addCardMemory: function(targetCard, newMemory) {
                       if (isTitleInObj(targetCard)) {
                           targetCard = targetCard.title;
@@ -7687,37 +7148,19 @@ function MCPV5Create_inner_package() {
                       }
                       return true;
                   },
-                  /*** Removes all previously generated auto-cards and resets various states
-                  *
-                  * @function
-                  * @returns {number} The number of cards that were removed
-                  */
+
                   eraseAllAutoCards: function() {
                       return Internal.eraseAllAutoCards();
                   },
-                  /*** Retrieves an array of titles currently used by the adventure's story cards
-                  *
-                  * @function
-                  * @returns {Array<string>} An array of strings representing used titles
-                  */
+
                   getUsedTitles: function() {
                       return Internal.getUsedTitles(true);
                   },
-                  /*** Retrieves an array of banned titles
-                  *
-                  * @function
-                  * @returns {Array<string>} An array of banned title strings
-                  */
+
                   getBannedTitles: function() {
                       return Internal.getBannedTitles();
                   },
-                  /*** Sets the banned titles array, replacing any previously banned titles
-                  *
-                  * @function
-                  * @param {string|Array<string>} titles A comma-separated string or array of strings representing titles to ban
-                  * @returns {Object} An object containing oldBans and newBans arrays
-                  * @throws {Error} If the input is neither a string nor an array of strings
-                  */
+
                   setBannedTitles: function(titles) {
                       const codomain = {oldBans: AC.database.titles.banned};
                       if (Array.isArray(titles) && titles.every(title => (typeof title === "string"))) {
@@ -7741,17 +7184,7 @@ function MCPV5Create_inner_package() {
                       }
                       return codomain;
                   },
-                  /*** Creates a new story card with the specified parameters
-                  *
-                  * @function
-                  * @param {string|Object} title Card title string or full card template object containing all fields
-                  * @param {string} [entry] The entry text for the card
-                  * @param {string} [type] The card type (e.g., "character", "location")
-                  * @param {string} [keys] The keys (triggers) for the card
-                  * @param {string} [description] The notes or memory bank of the card
-                  * @param {number} [insertionIndex] Optional index to insert the card at a specific position within storyCards
-                  * @returns {Object|null} The created card object reference, or null if creation failed
-                  */
+
                   buildCard: function(title, entry, type, keys, description, insertionIndex) {
                       if (isTitleInObj(title)) {
                           type = title.type ?? type;
@@ -7780,14 +7213,7 @@ function MCPV5Create_inner_package() {
                       }
                       return null;
                   },
-                  /*** Finds and returns story cards satisfying a user-defined condition
-                  *
-                  * @function
-                  * @param {Function} predicate A function which takes a card and returns true if it matches
-                  * @param {boolean} [getAll=false] If true, returns all matching cards; otherwise returns the first match
-                  * @returns {Object|Array<Object>|null} A single card object reference, an array of cards, or null if no match is found
-                  * @throws {Error} If the predicate is not a function or getAll is not a boolean
-                  */
+
                   getCard: function(predicate, getAll = false) {
                       if (typeof predicate !== "function") {
                           throw new Error(
@@ -7800,14 +7226,7 @@ function MCPV5Create_inner_package() {
                       }
                       return Internal.getCard(predicate, getAll);
                   },
-                  /*** Removes story cards based on a user-defined condition or by direct reference
-                  *
-                  * @function
-                  * @param {Function|Object} predicate A predicate function or a card object reference
-                  * @param {boolean} [eraseAll=false] If true, removes all matching cards; otherwise removes the first match
-                  * @returns {boolean|number} True if a single card was removed, false if none matched, or the number of cards erased
-                  * @throws {Error} If the inputs are not a valid predicate function, card object, or boolean
-                  */
+
                   eraseCard: function(predicate, eraseAll = false) {
                       if (isTitleInObj(predicate) && storyCards.includes(predicate)) {
                           return eraseCard(predicate);
@@ -7820,7 +7239,7 @@ function MCPV5Create_inner_package() {
                               "Invalid argument: \"" + predicate + ", " + eraseAll + "\" -> AutoCards().API.eraseCard() requires a boolean as its second argument"
                           );
                       } else if (eraseAll) {
-                          // Erase all cards which satisfy the given condition
+
                           let cardsErased = 0;
                           for (const [index, card] of storyCards.entries()) {
                               if (predicate(card)) {
@@ -7830,7 +7249,7 @@ function MCPV5Create_inner_package() {
                           }
                           return cardsErased;
                       }
-                      // Erase the first card which satisfies the given condition
+
                       for (const [index, card] of storyCards.entries()) {
                           if (predicate(card)) {
                               removeStoryCard(index);
@@ -7858,11 +7277,11 @@ function MCPV5Create_inner_package() {
       } else if (AC.signal.emergencyHalt) {
           switch(HOOK) {
           case "context": {
-              // AutoCards was called within the context modifier
+
               advanceChronometer();
               break; }
           case "output": {
-              // AutoCards was called within the output modifier
+
               concludeEmergency();
               const previousAction = readPastAction(0);
               if (isDoSayStory(previousAction.type) && /escape\s*emergency\s*halt/i.test(previousAction.text)) {
@@ -7872,11 +7291,11 @@ function MCPV5Create_inner_package() {
           }
           CODOMAIN.initialize(TEXT);
       } else if ((AC.config.LSIv2 !== null) && AC.config.LSIv2) {
-          // Silly recursion shenanigans
+
           state.LSIv2 = AC;
           AC.config.LSIv2 = false;
           const LSI_DOMAIN = AutoCards(HOOK, TEXT, STOP);
-          // Is this lazy loading mechanism overkill? Yes. But it's fun!
+
           const factories = O.f({
               library: () => ({
                   name: Words.reserved.library,
@@ -8089,7 +7508,7 @@ function MCPV5Create_inner_package() {
           if (AC.config.LSIv2 !== null) {
               switch(HOOK) {
               case "input": {
-                  // AutoCards was called within the input modifier
+
                   const [libraryCards, inputCards, logCard] = collectCards(
                       templates.library,
                       templates.input,
@@ -8105,7 +7524,7 @@ function MCPV5Create_inner_package() {
                   }
                   break; }
               case "context": {
-                  // AutoCards was called within the context modifier
+
                   const [libraryCards, contextCards, logCard] = collectCards(
                       templates.library,
                       templates.context,
@@ -8137,7 +7556,7 @@ function MCPV5Create_inner_package() {
                   }
                   break; }
               case "output": {
-                  // AutoCards was called within the output modifier
+
                   const [libraryCards, outputCards, guideCard, stateCard, logCard] = collectCards(
                       templates.library,
                       templates.output,
@@ -8257,8 +7676,7 @@ function MCPV5Create_inner_package() {
               AC.signal.upstreamError = "";
               CODOMAIN.initialize(LSI_DOMAIN);
           }
-          // This measure ensures the Auto-Cards external API is equally available from within the inner scope of LSIv2
-          // As before, call with AutoCards().API.nameOfFunction(yourArguments);
+
           deepMerge(AC, state.LSIv2);
           delete state.LSIv2;
           function deepMerge(target, source) {
@@ -8274,10 +7692,10 @@ function MCPV5Create_inner_package() {
                       && (key !== "workpiece")
                       && (key !== "associations")
                   ) {
-                      // Recursively merge static objects
+
                       deepMerge(target[key], source[key]);
                   } else {
-                      // Directly replace values
+
                       target[key] = source[key];
                   }
               }
@@ -8286,9 +7704,9 @@ function MCPV5Create_inner_package() {
           function collectAll() {
               return collectCards(...Object.keys(factories).map(key => templates[key]));
           }
-          // collectCards constructs, validates, repairs, retrieves, and organizes all LSIv2 script cards associated with the given arguments by iterating over the storyCards array only once! Returned elements are easily handled via array destructuring assignment
+
           function collectCards(...args) {
-              // args: [{name: string, entry: string, description: string, singleton: boolean, position: integer}]
+
               const collections = O.f(args.map(({name, entry, description, singleton, position}) => {
                   const collection = {
                       template: O.f({
@@ -8316,7 +7734,7 @@ function MCPV5Create_inner_package() {
                           !card.title.toLowerCase().includes(collection.template.title.toLowerCase())
                           && !card.keys.toLowerCase().includes(collection.template.title.toLowerCase())
                       ) {
-                          // No match, swipe left
+
                           continue;
                       }
                       if (collection.singleton) {
@@ -8424,7 +7842,7 @@ function MCPV5Create_inner_package() {
                   }
                   function constructPrimary() {
                       collection.primary = constructCard(collection.template, newCardIndex());
-                      // I like my LSIv2 cards to display in the proper order once initialized uwu
+
                       const templateKeys = Object.keys(factories);
                       const cards = templateKeys.map(key => O.f({
                           card: Internal.getCard(card => (card.title === templates[key].name)),
@@ -8457,28 +7875,25 @@ function MCPV5Create_inner_package() {
               }));
           }
       } else if (AC.config.doAC) {
-          // Auto-Cards is currently enabled
-          // "text" represents the original text which was present before any scripts were executed
-          // "TEXT" represents the script-modified version of "text" which AutoCards was called with
-          // This dual scheme exists to ensure Auto-Cards is safely compatible with other scripts
+
           switch(HOOK) {
           case "input": {
-              // AutoCards was called within the input modifier
+
               if ((AC.config.deleteAllAutoCards === false) && /CONFIRM\s*DELETE/i.test(TEXT)) {
                   CODOMAIN.initialize("CONFIRM DELETE -> Success!");
               } else if (/\/\s*A\s*C/i.test(text)) {
                   CODOMAIN.initialize(doPlayerCommands(text));
               } else if (TEXT.startsWith(" ") && readPastAction(0).text.endsWith("\n")) {
-                  // Just a simple little formatting bugfix for regular AID story actions
+
                   CODOMAIN.initialize(getPrecedingNewlines() + TEXT.replace(/^\s+/, ""));
               } else {
                   CODOMAIN.initialize(TEXT);
               }
               break; }
           case "context": {
-              // AutoCards was called within the context modifier
+
               advanceChronometer();
-              // Get or construct the "Configure Auto-Cards" story card
+
               const configureCardTemplate = getConfigureCardTemplate();
               const configureCard = getSingletonCard(true, configureCardTemplate);
               banTitle(configureCardTemplate.title);
@@ -8500,7 +7915,7 @@ function MCPV5Create_inner_package() {
                       (descConfigs.length === descConfigPatterns.length)
                       && descConfigs.every((descConfig, index) => descConfigPatterns[index].test(descConfig))
                   ) {
-                      // All description config headers must be present and well-formed
+
                       let cfg = extractDescSetting(0);
                       if (AC.config.generationPrompt !== cfg) {
                           notify("Changes to your card generation prompt were successfully saved");
@@ -8545,7 +7960,7 @@ function MCPV5Create_inner_package() {
                       if (userSettings.resetallconfigsettingsandprompts !== true) {
                           return userSettings;
                       }
-                      // Reset all config settings and display state change notifications only when appropriate
+
                       Object.assign(oldConfig, AC.config);
                       Object.assign(AC.config, getDefaultConfig());
                       AC.config.deleteAllAutoCards = oldConfig.deleteAllAutoCards;
@@ -8590,10 +8005,7 @@ function MCPV5Create_inner_package() {
                       if (!isPendingGeneration() && !isAwaitingGeneration() && (0 < AC.generation.cooldown)) {
                           const quarterCooldown = validateCooldown(underQuarterInteger(AC.config.addCardCooldown));
                           if ((AC.config.addCardCooldown < oldCooldown) && (quarterCooldown < AC.generation.cooldown)) {
-                              // Reduce the next generation's cooldown counter by a factor of 4
-                              // But only if the new cooldown config is lower than it was before
-                              // And also only if quarter cooldown is less than the current next gen cooldown
-                              // (Just a random little user experience improvement)
+
                               AC.generation.cooldown = quarterCooldown;
                           } else if (oldCooldown < AC.config.addCardCooldown) {
                               if (oldCooldown === AC.generation.cooldown) {
@@ -8715,7 +8127,7 @@ function MCPV5Create_inner_package() {
                       disableAutoCards();
                       break;
                   } else {
-                      // Apply the new card entry and proceed to implement Auto-Cards onContext
+
                       configureCard.entry = getConfigureCardEntry();
                   }
                   function parseConfig(settingsKey, isNumber, configKey) {
@@ -8744,13 +8156,12 @@ function MCPV5Create_inner_package() {
                   CODOMAIN.initialize(TEXT);
                   break;
               }
-              // Fully implement Auto-Cards onContext
+
               const forceStep = AC.signal.recheckRetryOrErase;
               const currentTurn = getTurn();
               const nearestUnparsedAction = boundInteger(0, currentTurn - AC.config.minimumLookBackDistance);
               if (AC.signal.recheckRetryOrErase || (nearestUnparsedAction <= AC.database.titles.lastActionParsed)) {
-                  // The player erased or retried an unknown number of actions
-                  // Purge recent candidates and perform a safety recheck
+
                   if (nearestUnparsedAction <= AC.database.titles.lastActionParsed) {
                       AC.signal.recheckRetryOrErase = true;
                   } else {
@@ -8777,33 +8188,33 @@ function MCPV5Create_inner_package() {
                       actionToParse <= nearestUnparsedAction;
                       actionToParse++
                   ) {
-                      // I wrote this whilst sleep-deprived, somehow it works
+
                       const lookBack = currentTurn - actionToParse - (function() {
                           if (isDoSayStory(readPastAction(0).type)) {
-                              // Inputs count as 2 actions instead of 1, conditionally offset lookBack by 1
+
                               return 0;
                           } else {
                               return 1;
                           }
                       })();
                       if (history.length <= lookBack) {
-                          // history cannot be indexed with a negative integer
+
                           continue;
                       }
                       const action = readPastAction(lookBack);
                       const thisTextHash = new StringsHashed(4096).add(action.text).serialize();
                       if (actionToParse === nearestUnparsedAction) {
                           if (AC.signal.recheckRetryOrErase || (thisTextHash === AC.database.titles.lastTextHash)) {
-                              // Additional safety to minimize duplicate candidate additions during retries or erases
+
                               AC.signal.recheckRetryOrErase = true;
                               break;
                           } else {
-                              // Action parsing will proceed
+
                               AC.database.titles.lastActionParsed = nearestUnparsedAction;
                               AC.database.titles.lastTextHash = thisTextHash;
                           }
                       } else if (
-                          // Special case where a consecutive retry>erase>continue cancels out
+
                           AC.signal.recheckRetryOrErase
                           && (actionToParse === (nearestUnparsedAction - 1))
                           && (thisTextHash === AC.database.titles.lastTextHash)
@@ -8823,22 +8234,19 @@ function MCPV5Create_inner_package() {
                               || /\/\s*A\s*C/i.test(action.text)
                               || /CONFIRM\s*DELETE/i.test(action.text)
                           ) {
-                              // Skip see actions
-                              // Skip input actions (only if input title detection has been disabled in the config)
-                              // Skip strings without capital letters
-                              // Skip utility actions
+
                               continue;
                           }
                           const words = (prettifyEmDashes(action.text)
-                              // Inner Self
+
                               .replace(/\s*[\u200B-\u200D][\s\u200B-\u200D]*/g, " ")
-                              // Localized Languages
+
                               .replace(/\s*[–«»„“”「」—]\s*/g, ": ")
                               .replace(/(?:^|\s+)-/g, ": ").replace(/-(?:\s+|$)/g, ": ")
                               .replace(/[‘’]/g, "'").replaceAll("´", "`")
-                              // Standardize end punctuation
+
                               .replaceAll("。", ".").replaceAll("？", "?").replaceAll("！", "!")
-                              // Replace special clause opening punctuation with colon ":" terminators
+
                               .replace(/(^|\s+)["'`]\s*/g, ": ").replace(/\s*[\(\[{]\s*/g, ": ")
                               // Likewise for end-quotes (curbs a common AI grammar mistake)
                               .replace(/\s*,?\s*["'`](?:\s+|$)/g, ": ")
@@ -8848,26 +8256,26 @@ function MCPV5Create_inner_package() {
                               .replace(/\s*[;,\/\\]\s*/g, " %@% ")
                               // Replace "I", "I'm", "I'd", "I'll", and "I've" with a placeholder word
                               .replace(/(?:^|\s+|-)I(?:'(?:m|d|ll|ve))?(?:\s+|-|$)/gi, " %@% ")
-                              // Remove "'s" only if not followed by a letter
+
                               .replace(/'s(?![a-zA-Z])/g, "")
                               // Replace "s'" with "s" only if preceded but not followed by a letter
                               .replace(/(?<=[a-zA-Z])s'(?![a-zA-Z])/g, "s")
                               // Remove apostrophes not between letters (preserve contractions like "don't")
                               .replace(/(?<![a-zA-Z])'(?![a-zA-Z])/g, "")
-                              // Remove a leading bullet
+
                               .replace(/^\s*-+\s*/, "")
-                              // Replace common honorifics with a placeholder word
+
                               .replace(buildKiller(Words.honorifics), " %@% ")
-                              // Remove common abbreviations
+
                               .replace(buildKiller(Words.abbreviations), " ")
-                              // Fix end punctuation
+
                               .replace(/\s+\.(?![a-zA-Z])/g, ".").replace(/\.\.+/g, ".")
                               .replace(/\s+\?(?![a-zA-Z])/g, "?").replace(/\?\?+/g, "?")
                               .replace(/\s+!(?![a-zA-Z])/g, "!").replace(/!!+/g, "!")
                               .replace(/\s+:(?![a-zA-Z])/g, ":").replace(/::+/g, ":")
-                              // Colons are treated as substitute end-punctuation, apply the capitalization rule
+
                               .replace(/:\s+(\S)/g, (_, next) => ": " + next.toUpperCase())
-                              // Condense consecutive whitespace
+
                               .trim().replace(/\s+/g, " ")
                           ).split(" ");
                           if (!Array.isArray(words) || (words.length < 2)) {
@@ -8879,10 +8287,10 @@ function MCPV5Create_inner_package() {
                           for (let i = 0; i < words.length; i++) {
                               let word = words[i];
                               if (startsWithTerminator()) {
-                                  // This word begins on a terminator, push the preexisting incomplete title to titles and proceed with the next sentence's beginning
+
                                   pushTitle();
                                   previousWordTerminates = true;
-                                  // Ensure no leading terminators remain
+
                                   while ((word !== "") && startsWithTerminator()) {
                                       word = word.slice(1);
                                   }
@@ -8890,22 +8298,22 @@ function MCPV5Create_inner_package() {
                               if (word === "") {
                                   continue;
                               } else if (previousWordTerminates) {
-                                  // We cannot detect titles from sentence beginnings due to sentence capitalization rules. The previous sentence was recently terminated, implying the current series of capitalized words (plus lowercase minor words) occurs near the beginning of the current sentence
+
                                   if (endsWithTerminator()) {
                                       continue;
                                   } else if (startsWithUpperCase()) {
                                       if (isMinorWord(word)) {
-                                          // Special case where a capitalized minor word precedes a named entity, clear the previous termination status
+
                                           previousWordTerminates = false;
                                       }
-                                      // Otherwise, proceed without clearing
+
                                   } else if (!isMinorWord(word) && !/^(?:and|&)(?:$|[\.\?!:]$)/.test(word)) {
-                                      // Previous sentence termination status is cleared by the first new non-minor lowercase word encountered during forward iteration through the action text's words
+
                                       previousWordTerminates = false;
                                   }
                                   continue;
                               }
-                              // Words near the beginning of this sentence have been skipped, proceed with named entity detection using capitalization rules. An incomplete title will be pushed to titles if A) a non-minor lowercase word is encountered, B) three consecutive minor words occur in a row, C) a terminator symbol is encountered at the end of a word. Otherwise, continue pushing words to the incomplete title
+
                               if (endsWithTerminator()) {
                                   previousWordTerminates = true;
                                   while ((word !== "") && endsWithTerminator()) {
@@ -8918,23 +8326,23 @@ function MCPV5Create_inner_package() {
                               }
                               if (isMinorWord(word)) {
                                   if (0 < incompleteTitle.length) {
-                                      // Titles cannot start with a minor word
+
                                       if (
                                           (2 < incompleteTitle.length) && !(isMinorWord(incompleteTitle[incompleteTitle.length - 1]) && isMinorWord(incompleteTitle[incompleteTitle.length - 2]))
                                       ) {
-                                          // Titles cannot have 3 or more consecutive minor words in a row
+
                                           pushTitle();
                                           continue;
                                       } else {
-                                          // Titles may contain minor words in their middles. Ex: "Ace of Spades"
+
                                           incompleteTitle.push(word.toLowerCase());
                                       }
                                   }
                               } else if (startsWithUpperCase()) {
-                                  // Add this proper noun to the incomplete title
+
                                   incompleteTitle.push(word);
                               } else {
-                                  // The full title has a non-minor lowercase word to its immediate right
+
                                   pushTitle();
                                   continue;
                               }
@@ -8950,7 +8358,7 @@ function MCPV5Create_inner_package() {
                                   }
                                   if (0 < incompleteTitle.length) {
                                       titles.push(incompleteTitle.join(" "));
-                                      // Empty the array
+
                                       incompleteTitle.length = 0;
                                   }
                                   return;
@@ -8978,25 +8386,25 @@ function MCPV5Create_inner_package() {
                                   titles.splice(i, 1);
                               }
                           }
-                          // Remove duplicates
+
                           const uniqueTitles = [...new Set(titles)];
                           if (uniqueTitles.length === 0) {
                               continue;
                           } else if (
-                              // No reason to keep checking long past the max lookback distance
+
                               (currentTurn < 256)
                               && (action.type === "start")
-                              // This is only used here so it doesn't need its own AC.config property or validation
+
                               && (S.DEFAULT_BAN_TITLES_FROM_OPENING !== false)
                           ) {
-                              // Titles in the opening prompt are banned by default, hopefully accounting for the player character's name and other established setting details
+
                               uniqueTitles.forEach(title => banTitle(title));
                           } else {
-                              // Schedule new titles for later insertion within the candidates database
+
                               for (const title of uniqueTitles) {
                                   const pendingHashKey = title.toLowerCase();
                                   if (pendingCandidates.has(pendingHashKey)) {
-                                      // Consolidate pending candidates with matching titles but different turns
+
                                       pendingCandidates.get(pendingHashKey).turns.push(turn);
                                   } else {
                                       pendingCandidates.set(pendingHashKey, O.s({title, turns: [turn]}));
@@ -9012,26 +8420,25 @@ function MCPV5Create_inner_package() {
                       }
                   }
               }
-              // Measure the minimum and maximum turns of occurance for all title candidates
+
               let minTurn = currentTurn;
               let maxTurn = 0;
               for (let i = AC.database.titles.candidates.length - 1; 0 <= i; i--) {
                   const candidate = AC.database.titles.candidates[i];
                   const title = candidate[0];
                   if (isUsedOrBanned(title) || isNamed(title)) {
-                      // Retroactively ensure AC.database.titles.candidates contains no used / banned titles
+
                       AC.database.titles.candidates.splice(i, 1);
                   } else {
                       const pendingHashKey = title.toLowerCase();
                       if (pendingCandidates.has(pendingHashKey)) {
-                          // This candidate title matches one of the pending candidates, collect the pending turns
+
                           candidate.push(...pendingCandidates.get(pendingHashKey).turns);
-                          // Remove this pending candidate
+
                           pendingCandidates.delete(pendingHashKey);
                       }
                       if (2 < candidate.length) {
-                          // Ensure all recorded turns of occurance are unique for this candidate
-                          // Sort the turns from least to greatest
+
                           const sortedTurns = [...new Set(candidate.slice(1))].sort((a, b) => (a - b));
                           if (625 < sortedTurns.length) {
                               sortedTurns.splice(0, sortedTurns.length - 600);
@@ -9043,17 +8450,17 @@ function MCPV5Create_inner_package() {
                   }
               }
               for (const pendingCandidate of pendingCandidates.values()) {
-                  // Insert any remaining pending candidates (validity has already been ensured)
+
                   const newCandidate = [pendingCandidate.title, ...pendingCandidate.turns];
                   setCandidateTurnBounds(newCandidate);
                   AC.database.titles.candidates.push(newCandidate);
               }
               const isCandidatesSorted = (function() {
                   if (425 < AC.database.titles.candidates.length) {
-                      // Sorting a large title candidates database is computationally expensive
+
                       sortCandidates();
                       AC.database.titles.candidates.splice(400);
-                      // Flag this operation as complete for later consideration
+
                       return true;
                   } else {
                       return false;
@@ -9062,22 +8469,22 @@ function MCPV5Create_inner_package() {
               Internal.getUsedTitles();
               for (const titleKey in AC.database.memories.associations) {
                   if (isAuto(titleKey)) {
-                      // Reset the lifespan counter
+
                       AC.database.memories.associations[titleKey][0] = 999;
                   } else if (AC.database.memories.associations[titleKey][0] < 1) {
-                      // Forget this set of memory associations
+
                       delete AC.database.memories.associations[titleKey];
                   } else if (!isAwaitingGeneration()) {
-                      // Decrement the lifespan counter
+
                       AC.database.memories.associations[titleKey][0]--;
                   }
               }
-              // This copy of TEXT may be mutated
+
               let context = TEXT;
               const titleHeaderPatternGlobal = /\s*{\s*titles?\s*:\s*([\s\S]*?)\s*}\s*/gi;
-              // Card events govern the parsing of memories from raw context as well as card memory bank injection
+
               const cardEvents = (function() {
-                  // Extract memories from the initial text (not TEXT as called from within the context modifier!)
+
                   const contextMemories = (function() {
                       const memoriesMatch = text.match(/Memories\s*:\s*([\s\S]*?)\s*(?:Recent\s*Story\s*:|$)/i);
                       if (!memoriesMatch) {
@@ -9092,13 +8499,13 @@ function MCPV5Create_inner_package() {
                       const seenMemories = new Set();
                       for (const memoryA of uniqueMemories) {
                           if (duplicatesHashed.has(memoryA)) {
-                              // Remove to ensure the insertion order for this duplicate changes
+
                               duplicatesHashed.remove(memoryA);
                               duplicateMemories.add(memoryA);
                           } else if ((function() {
                               for (const memoryB of seenMemories) {
                                   if (0.42 < similarityScore(memoryA, memoryB)) {
-                                      // This memory is too similar to another memory
+
                                       duplicateMemories.add(memoryA);
                                       return false;
                                   }
@@ -9109,21 +8516,20 @@ function MCPV5Create_inner_package() {
                           }
                       }
                       if (0 < duplicateMemories.size) {
-                          // Add each near duplicate's hashcode to AC.database.memories.duplicates
-                          // Then remove duplicates from uniqueMemories and the context window
+
                           for (const duplicate of duplicateMemories) {
                               duplicatesHashed.add(duplicate);
                               uniqueMemories.delete(duplicate);
                               context = context.replaceAll("\n" + duplicate, "");
                           }
-                          // Only the 2000 most recent duplicate memory hashcodes are remembered
+
                           AC.database.memories.duplicates = duplicatesHashed.latest(2000).serialize();
                       }
                       return uniqueMemories;
                   })();
                   const leftBoundary = "^|\\s|\"|'|—|\\(|\\[|{";
                   const rightBoundary = "\\s|\\.|\\?|!|,|;|\"|'|—|\\)|\\]|}|$";
-                  // Murder, homicide if you will, nothing to see here
+
                   const theKiller = new RegExp("(?:" + leftBoundary + ")the[\\s\\S]*$", "i");
                   const peerageKiller = new RegExp((
                       "(?:" + leftBoundary + ")(?:" + Words.peerage.join("|") + ")(?:" + rightBoundary + ")"
@@ -9140,7 +8546,7 @@ function MCPV5Create_inner_package() {
                           ), "i")).test(contextMemory)) {
                               continue;
                           }
-                          // AC card titles found in active memories will promote card events
+
                           if (events.has(titleKey)) {
                               events.get(titleKey).pendingMemories.push(contextMemory);
                               continue;
@@ -9156,7 +8562,7 @@ function MCPV5Create_inner_package() {
                       if (!isAuto(title)) {
                           continue;
                       }
-                      // Unique title headers found in context will promote card events
+
                       const titleKey = title.toLowerCase();
                       if (events.has(titleKey)) {
                           events.get(titleKey).titleHeader = titleHeader;
@@ -9169,11 +8575,10 @@ function MCPV5Create_inner_package() {
                   }
                   return events;
               })();
-              // Remove auto card title headers from active story card entries and contextualize their respective memory banks
-              // Also handle the growth and maintenance of card memory banks
+
               let isRemembering = false;
               for (const card of storyCards) {
-                  // Iterate over each card to handle pending card events and forenames/surnames
+
                   const titleHeaderMatcher = /^{title: \s*([\s\S]*?)\s*}/;
                   let breakForCompression = isPendingCompression();
                   let simplifications = 0;
@@ -9188,7 +8593,7 @@ function MCPV5Create_inner_package() {
                           break;
                       }
                   }
-                  // Handle card events
+
                   const lowerEntry = card.entry.toLowerCase();
                   for (const titleKey of cardEvents.keys()) {
                       if (!lowerEntry.startsWith("{title: " + titleKey + "}")) {
@@ -9199,7 +8604,7 @@ function MCPV5Create_inner_package() {
                           (0 < cardEvent.pendingMemories.length)
                           && /{\s*updates?\s*:\s*true\s*,\s*limits?\s*:[\s\S]*?}/i.test(card.description)
                       ) {
-                          // Add new card memories
+
                           const associationsHashed = (function() {
                               if (titleKey in AC.database.memories.associations) {
                                   return StringsHashed.deserialize(AC.database.memories.associations[titleKey][1], 65536);
@@ -9211,12 +8616,12 @@ function MCPV5Create_inner_package() {
                           const oldMemories = isolateMemories(extractCardMemories().text);
                           for (let i = 0; i < cardEvent.pendingMemories.length; i++) {
                               if (associationsHashed.has(cardEvent.pendingMemories[i])) {
-                                  // Remove first to alter the insertion order
+
                                   associationsHashed.remove(cardEvent.pendingMemories[i]);
                               } else if (!oldMemories.some(oldMemory => (
                                   (0.8 < similarityScore(oldMemory, cardEvent.pendingMemories[i]))
                               ))) {
-                                  // Ensure no near-duplicate memories are appended
+
                                   card.description += "\n- " + cardEvent.pendingMemories[i];
                               }
                               associationsHashed.add(cardEvent.pendingMemories[i]);
@@ -9231,13 +8636,13 @@ function MCPV5Create_inner_package() {
                           }
                       }
                       if (cardEvent.titleHeader !== "") {
-                          // Replace this card's title header in context
+
                           const cardMemoriesText = extractCardMemories().text;
                           if (cardMemoriesText === "") {
-                              // This card contains no card memories to contextualize
+
                               context = context.replace(cardEvent.titleHeader, "\n\n");
                           } else {
-                              // Insert card memories within context and ensure they occur uniquely
+
                               const cardMemories = cardMemoriesText.split("\n").map(cardMemory => cardMemory.trim());
                               for (const cardMemory of cardMemories) {
                                   if (25 < cardMemory.length) {
@@ -9261,7 +8666,7 @@ function MCPV5Create_inner_package() {
                   } else if ((2 < simplifications) || (card.entry.includes("<") && card.entry.includes(">"))) {
                       continue;
                   }
-                  // Simplify auto-card titles which contain an obvious surname
+
                   const titleHeaderMatch = card.entry.match(titleHeaderMatcher);
                   if (!titleHeaderMatch) {
                       continue;
@@ -9279,11 +8684,11 @@ function MCPV5Create_inner_package() {
                   if (oldTitleKey === newTitleKey) {
                       continue;
                   }
-                  // Preemptively mitigate some global state considered within the formatTitle scope
+
                   clearTransientTitles();
                   AC.database.titles.used = ["%@%"];
                   [used, forenames, surnames].forEach(nameset => nameset.add("%@%"));
-                  // Premature optimization is the root of all evil
+
                   const newKey = formatTitle(newTitle).newKey;
                   clearTransientTitles();
                   simplifications++;
@@ -9349,14 +8754,14 @@ function MCPV5Create_inner_package() {
                       }
                   }
               }
-              // Remove repeated memories plus any remaining title headers
+
               context = (context
                   .replace(/(\s*<#>\s*)+/g, "\n")
                   .replace(titleHeaderPatternGlobal, "\n\n")
                   .replace(/World\s*Lore\s*:\s*/i, "World Lore:\n")
                   .replace(/Memories\s*:\s*(?=Recent\s*Story\s*:|$)/i, "")
               );
-              // Prompt the AI to generate a new card entry, compress an existing card's memories, or continue the story
+
               let isGenerating = false;
               let isCompressing = false;
               if (isPendingGeneration()) {
@@ -9367,9 +8772,9 @@ function MCPV5Create_inner_package() {
               } else if (isPendingCompression()) {
                   promptCompression();
               } else if (AC.signal.recheckRetryOrErase) {
-                  // Do nothing 😜
+
               } else if ((AC.generation.cooldown <= 0) && (0 < AC.database.titles.candidates.length)) {
-                  // Prepare to automatically construct a new plot-relevant story card by selecting a title
+
                   let selectedTitle = (function() {
                       if (AC.database.titles.candidates.length === 1) {
                           return AC.database.titles.candidates[0][0];
@@ -9378,45 +8783,42 @@ function MCPV5Create_inner_package() {
                       }
                       const mostRelevantTitle = AC.database.titles.candidates[0][0];
                       if ((AC.database.titles.candidates.length < 16) || (Math.random() < 0.6667)) {
-                          // Usually, 2/3 of the time, the most relevant title is selected
+
                           return mostRelevantTitle;
                       }
-                      // Occasionally (1/3 of the time once the candidates databases has at least 16 titles) make a completely random selection between the top 4 most recently occuring title candidates which are NOT the top 2 most relevant titles. Note that relevance !== recency
-                      // This gives non-character titles slightly better odds of being selected for card generation due to the relevance sorter's inherent bias towards characters; they tend to appear far more often in prose
+
                       return (AC.database.titles.candidates
-                          // Create a shallow copy to avoid modifying AC.database.titles.candidates itself
-                          // Add index to preserve original positions whenever ties occur during sorting
+
                           .map((candidate, index) => ({candidate, index}))
-                          // Sort by each candidate's most recent turn
+
                           .sort((a, b) => {
                               const turnDiff = b.candidate[b.candidate.length - 1] - a.candidate[a.candidate.length - 1];
                               if (turnDiff === 0) {
-                                  // Don't change indices in the case of a tie
+
                                   return (a.index - b.index);
                               } else {
-                                  // No tie here, sort by recency
+
                                   return turnDiff;
                               }
                           })
-                          // Get the top 6 most recent titles (4 + 2 because the top 2 relevant titles may be present)
+
                           .slice(0, 6)
-                          // Extract only the title names
+
                           .map(element => element.candidate[0])
-                          // Exclude the top 2 most relevant titles
+
                           .filter(title => ((title !== mostRelevantTitle) && (title !== AC.database.titles.candidates[1][0])))
-                          // Ensure only 4 titles remain
+
                           .slice(0, 4)
                       )[Math.floor(Math.random() * 4)];
                   })();
                   while (!Internal.generateCard(O.f({title: selectedTitle}))) {
-                      // This is an emergency precaution, I don't expect the interior of this while loop to EVER execute
-                      // That said, it's crucial for the while condition be checked at least once, because Internal.generateCard appends an element to AC.generation.pending as a side effect
+
                       const lowerSelectedTitle = formatTitle(selectedTitle).newTitle.toLowerCase();
                       const index = AC.database.titles.candidates.findIndex(candidate => {
                           return (formatTitle(candidate[0]).newTitle.toLowerCase() === lowerSelectedTitle);
                       });
                       if (index === -1) {
-                          // Should be impossible
+
                           break;
                       }
                       AC.database.titles.candidates.splice(index, 1);
@@ -9426,7 +8828,7 @@ function MCPV5Create_inner_package() {
                       selectedTitle = AC.database.titles.candidates[0][0];
                   }
                   if (isAwaitingGeneration()) {
-                      // Assign the workpiece so card generation may fully commence!
+
                       AC.generation.workpiece = AC.generation.pending.shift();
                       promptGeneration();
                   } else if (isPendingCompression()) {
@@ -9440,7 +8842,7 @@ function MCPV5Create_inner_package() {
                   AC.generation.cooldown--;
               }
               if (shouldTrimContext()) {
-                  // Truncate context based on AC.signal.maxChars, begin by individually removing the oldest sentences from the recent story portion of the context window
+
                   const recentStoryPattern = /Recent\s*Story\s*:\s*([\s\S]*?)(%@GEN@%|%@COM@%|\s\[\s*Author's\s*note\s*:|$)/i;
                   const recentStoryMatch = context.match(recentStoryPattern);
                   if (recentStoryMatch) {
@@ -9588,16 +8990,16 @@ function MCPV5Create_inner_package() {
               function promptGeneration() {
                   repositionAN();
                   // All %{title} placeholders were already filled during this workpiece's initialization
-                  // The "%GEN%" substring serves as a temporary delimiter for later context length trucation
+
                   context = context.trimEnd() + "%@GEN@%\n\n" + (function() {
-                      // For context only, remove the title header from this workpiece's partially completed entry
+
                       const partialEntry = formatEntry(AC.generation.workpiece.entry);
                       const entryPlaceholderPattern = /(?:[%\$]+\s*|[%\$]*){+\s*entry\s*}+/gi;
                       if (entryPlaceholderPattern.test(AC.generation.workpiece.prompt)) {
-                          // Fill all %{entry} placeholders with the partial entry
+
                           return AC.generation.workpiece.prompt.replace(entryPlaceholderPattern, partialEntry);
                       } else {
-                          // Append the partial entry to the end of context
+
                           return AC.generation.workpiece.prompt.trimEnd() + "\n\n" + partialEntry;
                       }
                   })();
@@ -9605,7 +9007,7 @@ function MCPV5Create_inner_package() {
                   return;
               }
               function repositionAN() {
-                  // Move the Author's Note further back in context during card generation (should still be considered)
+
                   const authorsNotePattern = /\s*(\[\s*Author's\s*note\s*:[\s\S]*\])\s*/i;
                   const authorsNoteMatch = context.match(authorsNotePattern);
                   if (!authorsNoteMatch) {
@@ -9632,17 +9034,16 @@ function MCPV5Create_inner_package() {
                   }
                   const turnRange = boundInteger(1, maxTurn - minTurn);
                   const recencyExponent = Math.log10(turnRange) + 1.85;
-                  // Sort the database of available title candidates by relevance
+
                   AC.database.titles.candidates.sort((a, b) => {
                       return relevanceScore(b) - relevanceScore(a);
                   });
                   function relevanceScore(candidate) {
-                      // weight = (((turn - minTurn) / (maxTurn - minTurn)) + 1)^(log10(maxTurn - minTurn) + 1.85)
+
                       return candidate.slice(1).reduce((sum, turn) => {
-                          // Apply exponential scaling to give far more weight to recent turns
+
                           return sum + Math.pow((
-                              // The recency weight's exponent scales by log10(turnRange) + 1.85
-                              // Shhh don't question it 😜
+
                               ((turn - minTurn) / turnRange) + 1
                           ), recencyExponent);
                       }, 0);
@@ -9653,31 +9054,31 @@ function MCPV5Create_inner_package() {
                   return (AC.signal.maxChars <= context.length);
               }
               function setCandidateTurnBounds(candidate) {
-                  // candidate: ["Example Title", 0, 1, 2, 3]
+
                   minTurn = boundInteger(0, minTurn, candidate[1]);
                   maxTurn = boundInteger(candidate[candidate.length - 1], maxTurn);
                   return;
               }
               function disableAutoCards() {
                   AC.signal.forceToggle = null;
-                  // Auto-Cards has been disabled
+
                   AC.config.doAC = false;
-                  // Deconstruct the "Configure Auto-Cards" story card
+
                   unbanTitle(configureCardTemplate.title);
                   eraseCard(configureCard);
-                  // Signal the construction of "Edit to enable Auto-Cards" during the next onOutput hook
+
                   AC.signal.swapControlCards = true;
-                  // Post a success message
+
                   notify("Disabled! Use the \"Edit to enable Auto-Cards\" story card to undo");
                   CODOMAIN.initialize(TEXT);
                   return;
               }
               break; }
           case "output": {
-              // AutoCards was called within the output modifier
+
               const output = prettifyEmDashes(TEXT);
               if (0 < AC.chronometer.postpone) {
-                  // Do not capture or replace any outputs during this turn
+
                   promoteAmnesia();
                   if (permitOutput()) {
                       CODOMAIN.initialize(output);
@@ -9695,8 +9096,7 @@ function MCPV5Create_inner_package() {
                           textClone.includes("\"")
                           || /(?<=^|\s|—|\(|\[|{)sa(ys?|id)(?=\s|\.|\?|!|,|;|—|\)|\]|}|$)/i.test(textClone)
                       ) {
-                          // Discard full outputs containing "say" or quotations
-                          // To build coherent entries, the AI must not attempt to continue the story
+
                           return skip(estimateRemainingGens());
                       }
                       const oldSentences = (splitBySentences(formatEntry(AC.generation.workpiece.entry))
@@ -9712,15 +9112,15 @@ function MCPV5Create_inner_package() {
                           .trim()
                           .replace(/^-+\s*/, "")
                       )).filter(sentence => (
-                          // Remove empty strings
+
                           (sentence !== "")
-                          // Remove colon ":" headers or other stinky symbols because me no like 😠
+
                           && !/[#><@]/.test(sentence)
-                          // Remove previously repeated sentences
+
                           && !oldSentences.some(oldSentence => (0.75 < similarityScore(oldSentence, sentence)))
-                          // Remove repeated sentences from within entryAddition itself
+
                           && ![...seenSentences].some(seenSentence => (0.75 < similarityScore(seenSentence, sentence)))
-                          // Simply ensure this sentence is henceforth unique
+
                           && seenSentences.add(sentence)
                       )).join(" ").trim() + " ";
                       if (entryAddition === " ") {
@@ -9746,14 +9146,14 @@ function MCPV5Create_inner_package() {
                                   }
                                   continue;
                               }
-                              // Lines only matter for initial entries provided via AutoCards().API.generateCard
+
                               const lines = sentences[i].split("\n");
                               for (let j = lines.length - 1; 0 <= j; j--) {
                                   lines.splice(j, 1);
                                   sentences[i] = lines.join("\n");
                                   truncatedEntry = sentences.join("").trimEnd();
                                   if (truncatedEntry.length <= AC.generation.workpiece.limit) {
-                                      // Exit from both loops
+
                                       exit = true;
                                       break;
                                   }
@@ -9763,11 +9163,11 @@ function MCPV5Create_inner_package() {
                               }
                           }
                           if (truncatedEntry.length < 150) {
-                              // Disregard the previous sentence/line-based truncation attempt
+
                               AC.generation.workpiece.entry = limitString(
                                   AC.generation.workpiece.entry, AC.generation.workpiece.limit
                               );
-                              // Attempt to remove the last word/fragment
+
                               truncatedEntry = AC.generation.workpiece.entry.replace(/\s*\S+$/, "");
                               if (150 <= truncatedEntry) {
                                   AC.generation.workpiece.entry = truncatedEntry;
@@ -9867,7 +9267,7 @@ function MCPV5Create_inner_package() {
                   AC.compression.completed++;
                   const compressionsRemaining = (function() {
                       const newMemory = (textClone
-                          // Remove some dumb stuff
+
                           .replace(/^[\s\S]*:/g, "")
                           .replace(/[\*_~#><@\[\]{}`\\]/g, " ")
                           // Remove bullets
@@ -11657,7 +11057,7 @@ function MCPV5Create_inner_package() {
                       ), true));
                       let count = 0;
                       for (const card of redo) {
-                          const titleMatch = card.entry.match(titleMatchPattern);  
+                          const titleMatch = card.entry.match(titleMatchPattern);
                           if (titleMatch && Internal.redoCard(O.f({title: titleMatch[1]}), true, "")) {
                               count++;
                           }
@@ -12177,7 +11577,7 @@ function MCPV5Create_inner_package() {
               .replace(/\u200B-\u200D/g, "")
               // Localized Languages
               .replace(/[–。？！´؟،«»¿¡„“”「」…§，、\*_~><\(\)\[\]{}#"`:!—;\.\?,\s\\]/g, " ")
-              // Fix contractions
+
               .replace(/[‘’]/g, "'").replace(/\s+'/g, " ")
               // Remove the words "I", "I'm", "I'd", "I'll", and "I've"
               .replace(/(?<=^|\s)(?:I|I'm|I'd|I'll|I've)(?=\s|$)/gi, "")
@@ -12185,7 +11585,7 @@ function MCPV5Create_inner_package() {
               .replace(/'s(?![a-zA-Z])/g, "")
               // Replace "s'" with "s" only if preceded but not followed by a letter
               .replace(/(?<=[a-zA-Z])s'(?![a-zA-Z])/g, "s")
-              // Remove apostrophes not between letters (preserve contractions like "don't")
+
               .replace(/(?<![a-zA-Z])'(?![a-zA-Z])/g, "")
               // Eliminate fake em dashes and terminal/leading dashes
               .replace(/\s-\s/g, " ")
@@ -12352,7 +11752,7 @@ function MCPV5Create_inner_package() {
       }
       function isBanned(lowerTitle, getUsedIsExternal) {
           if (bans.size === 0) {
-              // In order to save space, implicit bans aren't listed within the UI
+
               const controlVariants = getControlVariants();
               const dataVariants = getDataVariants();
               const bansToAdd = [...lowArr([
@@ -12368,7 +11768,7 @@ function MCPV5Create_inner_package() {
                   ...Object.values(Words.reserved)
               ]), ...(function() {
                   if (shouldProceed() || getUsedIsExternal) {
-                      // These proper nouns are way too common to waste card generations on; they already exist within the AI training data so this would be pointless
+
                       return [...Words.entities, ...Words.undesirables.map(undesirable => see(undesirable))];
                   } else {
                       return [];
@@ -12426,7 +11826,7 @@ function MCPV5Create_inner_package() {
               && (2 < titleWords[0].length)
               && (2 < titleWords[1].length)
               && forenames.has(titleWords[0])
-          ) {         
+          ) {
               return true;
           } else if (
               (titleWords.length === 1)
@@ -12537,10 +11937,10 @@ function MCPV5Create_inner_package() {
               }),
           });
       }
-      // Prepare to export the codomain
+
       const codomain = CODOMAIN.read();
       const [stopPackaged, lastCall] = (function() {
-          // Tbh I don't know why I even bothered going through the trouble of implementing "stop" within LSIv2
+
           switch(HOOK) {
           case "context": {
               const haltStatus = [];
@@ -12551,27 +11951,25 @@ function MCPV5Create_inner_package() {
                   haltStatus.push(false, STOP);
               }
               if ((AC.config.LSIv2 !== false) && (haltStatus[1] === true)) {
-                  // AutoCards will return [text, (stop === true)] onContext
-                  // The onOutput lifecycle hook will not be executed during this turn
+
                   concludeEmergency();
               }
               return haltStatus; }
           case "output": {
-              // AC.config.LSIv2 being either true or null implies (lastCall === true)
+
               return [null, AC.config.LSIv2 ?? true]; }
           default: {
               return [null, null]; }
           }
       })();
-      // Repackage AC to propagate its state forward in time
+
       if (state.LSIv2) {
-          // Facilitates recursive calls of AutoCards
-          // The Auto-Cards external API is accessible through the LSIv2 scope
+
           state.LSIv2 = AC;
       } else {
           const memoryOverflow = (38000 < JSON.stringify(AC).length);
           if (memoryOverflow) {
-              // Memory overflow is imminent
+
               const dataVariants = getDataVariants();
               if (lastCall) {
                   unbanTitle(dataVariants.debug.title);
@@ -12579,7 +11977,7 @@ function MCPV5Create_inner_package() {
               }
               setData(dataVariants.critical, dataVariants.debug);
               if (state.AutoCards) {
-                  // Decouple state for safety
+
                   delete state.AutoCards;
               }
           } else {
@@ -12587,11 +11985,11 @@ function MCPV5Create_inner_package() {
                   const dataVariants = getDataVariants();
                   unbanTitle(dataVariants.critical.title);
                   if (AC.config.showDebugData) {
-                      // Update the debug data card
+
                       banTitle(dataVariants.debug.title);
                       setData(dataVariants.debug, dataVariants.critical);
                   } else {
-                      // There should be no data card
+
                       unbanTitle(dataVariants.debug.title);
                       if (data === null) {
                           data = getSingletonCard(false, O.f({...dataVariants.debug}), O.f({...dataVariants.critical}));
@@ -12603,7 +12001,7 @@ function MCPV5Create_inner_package() {
                   const dataVariants = getDataVariants();
                   setData(dataVariants.debug, dataVariants.critical);
               }
-              // Save a backup image to state
+
               state.AutoCards = AC;
           }
           function setData(primaryVariant, secondaryVariant) {
@@ -12643,14 +12041,14 @@ function MCPV5Create_inner_package() {
               }
               const index = storyCards.indexOf(data);
               if ((index !== -1) && (index !== (storyCards.length - 1))) {
-                  // Ensure the data card is always at the bottom of the story cards list
+
                   storyCards.splice(index, 1);
                   storyCards.push(data);
               }
               return;
           }
       }
-      // This is the only return point within the parent scope of AutoCards
+
       if (stopPackaged === false) {
           return [codomain, STOP];
       } else {
@@ -12658,18 +12056,16 @@ function MCPV5Create_inner_package() {
       }
   } function isolateLSIv2(code, log, text, stop) { const console = Object.freeze({log}); try { eval(code); return [null, text, stop]; } catch (error) { return [error, text, stop]; } }
 
-  // Your other library scripts go here
-
   try { globalThis.InnerSelf = InnerSelf; } catch {}
   try { globalThis.AutoCards = AutoCards; } catch {}
 
   function runInner(tab) {
     if (tab === "input") {
       return (function () {
-        // Your "Input" tab should look like this
+
         InnerSelf("input");
         const modifier = (text) => {
-          // Any other input modifier scripts can go here
+
           return { text };
         };
         return modifier(text);
@@ -12677,10 +12073,10 @@ function MCPV5Create_inner_package() {
     }
     if (tab === "context") {
       return (function () {
-        // Your "Context" tab should look like this
+
         InnerSelf("context");
         const modifier = (text) => {
-          // Any other context modifier scripts can go here
+
           return { text, stop };
         };
         return modifier(text);
@@ -12688,10 +12084,10 @@ function MCPV5Create_inner_package() {
     }
     if (tab === "output") {
       return (function () {
-        // Your "Output" tab should look like this
+
         InnerSelf("output");
         const modifier = (text) => {
-          // Any other output modifier scripts can go here
+
           return { text };
         };
         return modifier(text);
@@ -12737,51 +12133,6 @@ function MCPV5Create_inner_package() {
 }
 
 function MCPV5Create_living_characters() {
-  /*
-  LIVING CHARACTERS - AUTONOMOUS SOCIAL ENGINE
-  A LivingNarratives project. Everything in this file is part of Living Characters.
-
-  Docs, install, configuration, model tips, pressure presets, and troubleshooting:
-  https://github.com/LivingNarratives/LivingCharacters
-  (GitHub is the single source of truth -- always use it for the current version.)
-
-  This file contains TWO independent systems that belong to Living Characters:
-    1. Life Cards   - the autonomous NPC social-pressure engine (the bulk of this file).
-    2. Thought Cards- optional, player-facing thought journals ("Name - Thoughts"; a
-                      temporary 💭 marks the card that was just updated).
-                      Thought Cards are NOT brain cards and NOT memory: they never enter
-                      story context, are never read by the AI narrator, and never affect
-                      behavior, Life Card creation, targeting, pressure, momentum, or any
-                      story logic. The system only asks the model for a thought, captures
-                      it, and stores it for the player to read later. See the "THOUGHT
-                      CARD SYSTEM" module further down for full details.
-
-  Paste this whole block in: LIBRARY
-
-  CONTEXT TAB:
-  const modifier = (text) => {
-    text = LivingCharacters("context", text);
-    return { text };
-  };
-  modifier(text);
-
-  OUTPUT TAB:
-  const modifier = (text) => {
-    text = LivingCharacters("output", text);
-    return { text };
-  };
-  modifier(text);
-
-  INPUT TAB (optional):
-  const modifier = (text) => {
-    text = LivingCharacters("input", text);
-    return { text };
-  };
-  modifier(text);
-
-  (Existing adventures whose tabs still call ChaosGoblinV2(...) keep working via a
-   compatibility alias at the bottom of this file.)
-  */
 
   function LivingCharacters(hook, hookText) {
     "use strict";
@@ -12789,33 +12140,20 @@ function MCPV5Create_living_characters() {
     const CFG = {
       VERSION: "2.63-thought-order-option-2026-07-13",
 
-      // All cast / protagonist / pressures / pacing come from the editable config
-      // Story Card below. No scenario-specific names live in engine logic.
       CONFIG_CARD_TITLE: "LIVING CHARACTERS CONFIG",
       CONFIG_CARD_KEY: "living-characters-config",
       CONFIG_CARD_TYPE: "Config",
 
-      // RELATIONSHIPS live on their OWN optional Story Card, kept separate from the
-      // engine-settings config card above (engine config vs. story relationship data).
-      // The key is non-matching so the card is NEVER injected into context; the card is
-      // found by key OR title, so a user only needs to match the TITLE. It is auto-created
-      // as a comments-only template (zero active rules = today's behavior) so users can
-      // discover and edit it. See parseRelationshipRules for the line format.
       REL_CARD_TITLE: "LIVING CHARACTERS RELATIONSHIPS",
       REL_CARD_KEY: "living-characters-relationships",
       REL_CARD_TYPE: "Relationships",
-      // Old config cards used this exact NOTES text (not a roster). Recognized so it
-      // is not mistaken for character names during the NOTES-roster migration.
+
       LEGACY_CONFIG_NOTES: "Living Characters setup. Edit cast, protagonist, pressures, and pacing here.",
 
-      // User-facing card naming is "Life". The key prefix VALUE ("chaos-v2:") is kept
-      // unchanged for save/card compatibility so existing Life cards (and legacy
-      // "Chaos - " cards) are still found by key and auto-migrated to Life titles.
       LIFE_CARD_TYPE: "Life",
       LIFE_CARD_TITLE_PREFIX: "Life - ",
       LIFE_CARD_KEY_PREFIX: "chaos-v2:",
 
-      // Seedling indicator shown while a Life card is unresolved; dropped on resolve.
       SEEDLING: "🌱",
       SEEDLING_IN_TITLE: true,
 
@@ -12824,157 +12162,84 @@ function MCPV5Create_living_characters() {
       DEBUG_CARD_KEY: "lc-debug",
       DEBUG_CARD_TYPE: "Debug",
 
-      // Safe last-resort output. AI Dungeon reports "empty response" for an empty OR
-      // whitespace-only return; this zero-width space is non-empty and invisible to the
-      // player. Centralized here so every hook's final boundary uses the same fallback.
       EMPTY_OUTPUT_FALLBACK: "\u200B",
 
       AUTONOMY_ENABLED: true,
       AUTONOMY_MAX_PENDING_AGE: 1,
 
-      // Internal timing constants (NOT exposed on the public config card -- adjust here if
-      // needed). Dormancy cadence: threads age toward dormant on this turn interval.
-      THREAD_REMINDER_EVERY: 7,   // slower aging so cards do not burn out too quickly
+      THREAD_REMINDER_EVERY: 7,
       THREAD_REMINDER_MAX: 3,
-      // Write-back checkpoint cadence: how often the LC_MEMORY write-back is offered.
-      // INDEPENDENT of dormancy -- it never ages cards or affects lifespan.
-      CHECKPOINT_EVERY: 3,        // more frequent chances for Life Cards to develop
 
-      // Which active Life Cards are injected into context:
-      //   "strict" - only scene-relevant cards (an involved NPC is present)
-      //   "off"    - any active card (off-screen threads usable as world-state)
-      //   "hybrid" - scene-relevant first, then fill remaining slots off-screen
+      CHECKPOINT_EVERY: 3,
+
       SCENE_RELEVANCE_MODE: "off",
 
-      // HARD cap on simultaneously-open Life threads.
-      // Config can choose 1 or 2 active cards.
-      // When active slots are full, no new Life Card is rolled, seeded, replaced, or deleted.
-      // The system waits until an active card archives naturally.
       MAX_ACTIVE_LIFE_CARDS: 2,
       ACTIVE_LIFE_STATUSES: ["active", "simmering", "surfaced"],
-      // After this many dormancy-cadence appearances, an unresolved card goes dormant.
+
       THREAD_REMINDERS_BEFORE_DORMANT: 3,
-      // No Life Card may be created before this turn (1 = allow from the first turn).
+
       MIN_TURN_BEFORE_FIRST_SEED: 1,
-      // A card is flagged FRESH PRESSURE (urgent "reflect this now") for this many turns
-      // after it fires. 0 = only the turn it fires.
+
       FRESH_THREAD_WINDOW: 1,
 
-      // If the narrator shows a Life Card's actor but returns no <LC_MEMORY>, complete
-      // the card from the seed instead of leaving the placeholder forever.
       AUTO_COMPLETE_ONSCREEN_SEEDS: true,
 
-      // Whether a Life Card also triggers on its NPC target (not just its owner).
-      // The protagonist is never added as a trigger. Override in the config card.
       TRIGGER_ON_TARGET: true,
 
-      // Legacy/optional. Adds a shared trigger token to active cards + injects it into
-      // the block. Only helps systems that RE-SCAN the modified context for triggers;
-      // Hearthfire does not, so this is off by default now that the block carries the
-      // full card details directly. Leave false unless you know your front-end re-scans.
       FORCE_ACTIVE_CARD_TRIGGER: false,
       ACTIVE_SHARED_TRIGGER: "life-thread",
 
       MAX_CONTEXT_CARDS: 4,
       MAX_EVENT_LOG: 12,
-      // How many trailing context characters the scene detector scans (current scene).
+
       SCENE_SCAN_CHARS: 2000,
-      // In second-person stories the protagonist is "you" and the name rarely appears,
-      // but the protagonist is always present. When true (and a PROTAGONIST_NAME is set),
-      // the protagonist always counts as in-scene so protagonist-targeted threads are
-      // not disadvantaged. Set false for third-person stories that name the protagonist.
+
       PROTAGONIST_ALWAYS_PRESENT: true,
 
-      // How often NPC Life Cards TARGET the protagonist. This is a TARGET-side
-      // selection bias ONLY -- it does NOT let the protagonist OWN a Life Card and
-      // never has the narrator author the player's private thoughts/interiority.
-      //   "off"    - protagonist is excluded from target selection (pure NPC-to-NPC)
-      //   "normal" - default; protagonist can be targeted with no special weighting
-      //   "high"   - protagonist gets extra target weight (~3x an NPC); NPC-to-NPC still happens
-      //   "always" - new cards target the protagonist when legal; safe fallback otherwise
-      // If no PROTAGONIST_NAME is configured, every mode degrades safely to "normal".
       PROTAGONIST_INVOLVEMENT: "normal",
 
-      // ---- Thought Card system (SEPARATE from Life Cards) --------------------
-      // Player-facing thought journals. Thought Cards never enter context, are never
-      // read by the AI, and never affect Life Card logic. Own config card, own state.
       THOUGHT_CONFIG_CARD_TITLE: "THOUGHT CARDS CONFIG",
       THOUGHT_CONFIG_CARD_KEY: "living-thoughts-config",
       THOUGHT_CONFIG_CARD_TYPE: "Config",
-      // Title format is character-first for easy scanning. Base title: "Name - Thoughts".
-      // The 💭 is a TEMPORARY "recently updated" marker prepended to the title (see below),
-      // NOT a permanent part of it -- so the player can see which card just changed.
-      THOUGHT_CARD_TITLE_SUFFIX: " - Thoughts",
-      THOUGHT_MARKER: "💭",            // temporary "new thought / recently updated" title marker
-      THOUGHT_MARKER_TURNS: 3,         // turns the 💭 marker stays before it clears
-      THOUGHT_CARD_KEY_PREFIX: "lc-thoughts:",                // non-matching key -> never injected (UNCHANGED)
-      THOUGHT_CARD_TYPE: "Custom",
-      THOUGHTS_ENABLED_DEFAULT: false,    // opt-in; off by default
-      THOUGHT_INTERVAL_DEFAULT: 5,        // turns between thought attempts
-      THOUGHT_CHANCE_DEFAULT: 50,         // % chance per eligible turn
-      // Thought Cards are NO LONGER limited to a fixed number of thoughts per character.
-      // Storage is bounded by CHARACTER COUNT across two fields of the Story Card:
-      //   - Entry holds the NEWEST thoughts up to ~THOUGHT_ENTRY_MAX_CHARS.
-      //   - Notes holds the OLDER overflow up to ~THOUGHT_NOTES_MAX_CHARS.
-      //   - Thoughts too old to fit in Notes are dropped (oldest-first). Numbers are
-      //     PERMANENT and never reused, so dropping old thoughts never renumbers the rest.
-      MAX_THOUGHTS_DEFAULT: 10,           // legacy default kept for save/config compatibility; NOT a cap anymore
-      THOUGHT_ENTRY_MAX_CHARS: 1700,      // newest thoughts live in the Story Card Entry up to ~this many chars
-      THOUGHT_NOTES_MAX_CHARS: 1700,      // older overflow lives in the Story Card Notes up to ~this many chars
-      // Default is "scene": a character only gets a thought when they are actually in the
-      // current scene. No silent fallback to the roster (that is the opt-in "roster" mode).
-      THOUGHT_SCENE_MODE_DEFAULT: "scene", // scene | recent | roster
-      // Display order of the numbered thoughts on a character's card. DISPLAY ONLY --
-      // storage stays oldest->newest so the overflow/trim logic is unaffected.
-      //   ascending  -> 1, 2, 3, 4  (oldest first; the original behavior)
-      //   descending -> 4, 3, 2, 1  (newest first)
-      THOUGHT_ORDER_DEFAULT: "ascending", // ascending | descending
-      THOUGHT_SCENE_TIGHT_CHARS: 700,     // "scene" mode: how many trailing chars count as the CURRENT scene
 
-      // Fallback pressures, used ONLY if the config card lists none. Generic and
-      // scenario-agnostic; users override these in the config card's PRESSURES.
+      THOUGHT_CARD_TITLE_SUFFIX: " - Thoughts",
+      THOUGHT_MARKER: "💭",
+      THOUGHT_MARKER_TURNS: 3,
+      THOUGHT_CARD_KEY_PREFIX: "lc-thoughts:",
+      THOUGHT_CARD_TYPE: "Custom",
+      THOUGHTS_ENABLED_DEFAULT: false,
+      THOUGHT_INTERVAL_DEFAULT: 5,
+      THOUGHT_CHANCE_DEFAULT: 50,
+
+      MAX_THOUGHTS_DEFAULT: 10,
+      THOUGHT_ENTRY_MAX_CHARS: 1700,
+      THOUGHT_NOTES_MAX_CHARS: 1700,
+
+      THOUGHT_SCENE_MODE_DEFAULT: "scene",
+
+      THOUGHT_ORDER_DEFAULT: "ascending",
+      THOUGHT_SCENE_TIGHT_CHARS: 700,
+
       DEFAULT_PRESSURES: [
         "attraction", "fondness", "friendship", "protectiveness",
         "curiosity", "envy", "jealousy", "rivalry",
         "betrayal", "resentment", "trust", "suspicion"
       ],
 
-      // LIFE_CARD_INTERVAL default: turns between Life Card generation ATTEMPTS.
-      // 0 = Off. Lower = more social activity, higher = less.
       DEFAULT_ACTIVITY_TURNS: 15,
-      // Legacy SOCIAL_ACTIVITY (deprecated) -> LIFE_CARD_INTERVAL. Auto-converted
-      // when an old config card has no LIFE_CARD_INTERVAL line.
+
       LEGACY_ACTIVITY_MAP: { off: 0, chaos: 5, busy: 10, balanced: 15, quiet: 20 },
-      // TARGET_COOLDOWN is counted in Life Cards (how many must occur before the same
-      // character can be selected again), not in turns.
+
       DEFAULT_TARGET_COOLDOWN: 3,
 
-      // Seed dedup TTL: a used owner|target|pressure signature blocks re-seeding for
-      // this many TURNS, then expires. Turn-based ON PURPOSE (not seed-count-based):
-      // with fixed RELATIONSHIPS pairs the blocked signature can be the ONLY possible
-      // seed, and a blocked seed never advances the seed count -- count-based aging
-      // would deadlock. Turns always advance.
       SEED_DEDUP_TTL_TURNS: 30,
 
-      // ---- World Event cards -------------------------------------------------
-      // A world event is a Life Card whose owner is the WORLD, not a person. It rides the
-      // SAME machinery as any other card -- slot cap, pacing, seeding, injection block,
-      // round-robin -- so it is not a second system. It is excluded from every CHARACTER
-      // path via kind === "event" (never an actor, never a target, never "in scene"), and
-      // because it takes a normal card slot, MAX_ACTIVE_CARDS alone decides whether it can
-      // coexist with a character card (set 1 to make the event the only card in play).
-      // The bucket key contains ":" -- cleanName can never produce that, so it can never
-      // collide with a real character's bucket, and the narrator can never address it.
       EVENT_BUCKET_KEY: "event:world",
       EVENT_OWNER_LABEL: "The World",
       EVENT_CARD_TITLE: "Event - World",
       EVENT_CARD_TYPE: "Event",
-      // Round-robin cycle:
-      //   relationship -> event -> random -> relationship -> random -> repeat
-      // Events take 1 seat in 5; relationship and random take 2 each. Re-tune the cadence
-      // anytime by editing this array. A seat that cannot produce is SKIPPED by the fallback
-      // loop in maybeCreateSeed, so an empty WORLD_EVENTS list simply degrades to the
-      // relationship/random seats and nothing stalls.
+
       SEED_CYCLE: ["relationship", "event", "random", "relationship", "random"],
 
       STATUS_VALUES: ["active", "simmering", "surfaced", "dormant", "resolved"]
@@ -12990,9 +12255,6 @@ function MCPV5Create_living_characters() {
       if (typeof globalThis.text === "string") globalThis.text = String(value || "");
     }
 
-    // ---- Generic configuration card -----------------------------------------
-    // All cast / protagonist / pressures / pacing are read from an editable Story
-    // Card. The engine holds no scenario-specific names.
     function defaultConfigEntry() {
       return [
         "LIVING CHARACTERS",
@@ -13049,7 +12311,6 @@ function MCPV5Create_living_characters() {
       ].join("\n");
     }
 
-    // The character roster lives in the config card's NOTES (description).
     function defaultConfigNotes() {
       return [
         "( Add one character name per line below. See GitHub for help. )",
@@ -13057,8 +12318,6 @@ function MCPV5Create_living_characters() {
       ].join("\n");
     }
 
-    // Parse a roster from NOTES text: one name per line, trimmed, blanks and
-    // ( comments ) ignored, multi-word names preserved.
     function isConfigSectionLabel(value) {
       const line = String(value || "").trim();
       const colon = line.indexOf(":");
@@ -13098,11 +12357,6 @@ function MCPV5Create_living_characters() {
       );
     }
 
-    // Auto-created template for the SEPARATE relationships card. Only lines BELOW the
-    // "Relationships:" header are parsed as rules (see parseRelationshipRules), so the
-    // preamble and the two example lines above it are NEVER treated as live rules -- a
-    // freshly created card carries ZERO active rules and behavior is identical to before
-    // until the user adds a line under "Relationships:".
     function defaultRelationshipsEntry() {
       return [
         "Per-character targeting",
@@ -13119,9 +12373,6 @@ function MCPV5Create_living_characters() {
       ].join("\n");
     }
 
-    // Auto-create the relationships card if it is missing, so users can discover and edit
-    // it -- mirroring ensureConfigCard/ensureThoughtConfigCard. The template has no rules
-    // under its "Relationships:" header, so it leaves behavior exactly as before.
     function ensureRelationshipsCard() {
       const existing = findStoryCardByKeys(CFG.REL_CARD_KEY) || findStoryCardByTitle(CFG.REL_CARD_TITLE);
       if (existing) return existing;
@@ -13177,9 +12428,6 @@ function MCPV5Create_living_characters() {
       return out;
     }
 
-    // Like configList, but PRESERVES the raw line text. configList runs cleanName, which
-    // strips punctuation and truncates at 50 chars -- right for names, wrong for an event
-    // sentence like "A gun duel erupts in the street."
     function configTextList(sections, key) {
       const arr = sections[key] || [];
       const out = [];
@@ -13213,9 +12461,6 @@ function MCPV5Create_living_characters() {
       let protagonist = cleanName(configFirst(sections, "protagonist_name", ""));
       if (/^none$/i.test(protagonist) || /^n\/?a$/i.test(protagonist)) protagonist = "";
 
-      // Roster: prefer the card NOTES (description). The old default NOTES string is
-      // not a roster, so ignore it. Fall back to the legacy ENTRY CHARACTERS section
-      // for older cards so they do not break.
       const notes = (card && card.description) || "";
       let rosterSource = "NOTES";
       let characters = (String(notes).trim() === CFG.LEGACY_CONFIG_NOTES) ? [] : parseRoster(notes);
@@ -13228,14 +12473,8 @@ function MCPV5Create_living_characters() {
       let pressures = configList(sections, "pressures").map(function(p) { return p.toLowerCase(); });
       if (!pressures.length) pressures = CFG.DEFAULT_PRESSURES.slice();
 
-      // WORLD_EVENTS: optional authored list, one event per line. Raw text is preserved.
-      // Empty (the default) -> the "event" seat in the round-robin falls through to the
-      // character pools, so an existing story behaves exactly as before.
       const worldEvents = configTextList(sections, "world_events");
 
-      // LIFE_CARD_INTERVAL -> turns between Life Card attempts. 0 disables generation.
-      // SOCIAL_ACTIVITY is deprecated; if an old card has it but no LIFE_CARD_INTERVAL,
-      // auto-convert the keyword to the matching interval (no silent Balanced fallback).
       const intervalRaw = configFirst(sections, "life_card_interval", null);
       const legacyRaw = configFirst(sections, "social_activity", null);
       let legacyActivityUsed = false;
@@ -13255,17 +12494,12 @@ function MCPV5Create_living_characters() {
       const activityTurns = activityOff ? 0 : Math.max(1, interval);
 
       const targetCooldown = Math.max(0, toIntOr(configFirst(sections, "target_cooldown", CFG.DEFAULT_TARGET_COOLDOWN), CFG.DEFAULT_TARGET_COOLDOWN));
-      // Configurable, clamped to 1-2 (3+ not allowed for now).
-      //   1 = focused mode (one storyline at a time)
-      //   2 = layered mode (two interwoven threads)
+
       const maxActive = Math.max(1, Math.min(2, toIntOr(configFirst(sections, "max_active_cards", CFG.MAX_ACTIVE_LIFE_CARDS), CFG.MAX_ACTIVE_LIFE_CARDS)));
       const triggerOnTarget = toBoolOr(configFirst(sections, "trigger_on_target", null), CFG.TRIGGER_ON_TARGET);
       const forceActiveCardTrigger = toBoolOr(configFirst(sections, "force_active_card_trigger", null), CFG.FORCE_ACTIVE_CARD_TRIGGER);
       const protagonistAlwaysPresent = toBoolOr(configFirst(sections, "protagonist_always_present", null), CFG.PROTAGONIST_ALWAYS_PRESENT);
 
-      // Scene relevance mode: strict | off | hybrid (validated; default strict).
-      // Accept both SCENE_RELEVANCE_MODE and the SCENE_RELEVANCE alias. Prefer
-      // SCENE_RELEVANCE_MODE if present, else SCENE_RELEVANCE, else the default.
       let sceneMode = String(
         configFirst(
           sections,
@@ -13275,25 +12509,13 @@ function MCPV5Create_living_characters() {
       ).toLowerCase().replace(/\s+/g, "");
       if (sceneMode !== "strict" && sceneMode !== "off" && sceneMode !== "hybrid") sceneMode = CFG.SCENE_RELEVANCE_MODE;
 
-      // Two INDEPENDENT cadences (decoupled), hardwired internally and NOT exposed on the
-      // public config card. Adjust the CFG constants if needed.
-      //   CHECKPOINT_EVERY      -> write-back (LC_MEMORY) opportunity only. No lifespan effect.
-      //   THREAD_REMINDER_EVERY -> dormancy/reminder aging only (card lifespan).
       const checkpointEvery = CFG.CHECKPOINT_EVERY;
       const threadReminderEvery = CFG.THREAD_REMINDER_EVERY;
 
-      // Protagonist involvement: off | normal | high | always (validated; default normal).
-      // TARGET-side bias only -- never makes the protagonist an owner. With no protagonist
-      // configured the bias is meaningless, so it degrades safely to "normal".
       let involvement = String(configFirst(sections, "protagonist_involvement", CFG.PROTAGONIST_INVOLVEMENT)).toLowerCase().replace(/\s+/g, "");
       if (involvement !== "off" && involvement !== "normal" && involvement !== "high" && involvement !== "always") involvement = CFG.PROTAGONIST_INVOLVEMENT;
       if (!protagonist) involvement = "normal";
 
-      // RELATIONSHIPS: optional directed steering rules (seed-time only), read from a
-      // SEPARATE Story Card (engine config vs. story relationship data). If the card is
-      // absent, rel is empty and the engine behaves exactly as before. Rules are read
-      // from the card's ENTRY and NOTES (either place works), parsed AFTER the roster and
-      // protagonist so names can canonicalize against the roster.
       ensureRelationshipsCard();
       const relCard = findStoryCardByKeys(CFG.REL_CARD_KEY) || findStoryCardByTitle(CFG.REL_CARD_TITLE);
       const relationshipsCardFound = !!relCard;
@@ -13301,18 +12523,8 @@ function MCPV5Create_living_characters() {
       const relLines = relText ? relText.replace(/\r/g, "").split("\n") : [];
       const rel = parseRelationshipRules(relLines, characters, protagonist);
 
-      // A RELATIONSHIPS section left over in the OLD location (the main config card) is
-      // no longer read here -- flag it so the debug card can tell the user to move it.
       const mainConfigHadRelationships = /(^|\n)\s*relationships\s*:/i.test(String(card && card.entry) || "");
 
-      // Expand the cast so relationship rules do NOT require duplicating names in the
-      // roster: runtime actors = roster actors + relationship owners + relationship
-      // targets. Relationship-only names become valid characters (scene detection,
-      // random target pools, etc.); the protagonist is still excluded from the NPC cast.
-      // rosterCharacters is captured BEFORE expansion: it is the set eligible for RANDOM
-      // owner selection. Relationship-only TARGETS are added to the cast (valid targets +
-      // scene-detectable) but are NOT random owners unless they also appear here or hold
-      // their own rule -- see ownerCandidates().
       const rosterActorCount = characters.length;
       const rosterCharacters = characters.slice();
       const relNameSet = {};
@@ -13358,10 +12570,7 @@ function MCPV5Create_living_characters() {
 
     function ensureState() {
       if (!globalThis.state || typeof state !== "object") globalThis.state = {};
-      // NOTE: the persistent save key is intentionally kept as `chaosGoblinV2` for
-      // backward compatibility — existing adventures store their Life Threads here.
-      // Renaming it would orphan every saved thread, so the key stays; only the
-      // surrounding code/naming is modernized. `lc` below is the live engine state.
+
       if (!state.chaosGoblinV2) {
         state.chaosGoblinV2 = {
           version: CFG.VERSION,
@@ -13381,15 +12590,12 @@ function MCPV5Create_living_characters() {
       if (!cg.cards || typeof cg.cards !== "object") cg.cards = {};
       if (!cg.actorSeedIndex || typeof cg.actorSeedIndex !== "object") cg.actorSeedIndex = {};
       if (typeof cg.seedCount !== "number") cg.seedCount = 0;
-      // Round-robin phase: which owner type is TRIED first next seed. Default to
-      // "relationship" so the very first generated card prefers a relationship rule.
+
       if (cg.seedPhase !== "relationship" && cg.seedPhase !== "random" && cg.seedPhase !== "event") cg.seedPhase = "relationship";
-      // Round-robin CYCLE index into CFG.SEED_CYCLE. Migrated from the legacy 2-way
-      // seedPhase toggle so existing saves keep their place in the rotation.
+
       if (typeof cg.seedCycleIndex !== "number") cg.seedCycleIndex = (cg.seedPhase === "random") ? 1 : 0;
       if (!Array.isArray(cg.recentSeeds)) cg.recentSeeds = [];
-      // Migrate legacy recentSeeds entries (plain signature strings, never-expiring)
-      // to { sig, turn } stamped with the current turn so they age out normally.
+
       for (let i = 0; i < cg.recentSeeds.length; i++) {
         if (typeof cg.recentSeeds[i] === "string") {
           cg.recentSeeds[i] = { sig: cg.recentSeeds[i], turn: cg.turn || 0 };
@@ -13407,16 +12613,11 @@ function MCPV5Create_living_characters() {
         .trim();
     }
 
-    // Leading whitespace run (spaces/tabs/newlines) of a string, or "". Used to PRESERVE the
-    // separator the model puts before a continuation -- cleanText's trim() would remove it and
-    // jam the new narration onto the prior story text.
     function leadingWhitespace(s) {
       const m = /^[ \t\r\n]+/.exec(String(s || ""));
       return m ? m[0] : "";
     }
 
-    // Normalize a leading-whitespace run to exactly ONE safe separator so restoring it never
-    // reintroduces sloppy spacing: a paragraph break, a single newline, or a single space.
     function leadSeparator(ws) {
       if (/\n[ \t]*\n/.test(ws)) return "\n\n";
       if (/\n/.test(ws)) return "\n";
@@ -13476,7 +12677,7 @@ function MCPV5Create_living_characters() {
     // the engine knows when the player is present.
     // Text for the CURRENT scene. Prefer recent story actions (history), which EXCLUDE
     // story-card entries, memory, author's note, and injected notes — so strict scene
-    // relevance means "in the visible scene", not "named somewhere in context".
+
     function recentSceneText(contextFallback) {
       const cg = ensureState();
       if (Array.isArray(globalThis.history) && history.length) {
@@ -13497,14 +12698,14 @@ function MCPV5Create_living_characters() {
       const recent = recentSceneText(text);
       const p = playerName();
       const found = [];
-      // Protagonist is present by default (second-person "you" rarely names them).
+
       if (p && LC.protagonistAlwaysPresent) found.push(p);
-      // NPCs are detected by name in the recent scene text.
+
       const names = npcRoster();
       for (let i = 0; i < names.length; i++) {
         if (names[i] && containsWholeWord(recent, names[i])) found.push(names[i]);
       }
-      // Also detect the protagonist by name (third-person stories that name them).
+
       if (p && found.indexOf(p) === -1 && containsWholeWord(recent, p)) found.push(p);
       return unique(found);
     }
@@ -13573,29 +12774,19 @@ function MCPV5Create_living_characters() {
       const bucket = ensureCardBucket(owner);
       if (!bucket) return false;
 
-      // Narrator authors the specific EVENT. System keeps PRESSURE/TARGET/MOMENTUM,
-      // but fill them from memory if the card has none yet.
       if (memory.event) bucket.event = cleanText(memory.event);
       if (memory.target && !cleanText(bucket.target)) bucket.target = cleanName(memory.target);
       if (memory.pressure && !cleanText(bucket.pressure)) bucket.pressure = cleanText(memory.pressure);
       if (memory.momentum && !cleanText(bucket.momentum)) bucket.momentum = cleanText(memory.momentum);
-      // Optional first-person thought: update only when the narrator supplies a non-empty
-      // value; never blank an existing thought. Display-only, never used in engine logic.
-      // NOTE: this legacy OWNER_THOUGHT lives on the Life Card and is fed by the LC_MEMORY
-      // write-back (XML-style block authored by the narrator). It is SEPARATE from the
-      // Thought Card system: Thought Cards do NOT use LC_MEMORY, XML, or narrator write-back
-      // -- they use the leading-parenthetical capture and store to their own "💭 Thoughts"
-      // cards. The two are independent; see the THOUGHT CARD SYSTEM module below.
+
       if (cleanText(memory.owner_thought)) bucket.ownerThought = cleanText(memory.owner_thought);
 
       const status = cleanText(memory.status).toLowerCase();
       bucket.status = CFG.STATUS_VALUES.indexOf(status) !== -1 ? status : (bucket.status || "active");
-      bucket.reminderCount = 0; // narrator touched it; restart the dormancy clock
+      bucket.reminderCount = 0;
 
       appendEventLog(bucket, memory.log || memory.event);
 
-      // Resolved threads archive permanently: drop the Story Card. HISTORY stays in
-      // state so the character keeps a long-term social record.
       if (bucket.status === "resolved") {
         removeStoryCardByKeys(storyCardIdToken(owner));
       }
@@ -13612,7 +12803,7 @@ function MCPV5Create_living_characters() {
 
     function renderCardEntry(bucket) {
       const status = cleanText(bucket.status) || "active";
-      // Dormant = archived record: STATUS only. HISTORY is in the card description.
+
       if (status.toLowerCase() === "dormant") return "STATUS: dormant";
       if (!cardHasContent(bucket)) return "";
       const target = cleanText(bucket.target) || "someone";
@@ -13620,12 +12811,12 @@ function MCPV5Create_living_characters() {
       const momentum = cleanText(bucket.momentum) || "low";
       const occurrence = cleanText(bucket.event);
       const ownerThought = cleanText(bucket.ownerThought);
-      // Seedling shows only while the thread is active; dropped when dormant/resolved.
+
       const statusLine = lifeStatusIsActive(status) ? (CFG.SEEDLING + " " + status) : status;
-      // Compact one-line-per-field format (no blank lines) to keep Story Cards small.
+
       const out = ["TARGET: " + target, "PRESSURE: " + pressure];
-      if (occurrence) out.push("OCCURRENCE: " + occurrence); // only if narrator authored it
-      if (ownerThought) out.push("OWNER_THOUGHT: " + ownerThought); // LC_MEMORY-fed (legacy)
+      if (occurrence) out.push("OCCURRENCE: " + occurrence);
+      if (ownerThought) out.push("OWNER_THOUGHT: " + ownerThought);
       out.push("MOMENTUM: " + momentum, "STATUS: " + statusLine);
       return out.join("\n");
     }
@@ -13638,15 +12829,10 @@ function MCPV5Create_living_characters() {
       return out.join("\n");
     }
 
-    // Stable per-character identity token. Never changes across a character's life
-    // (even when the target changes). Used ONLY for lookup/removal.
     function storyCardIdToken(owner) {
       return CFG.LIFE_CARD_KEY_PREFIX + keyName(owner);
     }
 
-    // Visible trigger list = identity token + owner name + (NPC target, if enabled).
-    // Joined with "," and no trailing space. The protagonist, empty targets, and
-    // "someone" placeholders are never added as triggers.
     function storyCardTriggers(bucket) {
       const owner = cleanName(bucket.owner);
       let triggers = storyCardIdToken(owner) + "," + owner;
@@ -13657,18 +12843,15 @@ function MCPV5Create_living_characters() {
           triggers += "," + target;
         }
       }
-      // Shared trigger token: only added here, and syncCards only runs for ACTIVE
-      // cards, so dormant/resolved cards never carry it.
+
       if (LC.forceActiveCardTrigger && CFG.ACTIVE_SHARED_TRIGGER) {
         triggers += "," + CFG.ACTIVE_SHARED_TRIGGER;
       }
-      // Experiment: add the second-person word "you" as a trigger on every card so that in a
-      // second-person story (where "you" is ever-present) AI Dungeon matches every card.
+
       triggers += ",you";
       return triggers;
     }
 
-    // Identity = the FIRST trigger token only (normalized), never the full list.
     function keyIdToken(keys) {
       const s = String(keys || "");
       const comma = s.indexOf(",");
@@ -13694,9 +12877,6 @@ function MCPV5Create_living_characters() {
       return null;
     }
 
-    // Stable identity lookup by the FIRST trigger token (not the full trigger list),
-    // so adding/removing a target trigger never changes a card's identity. Titles can
-    // change (seedling on/off, Chaos->Life); the token stays constant.
     function findStoryCardByKeys(keys) {
       if (!Array.isArray(globalThis.storyCards)) return null;
       const token = keyIdToken(keys);
@@ -13707,8 +12887,6 @@ function MCPV5Create_living_characters() {
       return null;
     }
 
-    // Remove a Story Card by its identity token so an archived thread leaves the card
-    // list and stays gone (syncCards will not recreate a non-active bucket).
     function removeStoryCardByKeys(keys) {
       if (!keys || !Array.isArray(globalThis.storyCards)) return;
       const token = keyIdToken(keys);
@@ -13763,10 +12941,9 @@ function MCPV5Create_living_characters() {
       for (let i = 0; i < owners.length; i++) {
         const owner = owners[i];
         const bucket = cg.cards[owner];
-        // Only live threads sync. Dormant/resolved buckets are archived in state
-        // (HISTORY preserved) and must NOT be recreated as Story Cards.
+
         if (!cardHasContent(bucket) || !lifeStatusIsActive(bucket.status)) continue;
-        // World events render as an event, not as an owner/target pressure card.
+
         if (isEventBucket(bucket)) { syncWorldEventCard(bucket); continue; }
         const entry = renderCardEntry(bucket);
         if (!entry) continue;
@@ -13780,8 +12957,6 @@ function MCPV5Create_living_characters() {
       }
     }
 
-    // Read a labeled field's value from a rendered Story Card entry. Handles the
-    // compact inline form ("LABEL: value") and the older "LABEL:" + next-line form.
     function extractEntryField(entry, label) {
       const lines = String(entry || "").replace(/\r/g, "").split("\n");
       const want = label.toUpperCase() + ":";
@@ -13798,8 +12973,6 @@ function MCPV5Create_living_characters() {
       return "";
     }
 
-    // Per active card: compare the INTERNAL bucket (source for injection + render)
-    // against the VISIBLE Story Card entry, and flag stale (non-config) pressures.
     function cardAuditLines() {
       const cg = ensureState();
       const owners = Object.keys(cg.cards || {});
@@ -13807,7 +12980,7 @@ function MCPV5Create_living_characters() {
       for (let i = 0; i < owners.length; i++) {
         const b = cg.cards[owners[i]];
         if (!cardHasContent(b) || !lifeStatusIsActive(b.status)) continue;
-        if (isEventBucket(b)) continue; // world events have no owner/target/pressure to audit
+        if (isEventBucket(b)) continue;
         const bP = cleanText(b.pressure), bT = cleanText(b.target);
         const card = findStoryCardByKeys(storyCardIdToken(owners[i]));
         const cP = card ? extractEntryField(card.entry, "PRESSURE") : "";
@@ -13904,13 +13077,6 @@ function MCPV5Create_living_characters() {
       );
     }
 
-    // Names eligible to OWN a Life Card:
-    //   - roster NPCs (the classic random owners), and
-    //   - any name with its OWN relationship rule (a ruled owner; may be the protagonist).
-    // Relationship-only TARGETS are deliberately excluded: being named as someone's target
-    // makes a character a valid target and scene-detectable, but NEVER a random owner. A
-    // target-only name only becomes an owner if it also appears in the roster or gains its
-    // own rule.
     function ownerCandidates() {
       const p = playerName();
       const set = {};
@@ -13918,8 +13084,7 @@ function MCPV5Create_living_characters() {
       for (let i = 0; i < roster.length; i++) {
         if (roster[i] && roster[i] !== p) set[roster[i]] = true;
       }
-      // Ruled owners (the keys of the relationships map). The protagonist is allowed here
-      // ONLY via an explicit rule; random selection still never makes them an owner.
+
       const owners = Object.keys(LC.relationships || {});
       for (let i = 0; i < owners.length; i++) {
         if (owners[i]) set[owners[i]] = true;
@@ -13927,11 +13092,6 @@ function MCPV5Create_living_characters() {
       return Object.keys(set);
     }
 
-    // Eligible actors = ownerCandidates, minus characters who already hold an active Life
-    // thread (one per character -- so a ruled owner with a live card is skipped, and the
-    // engine does NOT compensate by promoting that owner's target to a random owner), minus
-    // characters still inside their TARGET_COOLDOWN (counted in Life Cards, not turns). When
-    // the owner's card archives, they return here and may seed again from their rule targets.
     function actorPool() {
       const cg = ensureState();
       return unique(ownerCandidates()).filter(function(name) {
@@ -13951,34 +13111,11 @@ function MCPV5Create_living_characters() {
       });
     }
 
-    // ---- RELATIONSHIPS: directed steering rules (seed-time only) -------------
-    // Optional "Owner > Target [xN] [= pressure, pressure]" lines from the dedicated
-    // LIVING CHARACTERS RELATIONSHIPS card. Rules narrow WHAT seeds (target set and
-    // pressure pool), never WHEN: pacing, cooldowns, slot caps, dormancy, and
-    // existing/pending cards are untouched. An owner with at least one rule ONLY
-    // targets listed characters (fail closed when none is currently legal -- never a
-    // random fallback); owners without rules keep the original random behavior exactly.
-
-    // Parse the RELATIONSHIPS card lines. STRUCTURE is parsed FIRST (">", "=", ",",
-    // trailing " xN") and names are cleaned AFTER -- cleanName strips those symbols,
-    // so it must never see the raw line. Invalid rules are skipped and reported;
-    // for duplicate directed pairs the LAST valid rule wins.
-    //
-    // NAME RESOLUTION is liberal (no roster membership required):
-    //   - "You" / "Protagonist" (and the protagonist's own name) -> PROTAGONIST_NAME.
-    //   - A name matching the roster (case-insensitive) canonicalizes to the roster
-    //     spelling so "jessica" and "Jessica" are the same character.
-    //   - ANY OTHER non-empty name is accepted as a new relationship-only character;
-    //     the caller folds these into the runtime cast, so users never duplicate names.
-    // The protagonist MAY own a rule. Only self-targeting is rejected.
     function parseRelationshipRules(rawLines, characters, protagonist) {
-      const rules = {};  // owner -> [{ target, pressures: array|null, weight }]
+      const rules = {};
       const notes = [];
       let count = 0;
 
-      // Canonical-name resolver. Roster spellings are authoritative; the first spelling
-      // seen wins for any relationship-only name. Returns "" only for empty input or an
-      // unresolvable You/Protagonist (no PROTAGONIST_NAME set).
       const canon = {};
       for (let i = 0; i < (characters || []).length; i++) {
         const c = cleanName(characters[i]);
@@ -13990,16 +13127,12 @@ function MCPV5Create_living_characters() {
         const c = cleanName(label);
         if (!c) return "";
         const low = c.toLowerCase();
-        if (low === "you" || low === "protagonist" || (pKey && low === pKey)) return pName; // "" if no protagonist
+        if (low === "you" || low === "protagonist" || (pKey && low === pKey)) return pName;
         if (canon[low]) return canon[low];
         canon[low] = c;
         return c;
       }
 
-      // SECTIONING: rules are only read AFTER a "Relationships:" (or "RELATIONSHIPS")
-      // header line. This lets the card carry a title, an "Example:" label, and example
-      // lines ABOVE the header without them ever being parsed as live rules. If no header
-      // line exists, every line is considered (backward compatible with header-less cards).
       let lines = rawLines || [];
       for (let h = 0; h < lines.length; h++) {
         if (/^\s*relationships\s*:?\s*$/i.test(String(lines[h] || ""))) { lines = lines.slice(h + 1); break; }
@@ -14009,8 +13142,7 @@ function MCPV5Create_living_characters() {
         if (!raw || raw.charAt(0) === "(") continue;
         const gt = raw.indexOf(">");
         if (gt === -1) {
-          // A label line ending in ":" or a stray "relationships" header is silent; other
-          // non-rule lines are noted so typos are visible on the debug card.
+
           if (!/:$/.test(raw) && !/^relationships$/i.test(raw)) notes.push("ignored (no '>'): " + raw.slice(0, 60));
           continue;
         }
@@ -14019,7 +13151,7 @@ function MCPV5Create_living_characters() {
         let listRaw = null;
         const eq = targetRaw.indexOf("=");
         if (eq !== -1) { listRaw = targetRaw.slice(eq + 1); targetRaw = targetRaw.slice(0, eq); }
-        // Optional trailing weight on the target segment: "Target x3".
+
         let weight = 1;
         const wm = /\sx(\d+)\s*$/i.exec(targetRaw);
         if (wm) { weight = Math.max(1, toIntOr(wm[1], 1)); targetRaw = targetRaw.slice(0, wm.index); }
@@ -14030,9 +13162,6 @@ function MCPV5Create_living_characters() {
         if (!target) { notes.push("ignored (unresolved target \"" + (cleanName(targetRaw) || "?") + "\" for " + owner + ")"); continue; }
         if (target === owner) { notes.push("ignored (self-target): " + owner); continue; }
 
-        // Pressure list: cleaned the same way as the global PRESSURES pool
-        // (cleanName + lowercase) so comparisons and audits line up. Pressures NOT
-        // in the global pool are allowed on purpose (pair-specific pressures).
         let pressures = null;
         if (listRaw != null) {
           const parts = String(listRaw).split(",");
@@ -14078,14 +13207,10 @@ function MCPV5Create_living_characters() {
       return null;
     }
 
-    // True when `owner` may target `target`: unruled owners may target anyone,
-    // ruled owners only characters in their configured set.
     function canTarget(owner, target) {
       return !ownerRules(owner) || !!ruleFor(owner, target);
     }
 
-    // True when `owner` could seed SOME target right now: unruled, or at least one
-    // configured target is currently in their legal target pool.
     function hasLegalRuleTarget(owner) {
       const list = ownerRules(owner);
       if (!list) return true;
@@ -14096,8 +13221,6 @@ function MCPV5Create_living_characters() {
       return false;
     }
 
-    // True when a pressure appears in ANY relationship rule's list, so the debug
-    // audit does not flag legitimate pair-specific pressures as stale.
     function isRulePressure(p) {
       p = cleanText(p).toLowerCase();
       if (!p) return false;
@@ -14111,8 +13234,6 @@ function MCPV5Create_living_characters() {
       return false;
     }
 
-    // Compact resolved-rule summary for the debug card, e.g.
-    // "Jessica > [Sam x3 (=jealousy, attraction), Tristan]".
     function relationshipRuleLines() {
       const owners = Object.keys(LC.relationships || {});
       const parts = [];
@@ -14129,20 +13250,12 @@ function MCPV5Create_living_characters() {
       return parts.length ? parts.join(" ; ") : "(none)";
     }
 
-    // Choose a TARGET for a given (already-selected NPC) owner, applying the
-    // PROTAGONIST_INVOLVEMENT bias. This only ever influences who is TARGETED; owner
-    // selection (actorPool) and the never-an-owner rule are untouched. With no
-    // protagonist, LC.protagonistInvolvement is forced to "normal" upstream, so this
-    // behaves exactly like the original choose(targetPool(actor)).
     function chooseTarget(actor) {
       const p = playerName();
       const mode = LC.protagonistInvolvement || "normal";
       const pool = targetPool(actor);
       if (!pool.length) return "";
-      // RELATIONSHIPS steering: a ruled owner's target ALWAYS comes from their rules
-      // (weighted via weightedChoice), overriding PROTAGONIST_INVOLVEMENT for that
-      // owner. If no configured target is currently legal, fail closed with "" --
-      // the caller skips this seed; a ruled owner NEVER falls back to a random target.
+
       const rules = ownerRules(actor);
       if (rules) {
         const pairs = [];
@@ -14154,23 +13267,20 @@ function MCPV5Create_living_characters() {
       const protagInPool = !!p && pool.indexOf(p) !== -1;
 
       if (mode === "off") {
-        // Exclude the protagonist absolutely. If no NPC target remains, choose([])
-        // returns "" and the caller safely skips the card (never falls back to the
-        // protagonist) -- "off" means the protagonist is never targeted.
+
         const npcOnly = pool.filter(function(n) { return n !== p; });
         return choose(npcOnly);
       }
       if (mode === "always" && protagInPool) {
-        // Use the protagonist as target when legal. (Owner stays an NPC; cooldown and
-        // scene relevance are still enforced by the surrounding selection logic.)
+
         return p;
       }
       if (mode === "high" && protagInPool) {
-        // Protagonist gets ~3x the weight of a single NPC; NPC-to-NPC still happens.
+
         const pairs = pool.map(function(n) { return [n, n === p ? 3 : 1]; });
         return weightedChoice(pairs);
       }
-      // normal (and high/always with no eligible protagonist target): current behavior.
+
       return choose(pool);
     }
 
@@ -14189,8 +13299,6 @@ function MCPV5Create_living_characters() {
       return [seed.actor, seed.target, seed.category].join("|").toLowerCase();
     }
 
-    // Seed-dedup bookkeeping. Entries are { sig, turn } and EXPIRE after
-    // SEED_DEDUP_TTL_TURNS turns (see the CFG comment for why turn-based).
     function pruneRecentSeeds(cg) {
       const keep = [];
       for (let i = 0; i < cg.recentSeeds.length; i++) {
@@ -14219,7 +13327,7 @@ function MCPV5Create_living_characters() {
       }
       if (!known) cg.recentSeeds.push({ sig: sig, turn: cg.turn });
       while (cg.recentSeeds.length > 20) cg.recentSeeds.shift();
-      // Count this Life Card and stamp the actor's card index for TARGET_COOLDOWN.
+
       cg.seedCount = (cg.seedCount || 0) + 1;
       cg.actorSeedIndex[seed.actor] = cg.seedCount;
     }
@@ -14230,15 +13338,10 @@ function MCPV5Create_living_characters() {
       return "low";
     }
 
-    // True for a WORLD EVENT bucket: an event, not a person. Every character path checks
-    // this (never an actor, target, or scene presence). Keyed off `kind`, NOT the display
-    // name, so a character called "The World" could never be mistaken for the event card.
     function isEventBucket(b) {
       return !!(b && b.kind === "event");
     }
 
-    // A card is meaningful once it carries system pressure or a narrator event. A world
-    // event carries its event text instead.
     function cardHasContent(b) {
       if (isEventBucket(b)) return !!cleanText(b.worldEvent);
       return !!(b && (cleanText(b.pressure) || cleanText(b.event)));
@@ -14248,28 +13351,21 @@ function MCPV5Create_living_characters() {
       return CFG.EVENT_BUCKET_KEY + "||" + cleanText(text).toLowerCase();
     }
 
-    // Seed a WORLD EVENT: a Life Card owned by the world rather than a person. It takes a
-    // normal card slot (so MAX_ACTIVE_CARDS governs whether a character card can coexist)
-    // and rides the same injection/lifecycle machinery. Returns a seed-shaped object, or
-    // null when no events are configured -- the caller then falls through to characters.
     function seedWorldEvent() {
       const cg = ensureState();
       const list = LC.worldEvents || [];
       if (!list.length) return null;
-      // Only ONE world event at a time. All events share a single bucket key, so seeding
-      // while one is live would silently overwrite it -- return null instead and let the
-      // round-robin fall through to a character seat.
+
       const live = cg.cards[CFG.EVENT_BUCKET_KEY];
       if (live && cardHasContent(live) && lifeStatusIsActive(live.status)) return null;
-      // Prefer an event that is not still inside the dedup TTL, so the same one does not
-      // repeat back to back; if they are all recent, allow a repeat rather than stall.
+
       const unused = list.filter(function(t) { return !isRecentSeed(worldEventSignature(t)); });
       const text = cleanText(choose(unused.length ? unused : list));
       if (!text) return null;
 
       cg.cards[CFG.EVENT_BUCKET_KEY] = {
         kind: "event",
-        owner: CFG.EVENT_OWNER_LABEL, // display only -- never used for selection
+        owner: CFG.EVENT_OWNER_LABEL,
         worldEvent: text,
         target: "", pressure: "", momentum: "", event: "",
         status: "active",
@@ -14280,7 +13376,7 @@ function MCPV5Create_living_characters() {
 
       cg.recentSeeds.push({ sig: worldEventSignature(text), turn: cg.turn });
       while (cg.recentSeeds.length > 20) cg.recentSeeds.shift();
-      cg.seedCount = (cg.seedCount || 0) + 1; // an event counts as a produced card
+      cg.seedCount = (cg.seedCount || 0) + 1;
       cg.lastSeedAttemptTurn = cg.turn;
       cg.seedSource = "worldEvent";
       cg.seedCandidates = [];
@@ -14292,8 +13388,6 @@ function MCPV5Create_living_characters() {
       return { id: "event-" + cg.turn, turnCreated: cg.turn, kind: "event", worldEvent: text };
     }
 
-    // Story card for a live world event. Separate from the character-card renderer: no
-    // owner/target/pressure, and the trigger list carries no person's name.
     function syncWorldEventCard(bucket) {
       createOrPatchStoryCard(
         CFG.EVENT_CARD_TITLE,
@@ -14304,9 +13398,6 @@ function MCPV5Create_living_characters() {
       );
     }
 
-    // Materialize a pressure card the moment a Life Card seed fires. The system
-    // writes only the abstract pressure (TARGET / PRESSURE / MOMENTUM); it never
-    // invents the specific behavior and never overwrites a narrator-authored EVENT.
     function bootstrapSeedCard(seed) {
       if (!seed) return;
       const bucket = ensureCardBucket(seed.actor);
@@ -14315,13 +13406,12 @@ function MCPV5Create_living_characters() {
       bucket.target = seed.target;
       bucket.pressure = seed.pressure;
       bucket.momentum = seed.momentum;
-      bucket.reminderCount = 0; // fresh pressure restarts the dormancy clock
+      bucket.reminderCount = 0;
       bucket.status = "active";
-      bucket.createdTurn = ensureState().turn; // for FRESH PRESSURE detection in the block
+      bucket.createdTurn = ensureState().turn;
       appendEventLog(bucket, "[pressure] " + seed.pressure + " toward " + seed.target + " (" + seed.momentum + ")");
     }
 
-    // A Life card counts as "active" only in these statuses. dormant/resolved do not.
     function lifeStatusIsActive(status) {
       const list = CFG.ACTIVE_LIFE_STATUSES || ["active", "simmering", "surfaced"];
       return list.indexOf(cleanText(status).toLowerCase()) !== -1;
@@ -14338,10 +13428,6 @@ function MCPV5Create_living_characters() {
       return n;
     }
 
-
-    // Dormancy ARCHIVES a thread: keep the card and HISTORY, but clear the active
-    // thread fields so the character fully releases this storyline and can be
-    // reseeded later with a brand-new TARGET / PRESSURE / MOMENTUM.
     function makeDormant(bucket) {
       if (!bucket) return;
       const wasEvent = isEventBucket(bucket);
@@ -14349,31 +13435,20 @@ function MCPV5Create_living_characters() {
       bucket.pressure = "";
       bucket.momentum = "";
       bucket.event = "";
-      if (wasEvent) bucket.worldEvent = ""; // release the event text too
+      if (wasEvent) bucket.worldEvent = "";
       bucket.status = "dormant";
       bucket.reminderCount = 0;
-      // eventLog (HISTORY) is intentionally left untouched.
 
-      // Drop the Story Card; the bucket + HISTORY remain in state as the archive. A world
-      // event's card is keyed by EVENT_BUCKET_KEY, not by an owner token, so it needs its
-      // own lookup or the card would linger after the thread archived.
       removeStoryCardByKeys(wasEvent ? CFG.EVENT_BUCKET_KEY : storyCardIdToken(bucket.owner));
     }
 
-    // Select an (owner -> target) pair from a GIVEN owner pool, honoring scene relevance.
-    // PURE: returns { actor, target, seedSource } or null and sets no state. The round-robin
-    // caller runs it once per pool (the preferred type first, then the other as fallback).
-    // This is the same scene/strict/hybrid/off selection the engine has always used, just
-    // parameterized by which owner pool it may draw from.
     function pickSeedPair(pool, mode, scene, p) {
       if (!pool || !pool.length) return null;
       if (mode === "strict" || mode === "hybrid") {
         const sceneNPCs = unique(npcRoster()).filter(function(n) { return n !== p && scene.indexOf(n) !== -1; });
         if (sceneNPCs.length) {
-          const anchor = choose(sceneNPCs);                        // the present side
-          // A ruled anchor may only OWN when a configured target is currently legal
-          // (fail closed); owners considered for the target-present branch must be ALLOWED
-          // to target the anchor (unruled, or anchor is in their configured target set).
+          const anchor = choose(sceneNPCs);
+
           const anchorCanOwn = pool.indexOf(anchor) !== -1 && hasLegalRuleTarget(anchor);
           const otherOwners = pool.filter(function(n) { return n !== anchor && canTarget(n, anchor); });
           const anchorAsOwner = anchorCanOwn && (LC.protagonistInvolvement === "always" || otherOwners.length === 0 || Math.random() < 0.5);
@@ -14383,8 +13458,8 @@ function MCPV5Create_living_characters() {
           else if (anchorCanOwn) { actor = anchor; target = chooseTarget(actor); }
           if (actor && target) return { actor: actor, target: target, seedSource: "sceneActors" };
         }
-        if (mode === "strict") return null; // strict: this pool has no scene-eligible pair
-        // hybrid: fall through to off-scene selection from this same pool
+        if (mode === "strict") return null;
+
       }
       const seedable = pool.filter(hasLegalRuleTarget);
       if (!seedable.length) return null;
@@ -14398,7 +13473,6 @@ function MCPV5Create_living_characters() {
       const cg = ensureState();
       if (!CFG.AUTONOMY_ENABLED || LC.activityOff) { cg.lastRoll = "disabled (Social Activity Off)"; return null; }
 
-      // First-card turn gate: no Life Card until the story has had time to form.
       if (cg.turn < CFG.MIN_TURN_BEFORE_FIRST_SEED) {
         cg.lastRoll = "blocked: before first card turn";
         return null;
@@ -14411,67 +13485,38 @@ function MCPV5Create_living_characters() {
         cg.lastRoll = "pending reused: " + cg.pendingSeed.actor + " -> " + cg.pendingSeed.target;
         return cg.pendingSeed;
       }
-      // HARD SLOT CAP: while the active slots are full, do NOT roll, seed, or replace.
-      // A new card is only considered after an active card finishes its full reminder
-      // cycle and archives (dormant), which frees a slot.
+
       if (countActiveLifeCards() >= LC.maxActive) {
         cg.lastRoll = "blocked: slot cap full (" + countActiveLifeCards() + "/" + LC.maxActive + ") -- waiting for a card to archive";
         return null;
       }
-      // Pacing: the FIRST card ever (seedCount 0) ignores the interval and fires as
-      // soon as MIN_TURN allows. After that, wait LIFE_CARD_INTERVAL turns since the
-      // last SUCCESSFUL card, then retry every turn until one is created (a failed
-      // attempt does not waste the interval). lastSeedAttemptTurn is stamped on success.
+
       if ((cg.seedCount || 0) > 0 && cg.turn - (cg.lastSeedAttemptTurn || 0) < LC.activityTurns) {
         cg.lastRoll = "waiting (next attempt ~turn " + ((cg.lastSeedAttemptTurn || 0) + LC.activityTurns) + ")";
         return null;
       }
 
-      // Scene-aware OWNER selection. The owner holds the pressure, so in strict mode it
-      // must be an NPC currently in scene; hybrid prefers in-scene owners but falls back
-      // to the full roster; off uses the full roster. (Protagonist is never an owner, so
-      // the protagonist being always-present does not make every NPC eligible.)
-      // Scene eligibility (strict/hybrid): a card is eligible if AT LEAST ONE side --
-      // owner OR target -- is a NON-protagonist NPC in scene. The other side may be
-      // off-scene (owner expresses pressure toward an absent target; or others react to
-      // a present target whose owner is absent). The always-present protagonist never
-      // makes a card eligible by itself:
-      //   NPC -> NPC:          owner OR target in scene
-      //   NPC -> Protagonist:  owner must be in scene
-      //   Protagonist -> NPC:  N/A (protagonist is never an owner)
       const mode = LC.sceneRelevanceMode || "off";
       const scene = cg.sceneActors || [];
       const p = playerName();
       const poolAll = actorPool();
 
-      // ROUND-ROBIN with FULL FALLBACK. Each produced card advances one seat in
-      // CFG.SEED_CYCLE (relationship -> event -> random -> repeat), so every kind gets a
-      // fair turn. CRITICALLY: a seat that cannot produce this turn is SKIPPED and the next
-      // seat is tried, wrapping all the way around the cycle.
-      //
-      // This is the fix for the queue stalling: the index used to advance only on SUCCESS,
-      // so a blocked character seat (everyone already holding a card, on cooldown, or the
-      // pair being a recent duplicate) froze the rotation on that seat and events simply
-      // stopped firing. Worse, an EVENTS-ONLY setup (no characters configured) could never
-      // advance off seat 0 and never reached the event seat at all. Now every seat acts as
-      // the fallback for every other seat, so whatever CAN fire, does.
       const cycle = CFG.SEED_CYCLE;
       let cycleIdx = (typeof cg.seedCycleIndex === "number" ? cg.seedCycleIndex : 0);
       cycleIdx = ((cycleIdx % cycle.length) + cycle.length) % cycle.length;
       const ruledPool = poolAll.filter(function(n) { return !!ownerRules(n); });
       const randomPool = poolAll.filter(function(n) { return !ownerRules(n); });
       const tried = [];
-      const dupSeats = []; // seats whose pick was blocked by the dedup TTL (kept for debug)
+      const dupSeats = [];
 
       for (let step = 0; step < cycle.length; step++) {
         const idx = (cycleIdx + step) % cycle.length;
         const seat = cycle[idx];
-        cg.seedPhase = seat; // debug display
+        cg.seedPhase = seat;
         const seatLabel = "seat=" + seat +
           (step === 0 ? " (preferred)" : " (fallback after " + tried.join(",") + ")");
         tried.push(seat);
 
-        // ---- EVENT seat ------------------------------------------------------
         if (seat === "event") {
           const evSeed = seedWorldEvent();
           if (evSeed) {
@@ -14479,16 +13524,15 @@ function MCPV5Create_living_characters() {
             cg.seedRoundRobin = seatLabel;
             return evSeed;
           }
-          continue; // no events configured, or one already live -> try the next seat
+          continue;
         }
 
-        // ---- CHARACTER seats (relationship / random) -------------------------
         const pool = (seat === "relationship") ? ruledPool : randomPool;
         const pick = pickSeedPair(pool, mode, scene, p);
         if (!pick) continue;
 
         const actor = pick.actor, target = pick.target, seedSource = pick.seedSource;
-        // Pressure resolution: exact Owner > Target rule list, else the global pool.
+
         const rule = ruleFor(actor, target);
         const rulePressures = (rule && rule.pressures && rule.pressures.length) ? rule.pressures : null;
         const pressure = choose(rulePressures || LC.pressures) || "tension";
@@ -14505,7 +13549,7 @@ function MCPV5Create_living_characters() {
           momentum: momentumForIntensity(intensity),
           reason: cardReason(actor, target, pressure)
         };
-        // A duplicate signature must not stall the queue either -- try the next seat.
+
         if (isRecentSeed(seedSignature(seed))) {
           dupSeats.push(seat + ":" + actor + "->" + target);
           cg.lastRoll = "attempt: duplicate, skipped (signature expires after " + CFG.SEED_DEDUP_TTL_TURNS + " turns)";
@@ -14529,15 +13573,14 @@ function MCPV5Create_living_characters() {
         if (cg.seedRule) cg.seedReason += " | " + cg.seedRule;
 
         cg.pendingSeed = seed;
-        cg.lastSeedAttemptTurn = cg.turn;            // start the next interval only on SUCCESS
-        cg.seedCycleIndex = (idx + 1) % cycle.length; // advance past the seat that produced
+        cg.lastSeedAttemptTurn = cg.turn;
+        cg.seedCycleIndex = (idx + 1) % cycle.length;
         cg.lastRoll = "LIFE CARD " + actor + " -> " + target + " [" + pressure + "/" + intensity + "]";
         rememberSeed(seed);
         bootstrapSeedCard(seed);
         return seed;
       }
 
-      // Nothing in the entire cycle could produce a card this turn.
       cg.seedSource = "skipped";
       cg.seedCandidates = poolAll.slice(0, 12);
       cg.selectedSeed = "(none)";
@@ -14549,8 +13592,7 @@ function MCPV5Create_living_characters() {
         : ((LC.worldEvents && LC.worldEvents.length)
             ? "no eligible owners; an event is already live or none available"
             : "no eligible owners");
-      // Keep the duplicate reason visible -- otherwise a dedup block would be masked by the
-      // generic "no seat produced" message and the debug trail would lose why nothing fired.
+
       cg.lastRoll = dupSeats.length
         ? ("attempt: duplicate, skipped (" + dupSeats.join("; ") + "; signature expires after " +
            CFG.SEED_DEDUP_TTL_TURNS + " turns)")
@@ -14561,7 +13603,7 @@ function MCPV5Create_living_characters() {
     function buildContextDirective(text) {
       const seed = maybeCreateSeed(text);
       if (!seed) return "";
-      // A world event names nobody -- the narrator picks who gets pulled in.
+
       if (seed.kind === "event") {
         return "\n\n<LC_PRIVATE>\n" +
           "### Stop the story. Use this now.\n" +
@@ -14569,8 +13611,7 @@ function MCPV5Create_living_characters() {
           "Bring it into the scene immediately and make it the centre of what happens next. YOU decide which characters are pulled into it. Do not mention this note.\n" +
           "</LC_PRIVATE>";
       }
-      // Compact: a new pressure formed. Let it color behavior; the narrator MAY record
-      // a concrete development with a hidden memory block (never auto-control the player).
+
       return "\n\n<LC_PRIVATE>\n" +
         "### Stop the story. Use this card now.\n" +
         "New social pressure: " + seed.actor + " feels " + (seed.pressure || seed.category) +
@@ -14585,7 +13626,6 @@ function MCPV5Create_living_characters() {
         "</LC_PRIVATE>";
     }
 
-    // Most recent concrete development for a card, kept to one compact line.
     function latestThreadLine(b) {
       let latest = cleanText(b.event);
       if (!latest && Array.isArray(b.eventLog) && b.eventLog.length) {
@@ -14595,11 +13635,8 @@ function MCPV5Create_living_characters() {
       return latest;
     }
 
-    // A thread is scene-relevant when a NON-protagonist participant is in scene.
-    // (The protagonist is always "present", so target-is-protagonist alone does not
-    // count; the NPC owner must be present.)
     function isSceneRelevant(b, scene) {
-      // A world event is not a person -- it is always in play, whatever the scene mode.
+
       if (isEventBucket(b)) return true;
       const p = playerName();
       const owner = cleanName(b.owner);
@@ -14609,9 +13646,6 @@ function MCPV5Create_living_characters() {
       return !!(ownerIn || targetIn);
     }
 
-    // Always-on block. Injects compact full details of the selected active Life Cards
-    // every turn. SCENE_RELEVANCE_MODE controls selection: strict = scene-relevant only,
-    // off = any active, hybrid = scene-relevant first then fill.
     function buildActiveThreadsBlock() {
       const cg = ensureState();
       const scene = cg.sceneActors || [];
@@ -14626,7 +13660,6 @@ function MCPV5Create_living_characters() {
       }
       if (!active.length) { cg.lastCandidateTrace = []; cg.lastSelectedTrace = []; cg.lastActiveSelected = 0; return ""; }
 
-      // Debug trace: every active card + whether it is scene-relevant this turn.
       cg.lastCandidateTrace = active.map(function(c) {
         return c.owner + "->" + (cleanText(c.bucket.target) || "?") +
           (isSceneRelevant(c.bucket, scene) ? " [in-scene]" : " [off-scene]");
@@ -14639,7 +13672,7 @@ function MCPV5Create_living_characters() {
         const relevant = active.filter(function(c) { return isSceneRelevant(c.bucket, scene); });
         const rest = active.filter(function(c) { return !isSceneRelevant(c.bucket, scene); });
         selected = relevant.concat(rest).slice(0, LC.maxActive);
-      } else { // strict
+      } else {
         selected = active.filter(function(c) { return isSceneRelevant(c.bucket, scene); }).slice(0, LC.maxActive);
       }
       cg.lastActiveSelected = selected.length;
@@ -14648,10 +13681,9 @@ function MCPV5Create_living_characters() {
       });
       if (!selected.length) return "";
 
-      // Render each card as a distinct multi-line block (more salient than one line).
       const renderEntry = function(c) {
         const b = c.bucket;
-        // World event: no owner/target/pressure -- just the event and who-decides framing.
+
         if (isEventBucket(b)) {
           return "WORLD EVENT (in play now -- YOU decide which characters are pulled into it):\n" +
             cleanText(b.worldEvent);
@@ -14666,7 +13698,6 @@ function MCPV5Create_living_characters() {
         return e;
       };
 
-      // Split: a card is FRESH for FRESH_THREAD_WINDOW turns after it fires.
       const fresh = [], ongoing = [];
       for (let i = 0; i < selected.length; i++) {
         const created = (typeof selected[i].bucket.createdTurn === "number") ? selected[i].bucket.createdTurn : 0;
@@ -14675,21 +13706,12 @@ function MCPV5Create_living_characters() {
       }
       cg.lastFreshThreads = fresh.map(function(c) { return c.owner; });
 
-      // Write-back is a periodic CHECKPOINT, shown only on reminder/surface turns (the
-      // same cadence as advanceThreadDormancy) -- NOT every turn. Framed as a look-back so
-      // a development from a recent turn can still be recorded here. Conditional only:
-      // never required, no no-op blocks (the owner && event gate still drops empty ones).
       const checkpointTurn = isCheckpointTurn();
-      if (checkpointTurn) cg.lastCheckpointTurn = cg.turn; // stamp the checkpoint's OWN counter
+      if (checkpointTurn) cg.lastCheckpointTurn = cg.turn;
 
-      // Forceful, active framing (Dynamic Large responds better when the card reads as a
-      // live scene driver, not background info). Not subtle.
       let body = "### Stop the story. Use these cards now.\n" +
         "Every active life thread below is in play in the CURRENT scene. Your next response must use them now -- make them visibly drive the characters' behavior, choices, dialogue, and reactions. Do not state the labels.\n";
 
-      // PRIMARY: the Life Card details lead. This is story-driving context the narrator
-      // should USE in the prose. (Front-loading the write-back task made the model
-      // deprioritize the card, so the card and its nudge always come first now.)
       if (fresh.length) {
         body += "\nFRESH PRESSURE (new this turn -- you MUST act on this in THIS scene now):\n" +
           fresh.map(renderEntry).join("\n\n") + "\n";
@@ -14698,15 +13720,10 @@ function MCPV5Create_living_characters() {
         body += "\nONGOING THREADS:\n" + ongoing.map(renderEntry).join("\n\n") + "\n";
       }
 
-      // PRIMARY: single forceful story-driver nudge. Not subtle.
       body += (mode === "strict")
         ? "\n### Use these now. Each active life thread is REQUIRED to create a visible consequence in this scene -- dialogue, gossip, tension, attraction, avoidance, conflict, reactions, choices, or a relationship shift. Do not state the labels.\n"
         : "\n### Use these now. These pressures are live and drive the current story even when the characters are off-screen -- they are REQUIRED to surface as visible consequences: dialogue, gossip, shifting moods, attitudes, alliances, tension, attraction, avoidance, conflict, reactions, choices, relationship shifts. Do not state the labels.\n";
 
-      // SECONDARY: trailing write-back, only on reminder/checkpoint turns, and visibly
-      // SEPARATED from the story context above (a divider + "does not change the story")
-      // so it reads as optional bookkeeping, never as competing with using the card.
-      // Conditional only; the owner && event gate still drops empty/no-occurrence blocks.
       if (checkpointTurn) {
         const triggerList = selected.map(function(c) {
           const b = c.bucket;
@@ -14737,11 +13754,6 @@ function MCPV5Create_living_characters() {
         "</LC_PRIVATE>";
     }
 
-    // True when THIS turn is a write-back CHECKPOINT turn -- on the CHECKPOINT_EVERY
-    // cadence (its OWN counter cg.lastCheckpointTurn, independent of dormancy), and only
-    // when at least one active (non-dormant/resolved) card exists. READ-ONLY: it does NOT
-    // advance the counter, age cards, or change dormancy. The caller stamps
-    // cg.lastCheckpointTurn when it actually shows the checkpoint. Does not affect lifespan.
     function isCheckpointTurn() {
       const cg = ensureState();
       if ((cg.turn - (cg.lastCheckpointTurn || 0)) < (LC.checkpointEvery || CFG.CHECKPOINT_EVERY)) return false;
@@ -14749,7 +13761,7 @@ function MCPV5Create_living_characters() {
       for (let i = 0; i < owners.length; i++) {
         const b = cg.cards[owners[i]];
         if (!cardHasContent(b)) continue;
-        if (isEventBucket(b)) continue; // events take no narrator write-back
+        if (isEventBucket(b)) continue;
         const st = cleanText(b.status).toLowerCase();
         if (st === "resolved" || st === "dormant") continue;
         return true;
@@ -14757,9 +13769,6 @@ function MCPV5Create_living_characters() {
       return false;
     }
 
-    // Dormancy progression on the THREAD_REMINDER_EVERY cadence (its own counter,
-    // cg.lastThreadReminderTurn). Counts appearances and archives threads that go stale.
-    // INDEPENDENT of the write-back checkpoint cadence. Injects NO context text.
     function advanceThreadDormancy() {
       const cg = ensureState();
       if (cg.turn - (cg.lastThreadReminderTurn || 0) < (LC.threadReminderEvery || CFG.THREAD_REMINDER_EVERY)) return;
@@ -14802,9 +13811,6 @@ function MCPV5Create_living_characters() {
       const bucket = ensureCardBucket(seed.actor);
       if (!bucket) return false;
 
-      // The narrator showed actor + target but wrote no memory. Keep the abstract
-      // pressure card and just mark it active. Do NOT invent canned event text;
-      // a story-specific EVENT only ever comes from a narrator memory block.
       bucket.target = seed.target;
       if (!cleanText(bucket.pressure)) bucket.pressure = seed.pressure;
       if (!cleanText(bucket.momentum)) bucket.momentum = seed.momentum;
@@ -14838,15 +13844,14 @@ function MCPV5Create_living_characters() {
         }
       }
       data.owner = cleanName(data.owner);
-      // OCCURRENCE is the preferred label; EVENT remains a backwards-compatible alias.
+
       data.event = cleanText(data.occurrence || data.event);
       data.pressure = cleanText(data.pressure);
       data.target = cleanName(data.target);
       data.momentum = cleanText(data.momentum).toLowerCase();
       data.status = cleanText(data.status || "active").toLowerCase();
       data.log = cleanText(data.log || data.event);
-      // Optional narrator-authored first-person interior line. Display-only; the engine
-      // never reads it for targeting, pressure, momentum, status, or any logic.
+
       data.owner_thought = cleanText(data.owner_thought);
       return data;
     }
@@ -14868,8 +13873,7 @@ function MCPV5Create_living_characters() {
 
     function stripBlocks(text) {
       let out = String(text || "");
-      // LC_* are current; CG_* are legacy and still stripped so an in-flight story
-      // that emits an old tag never leaks it into the visible output.
+
       const tags = ["LC_PRIVATE", "LC_SEED", "LC_MEMORY", "LC_CARDS", "CG_PRIVATE", "CG_SEED", "CG_MEMORY", "CG_CARDS"];
       for (let t = 0; t < tags.length; t++) {
         const open = "<" + tags[t] + ">";
@@ -14911,30 +13915,16 @@ function MCPV5Create_living_characters() {
       return out;
     }
 
-    // Output-safety fallback. After the script removes hidden/private/thought blocks, the
-    // visible text can end up empty (e.g. an opening <LC_PRIVATE> with no closing tag strips
-    // to end-of-string). AI Dungeon treats an empty OR whitespace-only return (including a
-    // plain space) as "The AI service returned an empty response". This guarantees a
-    // non-empty return WITHOUT ever exposing private tags: it strips any remaining blocks,
-    // and if nothing visible is left, returns a zero-width space the player never sees.
-    // For normal output (real visible text present) it returns that text unchanged.
     function safeVisibleOutput(value) {
       const out = cleanText(stripBlocks(value));
       return out || CFG.EMPTY_OUTPUT_FALLBACK;
     }
 
-    // True when `s` has no VISIBLE content: null/undefined, or only whitespace and/or
-    // zero-width characters. NOTE: \u200B (zero-width space) is NOT matched by \s, so it is
-    // listed explicitly here -- otherwise a "fallback" return would look non-empty and a
-    // genuinely empty turn would slip through unlogged.
     function isBlank(s) {
       if (s == null) return true;
       return String(s).replace(/[\s\u200B\u200C\u200D\uFEFF]/g, "").length === 0;
     }
 
-    // Records + logs WHICH return branch produced the safe Unicode fallback, so an empty
-    // response can be traced to its source. Always emits a console line (visible in the AID
-    // script console) and stashes the reason in state for the debug card. Never throws.
     function debugFallback(branch, detail) {
       const msg = "LivingCharacters EMPTY-FALLBACK [" + branch + "]" + (detail ? " :: " + detail : "");
       try {
@@ -14947,19 +13937,10 @@ function MCPV5Create_living_characters() {
       } catch (e) {}
     }
 
-    // FINAL OUTPUT BOUNDARY for every hook return. Guarantees a non-empty, non-whitespace,
-    // non-null string so AI Dungeon never reports an empty response (output) or "Unable to
-    // run scenario scripts" (input). This is the single authoritative place the Unicode
-    // fallback is applied -- helpers may return "" freely; this reconciles it.
-    //   - output: must carry NO private tags AND keep its LEADING separator (the space/newline
-    //     that joins this continuation to the prior story); blank -> fallback.
-    //   - input/context: blank -> restore the untouched original if it has content, else fallback.
     function finalizeResult(hook, result, original) {
       const out = (typeof result === "string") ? result : (result == null ? "" : String(result));
       if (hook === "output") {
-        // Remove private tags WITHOUT trimming (stripSelectedBlocks does not call cleanText),
-        // capture the model's leading separator, then tidy the BODY and re-attach one
-        // normalized separator. This stops the narrator's text jamming onto the previous text.
+
         const stripped = stripSelectedBlocks(out, ["LC_PRIVATE", "LC_SEED", "LC_MEMORY", "LC_CARDS", "CG_PRIVATE", "CG_SEED", "CG_MEMORY", "CG_CARDS"]);
         const visible = leadSeparator(leadingWhitespace(stripped)) + cleanText(stripped);
         if (!isBlank(visible)) return visible;
@@ -14967,7 +13948,7 @@ function MCPV5Create_living_characters() {
         return CFG.EMPTY_OUTPUT_FALLBACK;
       }
       if (!isBlank(out)) return out;
-      // Blank input/context: prefer the original text (don't destroy a real turn), else fallback.
+
       if (!isBlank(original)) {
         debugFallback("finalize:" + hook + ":restore-original", "blank result; restored original text");
         return String(original);
@@ -14976,47 +13957,8 @@ function MCPV5Create_living_characters() {
       return CFG.EMPTY_OUTPUT_FALLBACK;
     }
 
-
-    // THOUGHT CARD SYSTEM
-    // --------------------------------------------------------------------------
-    // Part of LIVING CHARACTERS, a LivingNarratives project.
-    // (https://github.com/LivingNarratives/LivingCharacters)
-    //
-    // This module belongs to Living Characters. Thought Cards are a feature of
-    // Living Characters, kept deliberately separate from the Life Card engine.
-    //
-    // WHAT THOUGHT CARDS ARE:
-    //   Player-facing thought journals. One numbered, human-readable log per
-    //   character (titled "Name - Thoughts"; a temporary 💭 marks recent updates) to read
-    //   to follow a character's emotional progression over many turns.
-    //
-    // WHAT THOUGHT CARDS ARE NOT:
-    //   - NOT memory. NOT a brain. NOT Inner Self.
-    //   - They do NOT enter the story context (the Thought Card uses a non-matching
-    //     key, so the AI Dungeon front-end never injects it).
-    //   - They are NOT read by the AI narrator.
-    //   - They do NOT affect character behavior, Life Card creation, targeting,
-    //     pressure, momentum, dormancy, selection, or any story logic.
-    //
-    // WHAT THIS MODULE DOES (the entire job):
-    //   1. ASK   - inject ONE temporary first-person parenthetical request into
-    //              context (the only thing this system ever puts in context).
-    //   2. CAPTURE- read that leading parenthetical back from the model's output
-    //              and strip it from the visible story.
-    //   3. STORE - append it (numbered) to the character's Thought Card for the
-    //              player to read later. Nothing reads it back.
-    //
-    // The PARENTHETICAL REQUEST is the only temporary instruction injected into
-    // context. The stored Thought Card itself is never injected (non-matching key).
-    // No XML, no LC_MEMORY, no write-back blocks, no detectors. Runs independently
-    // of Life Cards (a character can have thoughts with no active Life Card).
-    // ==========================================================================
     const THOUGHT_KEYS = ["thoughts_enabled", "thought_characters", "thought_interval", "thought_formation_chance", "thought_scene_mode", "thought_order"];
 
-    // THOUGHT CARDS CONFIG
-    // The editable Story Card that controls the separate Thought Card system. It is
-    // distinct from the LIVING CHARACTERS CONFIG (Life Cards) card on purpose, so the
-    // two systems never share settings. Defaults below are conservative and opt-in.
     function defaultThoughtConfigEntry() {
       return [
         "THOUGHT CARDS (separate from Life Cards)",
@@ -15066,21 +14008,16 @@ function MCPV5Create_living_characters() {
       const characters = configList(sections, "thought_characters");
       const interval = Math.max(1, toIntOr(configFirst(sections, "thought_interval", CFG.THOUGHT_INTERVAL_DEFAULT), CFG.THOUGHT_INTERVAL_DEFAULT));
       const chance = Math.max(0, Math.min(100, toIntOr(configFirst(sections, "thought_formation_chance", CFG.THOUGHT_CHANCE_DEFAULT), CFG.THOUGHT_CHANCE_DEFAULT)));
-      const maxThoughts = CFG.MAX_THOUGHTS_DEFAULT; // hardcoded 10; NOT a user config option
-      // THOUGHT_SCENE_MODE: scene (default) | recent | roster. Validated; bad values ->
-      // default "scene". Thought scene relevance is SEPARATE from Life Card scene relevance:
-      // it only decides which character may get a journal entry, and must not affect Life
-      // Card targeting, pressure selection, momentum, or story logic.
+      const maxThoughts = CFG.MAX_THOUGHTS_DEFAULT;
+
       let sceneMode = String(configFirst(sections, "thought_scene_mode", CFG.THOUGHT_SCENE_MODE_DEFAULT)).toLowerCase().replace(/\s+/g, "");
       if (["scene", "recent", "roster"].indexOf(sceneMode) === -1) sceneMode = CFG.THOUGHT_SCENE_MODE_DEFAULT;
-      // THOUGHT_ORDER: ascending (default) | descending. Display only. "desc"/"newest"/"new"
-      // are accepted as friendly aliases for descending; anything else -> ascending.
+
       let order = String(configFirst(sections, "thought_order", CFG.THOUGHT_ORDER_DEFAULT)).toLowerCase().replace(/\s+/g, "");
       order = (["descending", "desc", "newest", "new", "reverse"].indexOf(order) !== -1) ? "descending" : "ascending";
       return { enabled: enabled, characters: characters, interval: interval, chance: chance, maxThoughts: maxThoughts, sceneMode: sceneMode, order: order };
     }
 
-    // Separate state slice -- never touches chaosGoblinV2 (Life Card state).
     function ensureThoughtState() {
       if (!globalThis.state || typeof state !== "object") globalThis.state = {};
       if (!state.livingThoughts || typeof state.livingThoughts !== "object") {
@@ -15088,15 +14025,11 @@ function MCPV5Create_living_characters() {
       }
       const ts = state.livingThoughts;
       if (!ts.byChar || typeof ts.byChar !== "object") ts.byChar = {};
-      if (!ts.seq || typeof ts.seq !== "object") ts.seq = {};   // per-character PERMANENT thought counter
+      if (!ts.seq || typeof ts.seq !== "object") ts.seq = {};
       if (typeof ts.lastThoughtTurn !== "number") ts.lastThoughtTurn = 0;
-      if (typeof ts.markedChar !== "string") ts.markedChar = "";   // 💭 "recently updated" marker
+      if (typeof ts.markedChar !== "string") ts.markedChar = "";
       if (typeof ts.markedTurn !== "number") ts.markedTurn = 0;
-      // Migrate legacy storage. Older saves stored byChar[name] as an array of plain
-      // strings whose displayed number came from the array position -- so removing an old
-      // thought renumbered the survivors. Convert each entry to a { n, text } object with a
-      // PERMANENT number, and seed ts.seq[name] with the highest number seen so future
-      // thoughts keep counting up (never reused, never reset).
+
       const names = Object.keys(ts.byChar);
       for (let i = 0; i < names.length; i++) {
         const nm = names[i];
@@ -15117,27 +14050,14 @@ function MCPV5Create_living_characters() {
       return ts;
     }
 
-    // Stable, non-matching key for lookup/recreation (UNCHANGED: lc-thoughts:name).
     function thoughtCardToken(name) {
       return CFG.THOUGHT_CARD_KEY_PREFIX + keyName(name);
     }
 
-    // Character-first display title: "Name - Thoughts", with a TEMPORARY "💭 " marker
-    // prepended while the card is recently updated. The KEY (above) identifies the card,
-    // so adding/removing the marker just safely re-titles the same existing card.
     function thoughtCardTitle(name, marked) {
       return (marked ? CFG.THOUGHT_MARKER + " " : "") + name + CFG.THOUGHT_CARD_TITLE_SUFFIX;
     }
 
-    // Thought Card: "Name - Thoughts" (temporary "💭 " prepended while recently updated)
-    //   Purpose:     a numbered, player-readable thought journal for one character.
-    //   Not purpose: not memory, not a brain, not context, not narrator guidance,
-    //                not a logic source.
-    // Render a character's Thought Card from the stored list. The keys are a
-    // non-matching token (CFG.THOUGHT_CARD_KEY_PREFIX + name, no plain-name trigger),
-    // so the AI Dungeon front-end never matches it against story text and the card is
-    // NEVER injected into context. Type is "Custom" purely for player-side organization.
-    // One stored thought renders as "N. text" where N is the PERMANENT number.
     function thoughtLine(item) {
       return item.n + ". " + item.text;
     }
@@ -15147,16 +14067,12 @@ function MCPV5Create_living_characters() {
       return lines.join("\n");
     }
 
-    // Greedily take the NEWEST items whose rendered lines fit within `max` characters
-    // (joined by newlines). Returns { kept, dropped }, both in ascending (oldest -> newest)
-    // order. At least one item is always kept, so the newest thought is never lost even if
-    // it alone exceeds `max`.
     function fitNewest(items, max) {
       const kept = [];
       let len = 0;
       for (let i = items.length - 1; i >= 0; i--) {
         const line = thoughtLine(items[i]);
-        const add = (kept.length ? 1 : 0) + line.length; // +1 for the joining newline
+        const add = (kept.length ? 1 : 0) + line.length;
         if (kept.length > 0 && (len + add) > max) break;
         len += add;
         kept.unshift(items[i]);
@@ -15165,13 +14081,6 @@ function MCPV5Create_living_characters() {
       return { kept: kept, dropped: dropped };
     }
 
-    // Render a character's Thought Card from the stored list, split by CHARACTER COUNT:
-    //   - Entry  = the NEWEST thoughts, up to ~THOUGHT_ENTRY_MAX_CHARS.
-    //   - Notes  = the OLDER overflow from Entry, up to ~THOUGHT_NOTES_MAX_CHARS.
-    //   - Thoughts too old to fit even in Notes are dropped (oldest-first) from storage.
-    // New thoughts always land in Entry; older ones flow Entry -> Notes; the oldest Notes
-    // thoughts are trimmed only when Notes has no room. Numbers are permanent, so trimming
-    // never renumbers anything that remains.
     function syncThoughtCard(name, TC, marked) {
       const ts = ensureThoughtState();
       let list = Array.isArray(ts.byChar[name]) ? ts.byChar[name] : [];
@@ -15179,46 +14088,29 @@ function MCPV5Create_living_characters() {
       const entryFit = fitNewest(list, CFG.THOUGHT_ENTRY_MAX_CHARS);
       const notesFit = fitNewest(entryFit.dropped, CFG.THOUGHT_NOTES_MAX_CHARS);
 
-      // Drop the oldest thoughts that no longer fit anywhere so state stays bounded.
       const keepCount = entryFit.kept.length + notesFit.kept.length;
       if (keepCount < list.length) {
         list = list.slice(list.length - keepCount);
         ts.byChar[name] = list;
       }
 
-      // DISPLAY ORDER (storage is always oldest->newest, so overflow/trim above is unaffected).
-      // Descending reverses each field's kept items so the newest number sits at the top:
-      //   ascending  Entry [3,4,5] Notes [1,2]  ->  3,4,5 / 1,2
-      //   descending Entry [5,4,3] Notes [2,1]  ->  5,4,3 / 2,1
       const desc = TC && TC.order === "descending";
       const entryItems = desc ? entryFit.kept.slice().reverse() : entryFit.kept;
       const notesItems = desc ? notesFit.kept.slice().reverse() : notesFit.kept;
       const entry = entryItems.length ? renderThoughtLines(entryItems) : "(no thoughts yet)";
       const notes = notesItems.length ? renderThoughtLines(notesItems) : "";
 
-      // On a NEW thought (marked), DELETE the existing card first so the create below makes
-      // a BRAND-NEW card. AID's card menu is sorted by card CREATION order (newest first)
-      // and ignores array position, so recreating is the only thing that actually lifts a
-      // freshly-updated card to the top -- it becomes "newest" like a first-time thinker's
-      // card. All thought text lives in state (ts.byChar), so the deleted card is fully
-      // rebuilt from entry/notes below and nothing is lost. On non-marked syncs (e.g. the
-      // 💭 marker expiring) we patch in place, so the card keeps its position.
       if (marked) removeStoryCardByKeys(thoughtCardToken(name));
 
       createOrPatchStoryCard(
-        thoughtCardTitle(name, !!marked), // "Name - Thoughts" (+ 💭 while recently updated)
+        thoughtCardTitle(name, !!marked),
         CFG.THOUGHT_CARD_TYPE,
-        thoughtCardToken(name),     // stable key: lc-thoughts:name (UNCHANGED) -- re-titling is safe
-        entry,                      // newest thoughts
-        notes                       // older overflow (Notes field)
+        thoughtCardToken(name),
+        entry,
+        notes
       );
     }
 
-    // Strip the 💭 marker from EVERY Thought Card title (optionally keeping it on one
-    // character). Title-only: it re-titles the card in place and never touches Entry,
-    // Notes, storage, numbering, or rollover. Scans the live story cards directly (not
-    // just ts.markedChar), so it SELF-CORRECTS cases where a prior glitch left 💭 stuck
-    // on more than one card. Ensures there is never more than one marked Thought Card.
     function clearAllThoughtMarkers(keepName) {
       if (!Array.isArray(globalThis.storyCards)) return;
       const prefix = CFG.THOUGHT_MARKER + " ";
@@ -15226,24 +14118,19 @@ function MCPV5Create_living_characters() {
       for (let i = 0; i < storyCards.length; i++) {
         const card = storyCards[i];
         if (!card || typeof card.title !== "string") continue;
-        // Only our Thought Cards (non-matching key prefix), and only if currently marked.
+
         if (String(card.keys || "").indexOf(CFG.THOUGHT_CARD_KEY_PREFIX) !== 0) continue;
         if (card.title.indexOf(prefix) !== 0) continue;
         const bare = card.title.slice(prefix.length);
-        if (keepTitle && bare === keepTitle) continue; // leave the one we're (re)marking
+        if (keepTitle && bare === keepTitle) continue;
         card.title = bare;
       }
     }
 
-    // Normalize a thought for loose duplicate comparison: lowercase, strip punctuation,
-    // collapse whitespace.
     function normThought(t) {
       return String(t || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
     }
 
-    // True when two thoughts are near-duplicates -- exact-normalized match, or high token
-    // overlap (Jaccard on unique words). Catches "I hope this works" vs "I really hope this
-    // works out" so repetitive/samey thoughts do not pile up.
     function thoughtsTooSimilar(a, b) {
       a = normThought(a); b = normThought(b);
       if (!a || !b) return false;
@@ -15259,9 +14146,6 @@ function MCPV5Create_living_characters() {
       return uni > 0 && (inter / uni) >= 0.6;
     }
 
-    // Append a thought with a PERMANENT number. No overwrite, no keys. The stored list is
-    // NOT capped by count -- syncThoughtCard bounds it by character count (Entry/Notes), so
-    // removing old thoughts never renumbers the survivors.
     function appendThought(name, text, TC) {
       const ts = ensureThoughtState();
       name = cleanName(name);
@@ -15269,21 +14153,16 @@ function MCPV5Create_living_characters() {
       if (!name || !text) return false;
       if (!Array.isArray(ts.byChar[name])) ts.byChar[name] = [];
       const arr = ts.byChar[name];
-      // Skip near-duplicates against this character's recent thoughts (not just the immediately
-      // previous exact string), so repetitive/samey thoughts do not accumulate.
+
       const recent = arr.slice(-5);
       for (let i = 0; i < recent.length; i++) {
         if (thoughtsTooSimilar(recent[i].text, text)) return false;
       }
-      // Per-character counter that only ever increases: if the last thought was #10, the
-      // next is #11 even after #1 is deleted. Never reset, never reused.
+
       if (typeof ts.seq[name] !== "number") ts.seq[name] = 0;
       ts.seq[name] += 1;
       arr.push({ n: ts.seq[name], text: text });
-      // Visual activity marker: 💭 moves to the card that just updated. Strip 💭 off EVERY
-      // Thought Card first (self-correcting any stuck markers), then mark only this one, so
-      // exactly one card carries 💭. (Also clears on a timer; see expireThoughtMarker.)
-      // Display-only -- does not touch Life Cards, storage, or Entry/Notes.
+
       clearAllThoughtMarkers(name);
       ts.markedChar = name;
       ts.markedTurn = (ensureState().turn) || 0;
@@ -15291,54 +14170,27 @@ function MCPV5Create_living_characters() {
       return true;
     }
 
-    // Clear the 💭 marker after THOUGHT_MARKER_TURNS turns so it reads as "recent" activity
-    // and comes back down on its own. Runs once per context turn; re-titles one card at most.
     function expireThoughtMarker() {
       const ts = ensureThoughtState();
       if (!ts.markedChar) return;
       const turn = (ensureState().turn) || 0;
       if ((turn - (ts.markedTurn || 0)) >= CFG.THOUGHT_MARKER_TURNS) {
-        syncThoughtCard(ts.markedChar, buildThoughtConfig(), false); // drop the 💭
+        syncThoughtCard(ts.markedChar, buildThoughtConfig(), false);
         ts.markedChar = "";
       }
     }
 
-
-    // Candidate thought-characters for THIS turn, per THOUGHT_SCENE_MODE.
-    // Thought Cards are journals of what characters are thinking in/around the CURRENT
-    // story moment, so by default only scene-relevant characters are eligible. There is
-    // NO silent fallback to the full roster -- if nobody relevant is present, the caller
-    // generates nothing this turn (an off-screen thought feels disconnected/confusing).
-    //   scene  -> ONLY characters detected in the current scene (tight trailing window).
-    //   recent -> characters in the wider recent-scene window (current + just-mentioned).
-    //   roster -> ANY configured thought character (opt-in; intentional off-screen/"chaos"
-    //             thoughts). This is the ONLY mode that ignores scene relevance.
-    // Detection mirrors the Life Card scene detector (whole-word name match on the recent
-    // story text), but uses the THOUGHT roster and its OWN window -- fully separate from
-    // Life Card scene relevance.
     function thoughtCandidates(TC, contextText) {
-      // Thought Cards are player-facing journals, so they should only come from
-      // scene-relevant characters. This prevents disconnected off-screen thoughts from
-      // random roster characters (e.g. a thought appearing for someone not in the scene).
+
       const roster = unique(TC.characters || []);
       if (!roster.length) return [];
-      // THOUGHT_SCENE_MODE handling:
-      //   roster -> opt-in off-screen/"chaos" mode: ANY configured thought character.
-      //             This is the ONLY mode that skips the scene-relevance gate.
+
       if (TC.sceneMode === "roster") return roster;
-      const recent = recentSceneText(contextText);  // history tail (up to SCENE_SCAN_CHARS)
-      //   scene  -> tight CURRENT-scene window (default).
-      //   recent -> wider recent-scene window (current + just-mentioned).
+      const recent = recentSceneText(contextText);
+
       const tight = recent.length > CFG.THOUGHT_SCENE_TIGHT_CHARS ? recent.slice(-CFG.THOUGHT_SCENE_TIGHT_CHARS) : recent;
       const text = (TC.sceneMode === "recent") ? recent : tight;
-      // The first-person POV lead (protagonist) is rarely written by name in the scene, but
-      // is always present. When PROTAGONIST_ALWAYS_PRESENT is on, keep the protagonist
-      // eligible even when unnamed -- mirroring the Life Card scene detector -- so an unnamed
-      // lead like Sam can still be selected for a thought. Everyone else still needs a
-      // whole-word name match in the current scene.
-      // Fallback prevention: do NOT fall back to the full roster unless THOUGHT_SCENE_MODE
-      // is explicitly "roster". If nobody is scene-relevant, return [] and the caller makes
-      // no thought this turn -- an off-screen thought would feel disconnected.
+
       const pKey = LC.protagonist ? cleanName(LC.protagonist).toLowerCase() : "";
       return roster.filter(function(n) {
         if (pKey && LC.protagonistAlwaysPresent && cleanName(n).toLowerCase() === pKey) return true;
@@ -15346,34 +14198,27 @@ function MCPV5Create_living_characters() {
       });
     }
 
-    // Decide whether to fire a thought this turn; if so, select a character, stamp the
-    // attempt, and return the ASK string (LC_PRIVATE-wrapped) to append to context.
-    // Sets ts.pendingChar for the output hook. Independent of Life Cards.
     function buildThoughtAsk(contextText) {
       const ts = ensureThoughtState();
       ts.pendingChar = "";
-      ts.candidates = []; // scene-relevant thinkers this turn (used by capture to reject mislabels)
+      ts.candidates = [];
       const TC = buildThoughtConfig();
       if (!TC.enabled || !TC.characters.length) return "";
       const turn = (ensureState().turn) || 0;
-      if ((turn - (ts.lastThoughtTurn || 0)) < TC.interval) return ""; // interval gate
-      if (randomInt(100) >= TC.chance) return "";                      // chance gate
-      const cands = thoughtCandidates(TC, contextText);               // scene-relevant only
-      if (!cands.length) return "";                                    // nobody relevant -> no thought
+      if ((turn - (ts.lastThoughtTurn || 0)) < TC.interval) return "";
+      if (randomInt(100) >= TC.chance) return "";
+      const cands = thoughtCandidates(TC, contextText);
+      if (!cands.length) return "";
       const name = choose(cands);
       ts.pendingChar = name;
-      ts.candidates = cands.slice(); // remember who was scene-relevant, for capture attribution
+      ts.candidates = cands.slice();
       ts.lastThoughtTurn = turn;
-      // Names of the OTHER people currently in the scene (reuses the scene actors computed this
-      // turn). Feeding the model the actual names is what makes it write "Jessica" instead of
-      // "she" -- it can only use a name it is reminded of.
+
       const present = (ensureState().sceneActors || []).filter(function (n) { return n && n !== name; });
       const nameHint = present.length
         ? " Others present (name on first mention): " + present.join(", ") + "."
         : "";
-      // ONE leading first-person parenthetical, name-LABELED so the thinker is unambiguous.
-      // Naming rule: each other character is NAMED on first mention, then referred to with a
-      // pronoun -- keeps who's-who clear without the clunky repeated-name reading.
+
       return "\n\n<LC_PRIVATE>\n" +
         "Begin your reply with ONE short parenthetical: " + name + "'s own private thought right now, in first person (I / me / my), ONE sentence, LABELED with their name. " +
         "Every other character must be named (first name) once before any pronoun or nickname; after that use normal flow of wording with pronouns." + nameHint + " " +
@@ -15381,10 +14226,6 @@ function MCPV5Create_living_characters() {
         "</LC_PRIVATE>";
     }
 
-    // Resolve a free-text name label (from a "Name:" thought prefix) to a configured Thought
-    // character, case-insensitive and whitespace-normalized. Returns the canonical roster
-    // name, or "" if the label is not a known Thought character. Used to ATTRIBUTE a labeled
-    // thought to the correct card instead of blindly trusting the asked character.
     function resolveThoughtCharacter(label, TC) {
       const want = cleanName(label).toLowerCase();
       if (!want) return "";
@@ -15395,11 +14236,6 @@ function MCPV5Create_living_characters() {
       return "";
     }
 
-    // Remove EVERY name-labeled thought parenthetical "(KnownThoughtChar: ...)" from text,
-    // wherever it sits. Narrow on purpose: only parentheticals whose label resolves to a
-    // CONFIGURED Thought character are touched, so ordinary narrative asides are left alone.
-    // This is the BACKSTOP that stops a thought leaking into the visible story even when the
-    // model places it mid- or end-of-reply instead of at the start.
     function stripLabeledThoughts(text, TC) {
       return String(text || "").replace(/\(\s*([A-Za-z][\w '\-]{0,30})\s*:\s*[^)]*\)/g, function (full, name) {
         return resolveThoughtCharacter(name, TC) ? "" : full;
@@ -15413,34 +14249,20 @@ function MCPV5Create_living_characters() {
     }
 
     // Output-hook capture. Pulls the character's thought out of the reply and onto their card,
-    // and -- crucially -- removes it from the visible story WHEREVER it appears so it can never
-    // leak. Order:
-    //   1) PRIMARY: a name-labeled thought "(KnownThoughtChar: ...)" ANYWHERE in the reply
-    //      (start, middle, or end). Filed under the LABELED character (attribution fix), then
-    //      removed from the text. This is the leak fix: a thought placed at the end is caught.
-    //   2) FALLBACK (pending turn only): an unlabeled LEADING first-person parenthetical, filed
-    //      under the asked character. Gated to pending turns so a narrative aside is not eaten.
-    //   3) BACKSTOP (always): strip any remaining labeled thought parentheticals so none leak.
+
     function captureThought(original) {
       const ts = ensureThoughtState();
       const TC = buildThoughtConfig();
       let text = String(original || "");
-      const asked = ts.pendingChar;                                    // who we asked (scene-relevant), or ""
-      const allowed = Array.isArray(ts.candidates) ? ts.candidates : []; // scene-relevant thinkers this turn
+      const asked = ts.pendingChar;
+      const allowed = Array.isArray(ts.candidates) ? ts.candidates : [];
 
-      // A resolved label is TRUSTED only if it is who we asked OR another scene-relevant
-      // candidate this turn. When two characters are near-identical (e.g. two attorneys),
-      // the model often swaps the name in the parenthetical; an off-scene / not-asked label
-      // is treated as a MISLABEL and its thought is filed under the character we ACTUALLY
-      // asked -- never redirected to a character who was not in the scene.
       const isTrusted = function (who) {
         if (!who) return false;
         if (asked && who === asked) return true;
         return allowed.indexOf(who) !== -1;
       };
 
-      // 1) PRIMARY: scan labeled parentheticals. Prefer one labeled with a TRUSTED character;
-      //    otherwise keep the first resolvable one as the thought body to re-attribute.
       const labeled = /\(\s*([A-Za-z][\w '\-]{0,30})\s*:\s*([^)]*)\)/g;
       let mm, firstResolvable = null, trustedHit = null;
       while ((mm = labeled.exec(text)) !== null) {
@@ -15468,7 +14290,7 @@ function MCPV5Create_living_characters() {
         if (m) {
           let inner = cleanText(m[1]);
           const lbl = /^([A-Za-z][\w '\-]{0,30}):\s*/.exec(inner);
-          if (lbl) inner = inner.slice(lbl[0].length).trim();   // drop a stray label if present
+          if (lbl) inner = inner.slice(lbl[0].length).trim();
           if (inner) {
             appendThought(asked, inner, TC);
             const rest = text.slice(m[0].length);
@@ -15477,14 +14299,13 @@ function MCPV5Create_living_characters() {
         }
       }
 
-      // 3) BACKSTOP: even if nothing was captured, never let a labeled thought leak.
       return stripLabeledThoughts(text, TC);
     }
 
     function handleOutput(rawText) {
       const original = String(rawText || "");
       const parseSource = stripSelectedBlocks(original, ["LC_PRIVATE", "LC_SEED", "LC_CARDS", "CG_PRIVATE", "CG_SEED", "CG_CARDS"]);
-      // Current tag is LC_MEMORY; also accept legacy CG_MEMORY from in-flight stories.
+
       let memoryBlocks = extractBlocks(parseSource, "LC_MEMORY");
       if (!memoryBlocks.length) memoryBlocks = extractBlocks(parseSource, "CG_MEMORY");
       const cg = ensureState();
@@ -15501,44 +14322,32 @@ function MCPV5Create_living_characters() {
         }
       }
 
-      // Safety net: if the narrator used an on-screen seed but skipped <LC_MEMORY>,
-      // mark the pressure card active (without inventing event text).
       if (!parsedMemory) {
         maybeAutoCompleteOnscreenSeed(original);
       }
 
-      // THOUGHT CARD capture: ONLY when a thought was asked this turn (Thought system).
-      // Captures the leading parenthetical and strips it from visible text. Independent of Life Cards.
       const visibleText = captureThought(original);
 
       syncCards();
       updateDebugCard();
-      // Return the post-thought text WITHOUT trimming. The final output boundary
-      // (finalizeResult) removes private tags, PRESERVES the model's leading separator so the
-      // narration does not jam onto the prior story text, tidies the body, and applies the
-      // empty/whitespace Unicode fallback -- so every return path (normal, early-exit, error)
-      // is handled in one place.
+
       return visibleText;
     }
 
     function handleContext(rawText) {
       const cg = ensureState();
       cg.turn = (cg.turn || 0) + 1;
-      cg.sceneActors = sceneActors(rawText); // who is in the current scene this turn
+      cg.sceneActors = sceneActors(rawText);
       syncCards();
       const directive = buildContextDirective(rawText);
       const active = buildActiveThreadsBlock();
-      advanceThreadDormancy(); // dormancy progression only; injects nothing
+      advanceThreadDormancy();
       syncCards();
-      // Thought system (independent of Life Cards): age the 💭 marker, then decide +
-      // inject the thought ASK.
+
       expireThoughtMarker();
       const thoughtAsk = buildThoughtAsk(rawText);
       updateDebugCard();
-      // Order matches the released build: the ACTIVE LIFE THREADS block is LAST so it is the
-      // most salient thing the model reads (this is what makes Dynamic Large use the cards).
-      // The thought ASK goes BEFORE it -- it only governs how the reply STARTS, so it does
-      // not need to be last, and keeping it last was displacing the Life Cards.
+
       return String(rawText || "").trimEnd() + directive + thoughtAsk + active;
     }
 
@@ -15547,8 +14356,6 @@ function MCPV5Create_living_characters() {
       return stripBlocks(rawText);
     }
 
-    // Load the editable config card into a runtime object the whole engine reads.
-    // Safe defaults are used if the card is missing or unreadable.
     let LC = {
       protagonist: "",
       characters: [],
@@ -15586,21 +14393,16 @@ function MCPV5Create_living_characters() {
       else if (hook === "input") result = handleInput(text);
       else result = text;
     } catch (e) {
-      // A thrown hook must not collapse to "" or a bare space (both read as an empty
-      // response in AID). Start from the original text; finalizeResult below guarantees a
-      // safe non-empty return and re-strips private tags for the output hook.
+
       debugFallback("catch:" + hook, (e && e.message) ? e.message : String(e));
       result = text;
     }
-    // FINAL OUTPUT BOUNDARY: every hook returns through here, so no path can hand AID an
-    // empty / whitespace-only / null / undefined value. Logs which branch fell back.
+
     result = finalizeResult(hook, result, text);
     setGlobalText(result);
     return result;
   }
 
-  // Backward-compatibility alias. Existing adventures whose Context/Output/Input
-  // modifier tabs call ChaosGoblinV2(...) keep working without any edits.
   function ChaosGoblinV2(hook, hookText) {
     return LivingCharacters(hook, hookText);
   }
@@ -15643,24 +14445,13 @@ function MCPV5Create_living_characters() {
 }
 
 function MCPV5Create_true_auto_stats() {
-  // TAS Library Script
 
-  // TRUE AUTOMATIC STATS (TAS) SCRIPT by Yi1i1i
-
-  // Credits
-  // jackoneill2443 - Idea for input flavor text to show stat results
-  // BinKompliziert - Idea for Capitalization weighting for skill learning
-  // LewdLeah - General Scripting Knowledge
-  //
-
-  // This function runs the library hook
   onLibrary_TAS();
 
-  // LIBRARY HOOK
   function onLibrary_TAS() {
-    // Initialize variables
+
     if (state.startScript == undefined) {
-      // Script is naturally unlocked
+
       state.startScript = true;
     }
     if (state.turnCount == undefined) {
@@ -15711,9 +14502,8 @@ function MCPV5Create_true_auto_stats() {
     updateDeadPlrs();
   }
 
-  // INPUT HOOK
   function onInput_TAS(text) {
-    // Detect and execute script unlock or lock
+
     text = scriptSwitch_TAS(text);
 
     text = helpCommandInput_TAS(text);
@@ -15726,7 +14516,6 @@ function MCPV5Create_true_auto_stats() {
       text = removePlrCmdInput(text);
       text = listPlrCmdInput(text);
 
-      // Create story cards if none and updates codebase for player edits at start of hook 
       createIfNoStatSC();
       retrieveStatsFromSC();
 
@@ -15741,7 +14530,6 @@ function MCPV5Create_true_auto_stats() {
 
       createIfNoSkillSC();
       retrieveSkillsFromSC();
-
 
       text = detectStorageCallActions(text);
 
@@ -15773,12 +14561,11 @@ function MCPV5Create_true_auto_stats() {
 
       text = rewardSkillForLevelUp(text);
 
-    }//end of main
+    }
 
     return text;
   }
 
-  // CONTEXT HOOK
   function onContext_TAS(text) {
     if (state.startScript == true && info.actionCount >= 0) {
 
@@ -15790,14 +14577,11 @@ function MCPV5Create_true_auto_stats() {
 
       text = removeAngleText(text);
 
-      //log(text);
-
-    }//end of main
+    }
 
     return text;
   }
 
-  // OUTPUT HOOK
   function onOutput_TAS(text) {
     text = helpCommandOutput_TAS(text);
 
@@ -15805,7 +14589,6 @@ function MCPV5Create_true_auto_stats() {
       state.outputCount += 1;
       log("state.outputCount: " + state.outputCount);
 
-      // Create story cards if none and updates codebase for player edits at start of hook 
       createIfNoStatSC();
       retrieveStatsFromSC();
 
@@ -15821,7 +14604,6 @@ function MCPV5Create_true_auto_stats() {
       createIfNoSkillSC();
       retrieveSkillsFromSC();
 
-      // Output functions
       playerNaturalRegen();
       text = detectHurt(text);
       storeStatsToSC();
@@ -15835,17 +14617,14 @@ function MCPV5Create_true_auto_stats() {
 
       storeModifiersToSC();
 
-      // Message Handler
       state.message = state.msgHolder;
       state.msgHolder = "";
 
       turnCounter();
-    }//end of main
+    }
 
     return text;
   }
-
-  /////////////////////////////////////////////////////////////////////////////////////
 
   youWords = ["you", "You", "I"];
 
@@ -15859,11 +14638,10 @@ function MCPV5Create_true_auto_stats() {
   ];
 
   talentWords = [
-    // Combat / Stealth
+
     "ambush", "argue", "bluff", "confuse", "counterfeit", "deceive", "defend", "disarm", "extinguish",
     "intimidate", "jam", "lockpick", "neutralize", "pierce", "scare", "snipe", "sneak", "snare", "spy", "steal", "shoot", "shooting",
 
-    // Crafting / Construction
     "assemble", "barter", "bind", "boobytrap", "brew", "brewmaster", "build", "boil", "butcher", "camber", "camouflage", "carve", "cook",
     "channel", "chisel", "clean", "compose", "concoct", "craft", "debug", "decrypt", "decipher", "distill", "dismantle", "fry",
     "engineer", "engrave", "fabricate", "fasten", "filter", "fletch", "forge", "frame", "glaze", "grind", "harness",
@@ -15874,17 +14652,14 @@ function MCPV5Create_true_auto_stats() {
     "tailor", "temper", "tie", "tinker", "treat", "trace", "transmute", "trap", "tune", "upcycle", "vacuum", "vent",
     "wash", "weave", "weld", "weld-seal", "whittle",
 
-    // Exploration / Movement
     "balance", "climb", "drive", "eavesdrop", "empathize", "explore", "fish", "fly", "forage", "gauge", "harvest",
     "hunt", "intercept", "levitate", "map", "mine", "navigate", "operate", "orchestrate", "override", "ride", "scavenge", "search",
     "secure", "stow", "sustain", "tag", "track", "transfer", "traverse", "use", "wield", "wrangle",
 
-    // Social / Mental
     "appraise", "arbitrate", "communicate", "claim", "convince", "coordinate", "describe", "diagnose", "empathize",
     "evaluate", "gesture", "justify", "mediate", "memorize", "overhear", "perceive", "persuade", "present", "procure",
     "reveal", "soothe", "simulate", "scribe", "verify",
 
-    // Technical / Scientific
     "calculate", "debug", "decrypt", "diagnose", "engineer", "fabricate", "filter", "invert", "jam", "leverage", "liquefy", "map",
     "optimize", "orchestrate", "patch", "process", "program", "purify", "quench", "reconstruct", "recycle", "refine",
     "reinforce", "remix", "repair", "reverse", "salvage", "sealant", "simulate", "synchronize", "tag", "tinker",
@@ -15929,50 +14704,41 @@ function MCPV5Create_true_auto_stats() {
   titleWords = ["mr", "mrs", "ms", "dr", "prof", "captain", "sir", "lady", "officer", "detective", "colonel", "general", "lieutenant", "president", "governor", "mayor", "minister", "ambassador", "director", "agent", "coach", "principal", "judge", "dean", "sister", "brother", "father", "mother", "daughter", "son", "king", "queen", "prince", "princess", "professor"];
 
   stopWords = [
-    // Pronouns
+
     "I", "me", "my", "myself", "we", "our", "ours", "ourselves",
     "you", "your", "yours", "yourself", "yourselves",
     "he", "him", "his", "himself", "she", "her", "hers", "herself",
     "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
 
-    // Question Words
     "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
 
-    // Auxiliary & Modal Verbs
     "am", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "having",
     "do", "does", "did", "doing",
     "can", "could", "will", "would", "shall", "should", "must", "might", "may",
 
-    // Negatives
     "not", "no", "nor", "never", "none", "nothing", "nowhere", "neither",
     "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't",
     "doesn't", "don't", "didn't", "won't", "wouldn't", "shan't", "shouldn't",
     "can't", "cannot", "couldn't", "mightn't", "mustn't", "needn't",
 
-    // Conjunctions & Prepositions
     "and", "but", "or", "because", "as", "until", "while",
     "of", "at", "by", "for", "with", "about", "against",
     "between", "into", "through", "during", "before", "after",
     "above", "below", "to", "from", "up", "down", "in", "out",
     "on", "off", "over", "under", "onto", "upon", "around",
 
-    // Articles & Determiners
     "a", "an", "the", "this", "that", "these", "those",
     "some", "any", "each", "every", "either", "neither",
     "such", "own", "other", "another", "both", "all", "several", "many", "most", "few", "since",
 
-    // Time-Related Words
     "again", "further", "then", "once", "already", "soon", "later", "finally", "next",
 
-    // Place Words
     "here", "there", "everywhere", "somewhere", "anywhere", "nowhere",
 
-    // Degree & Quantifier Words
     "very", "too", "just", "only", "more", "less", "than", "enough", "almost",
     "rather", "quite", "really", "such",
 
-    // Common Verbs & Adverbs
     "try", "trying", "tries", "take", "takes", "taking",
     "look", "looks", "looking",
     "seem", "seems", "seemed", "appears", "appeared",
@@ -15983,7 +14749,6 @@ function MCPV5Create_true_auto_stats() {
     "say", "says", "saying", "said", "heard",
     "know", "knows", "knew", "stopping", "stops", "becomes",
 
-    // Game-Specific Terms
     "skill", "talent", "ability", "executes", "existing",
     "consumes mana", "consumes energy", "successfully",
     "suddenly", "predictably", "efficiently", "cast"
@@ -15998,24 +14763,19 @@ function MCPV5Create_true_auto_stats() {
     "drink", "eat", "consume", "inject", "swallow", "absorb", "devour", "ingest", "chew", "bite", "sip", "gulp"
   ];
 
-  // Light healing items (basic healing items)
   lightHealWords = [
     "bandage", "herb", "potion", "water", "minor", "salve", "ointment", "icepack", "rinse", "snack", "cooked", "cook", "cooking", "tiny"
   ];
 
-  // Moderate healing items (more effective healing items)
   moderateHealWords = ["healing", "elixir", "tincture", "small", "bandage", "magic", "oil", "food", "meal", "breakfast", "lunch", "dinner", "delicious"
   ];
 
-  // Strong healing items (stronger healing items for larger wounds)
   strongHealWords = ["large", "larger", "strong", "big", "scroll", "balm", "alcohol", "cream"
   ];
 
-  // Intense healing items (used for serious injuries or magical healing)
   greatHealWords = ["superior", "life elixir", "antibacterial", "vitality", "greater", "great", "rare"
   ];
 
-  // Powerful healing items (used for critical injuries or to restore near full health)
   powerfulHealWords = ["immortality", "crystal", "revival", "divine", "surgery", "enchanted", "powerful", "extremely", "extreme", "mystical", "legendary"
   ];
 
@@ -16615,16 +15375,14 @@ function MCPV5Create_true_auto_stats() {
   ];
 
   dodgeWords = [
-    // Running
+
     "run", "running", "sprint", "sprinting", "dash", "dashing", "jog", "jogging",
     "rush", "rushing", "flee", "fleeing",
     "hurry", "hurrying", "escape", "escaping", "scurry", "scurrying",
 
-    // Dodging
     "dodge", "dodging", "sidestep", "sidestepping", "evade", "evading", "ducking", "swerve", "swerving", "weave", "weaving",
     "avoid", "avoiding", "jump", "jumping", "leap", "leaping", "skid", "skidding",
 
-    // Retreating
     "retreat", "retreating", "withdraw", "withdrawing", "fall back", "falling back", "back away", "backing away",
   ];
 
@@ -16739,7 +15497,7 @@ function MCPV5Create_true_auto_stats() {
   fullRestWords = ["deep", "deeply", "hibernation", "hibernate", "long", "prolonged", "rejuvenating", "sleep", "slumber", "sound", "uninterrupted"];
 
   bodyParts = [
-    // Standard humanoid body parts
+
     "adam's apple", "abdomen", "achilles tendon", "ankle", "arm", "arteries", "back", "biceps", "bladder", "buttocks", "body",
     "calf", "cheek", "chest", "chin", "collarbone", "deltoid", "diaphragm", "ear", "elbow", "esophagus",
     "eyebrow", "eyelid", "face", "fingers", "foot", "flesh", "forearm", "forehead", "gums", "gut", "groin", "hamstring",
@@ -16749,7 +15507,6 @@ function MCPV5Create_true_auto_stats() {
     "spine", "spleen", "stomach", "sternum", "tailbone", "teeth", "temple", "thigh", "throat", "thumb",
     "toes", "triceps", "upper back", "veins", "waist", "wrist", "wound", "windpipe",
 
-    // Fantasy/Sci-Fi Races
     "antlers", "barb", "beak", "carapace", "chitin", "claw", "crest", "eye stalk", "fang", "feathers",
     "fin", "frill", "gill", "horn", "hoof", "mandible", "membrane", "proboscis", "scales", "shell",
     "snout", "spikes", "stinger", "talon", "tail", "thorax", "trunk", "tusk", "whiskers", "wing"
@@ -16769,7 +15526,6 @@ function MCPV5Create_true_auto_stats() {
       "Static", "Step", "Storm", "Strike", "Subdue", "Surge", "Tap", "Temporal",
       "Tide", "Trap", "Ultra", "Ultimate", "Void", "Ward", "Wave", "Whisper", "Wind", "Zone", "Zephyr"
     ],
-
 
     healer: [
       "Aid", "Alleviation", "Aura", "Balm", "Blessed", "Blessing", "Cleansing",
@@ -17466,7 +16222,7 @@ function MCPV5Create_true_auto_stats() {
   ];
 
   const defendTiers = {
-    tier1: [ // Feeble Block
+    tier1: [
       "Your guard is unsteady.",
       "You put up a shaky block.",
       "You try to block, barely holding form.",
@@ -17479,7 +16235,7 @@ function MCPV5Create_true_auto_stats() {
       "You throw up a rushed guard."
     ],
 
-    tier2: [ // Basic Block
+    tier2: [
       "You brace yourself with effort.",
       "Your block is simple but reliable.",
       "You hold your ground with caution.",
@@ -17492,7 +16248,7 @@ function MCPV5Create_true_auto_stats() {
       "You position yourself with hesitation."
     ],
 
-    tier3: [ // Trained Block
+    tier3: [
       "You raise a firm guard.",
       "Your stance is practiced and steady.",
       "You block with discipline.",
@@ -17505,7 +16261,7 @@ function MCPV5Create_true_auto_stats() {
       "You hold the line with experience."
     ],
 
-    tier4: [ // Solid Block
+    tier4: [
       "Your block is sturdy and resolute.",
       "You form a reliable defense.",
       "You meet the moment with focus.",
@@ -17518,7 +16274,7 @@ function MCPV5Create_true_auto_stats() {
       "Your guard holds with confidence."
     ],
 
-    tier5: [ // Hardened Block
+    tier5: [
       "Your guard feels forged from iron.",
       "You set your stance like a shield wall.",
       "You block with unwavering strength.",
@@ -17531,7 +16287,7 @@ function MCPV5Create_true_auto_stats() {
       "Your block speaks of hard-won training."
     ],
 
-    tier6: [ // Powerful Block
+    tier6: [
       "Your block lands with force.",
       "You drive your stance into the ground.",
       "Your guard echoes with authority.",
@@ -17544,7 +16300,7 @@ function MCPV5Create_true_auto_stats() {
       "Your stance thunders with tension."
     ],
 
-    tier7: [ // Commanding Block
+    tier7: [
       "Your guard commands respect.",
       "You block with supreme control.",
       "Your defense flows with purpose.",
@@ -17557,7 +16313,7 @@ function MCPV5Create_true_auto_stats() {
       "Your block crushes hesitation."
     ],
 
-    tier8: [ // Unyielding Block
+    tier8: [
       "Your stance becomes immovable.",
       "You block like a fortress.",
       "Your guard is absolute.",
@@ -17570,7 +16326,7 @@ function MCPV5Create_true_auto_stats() {
       "You shield yourself without effort."
     ],
 
-    tier9: [ // Transcendent Block
+    tier9: [
       "Your block feels beyond mortal training.",
       "You flow into a seamless defense.",
       "Your stance carries divine timing.",
@@ -17583,7 +16339,7 @@ function MCPV5Create_true_auto_stats() {
       "You become the idea of stillness."
     ],
 
-    tier10: [ // Eternal Block
+    tier10: [
       "You become the concept of defense itself.",
       "Your guard echoes through time.",
       "Your block defines unbreakable.",
@@ -17631,11 +16387,6 @@ function MCPV5Create_true_auto_stats() {
     "Thoughts and experiences have meshed together, [Skill] becomes yours as you level up."
   ];
 
-
-  /////////////////////////////////////////////////////////////////////////////////////
-  /// TAS STANDARD FUNCTIONS
-
-  // Check for lock or unlock script command from input and execute
   function scriptSwitch_TAS(text) {
     if (state.startScript == false) {
       if (text.includes("/start")) {
@@ -17654,7 +16405,6 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  //detect /help and display help
   function helpCommandInput_TAS(text) {
     if (text.includes("/help stats")) {
       state.commandCenter_TAS =
@@ -17717,7 +16467,6 @@ function MCPV5Create_true_auto_stats() {
         `
       <<
       🎯 Skills System Guide
-
 
       - 🪄 Skills require mana points (MP) to use.
       - 🔎 Skill Cast Format: "You [cast word] [skill name]."
@@ -17864,7 +16613,7 @@ function MCPV5Create_true_auto_stats() {
       - /start — Starts the script
       - /end — Stops the script
       - /help stats — Stat mechanics and usage
-      - /help modifiers — Race modifier info  
+      - /help modifiers — Race modifier info
       - /help talents — Talent mechanics and learning
       - /help skills — Skill casting and upgrades
       - /help inventory — Storing and managing items
@@ -17888,28 +16637,24 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  // Increment turn counter at end of onOutput
   function turnCounter() {
     state.turnCount += 1;
     log("state.turnCount: " + state.turnCount);
   }
 
-  // Remove script texts to clean AI context
   function removeAngleText(text) {
     return text.replace(/<<[\s\S]*?>>/g, '');
   }
 
-  // Function to capitalize first letter of a string
   function capitalizeFirst(str) {
     return str.charAt(0).toUpperCase() + str.slice(1);
   }
 
-  // Function to return all indices of one target in array (plural insensitive)
   function indicesOf(arr, target) {
     indices = [];
     for (let i = 0; i < arr.length; i++) {
       if (arr[i] === target || arr[i] === `${target}s` || arr[i] === `${target}es` || arr[i] === `${target.slice(0, target.length - 1)}ies`) {
-        // Found the word, store its index
+
         indices.push(i);
       }
     }
@@ -17918,26 +16663,23 @@ function MCPV5Create_true_auto_stats() {
       return null;
     }
     else {
-      return indices; //arr
+      return indices;
     }
 
   }
 
-  // With a words arr and arr of targets, get indices for each target from word arr and return indices in an arr
   function indicesOfTargets(wordsArr, targetWordsArr) {
     allTargetsIndicesArr = [];
 
-    // Loop through each target word and store their indices from words arr in an array
     targetWordsArr.forEach(word => {
-      // unused target words return null so filter them out of index holder
+
       if (indicesOf(wordsArr, word)) {
-        //indicesOf returns an array, alltargetindices becomes an array of arrays so concat them
+
         allTargetsIndicesArr = allTargetsIndicesArr.concat(indicesOf(wordsArr, word));
         allTargetsIndicesArr.sort((a, b) => a - b);
       }
     });
 
-    //if no indices found return null
     if (allTargetsIndicesArr.length <= 0) {
       return null;
     }
@@ -17945,7 +16687,6 @@ function MCPV5Create_true_auto_stats() {
     return allTargetsIndicesArr;
   }
 
-  //Input a string and remove punctuation
   function removeSpecificPunctuation(str) {
     return str.replace(/[.><,!?;:"()\-\n]/g, " ");
   }
@@ -18043,7 +16784,6 @@ function MCPV5Create_true_auto_stats() {
     const plrs = {};
     let currentPlr = null;
 
-
     // Initialize player lists
     state.playerList.forEach(name => {
       plrs[name] = [];
@@ -18078,7 +16818,6 @@ function MCPV5Create_true_auto_stats() {
 
     return plrs;
   }
-
 
   // Given a words arr, checks if there is a "you" a num specificed before target indicesarr
   function checkYouBeforeIndicesArr(plr, wordsArr, indicesArr, numWordsBefore) {
@@ -18216,7 +16955,6 @@ function MCPV5Create_true_auto_stats() {
           current = 0;
         }
       }
-
 
       return total + current + " ";
 
@@ -18396,7 +17134,6 @@ function MCPV5Create_true_auto_stats() {
       // If card doesn't exist, create it
       addStoryCard("TAS Settings", "Blank", `Player Stats`);
 
-      // Create description
       const settingsSC = storyCards.find(sc => sc.title === `TAS Settings`);
       settingsSC.description = `injectStatsToContext: (true/false), set to true to inject player data to AI context at the cost of tokens.` + settingsSC.description;
     }
@@ -18412,7 +17149,6 @@ function MCPV5Create_true_auto_stats() {
   function retrieveSettingsFromSC() {
     const settingsSC = storyCards.find(sc => sc.title === `TAS Settings`);
 
-    // Extract injectStatsToContext
     const injectMatch = settingsSC.entry.match(/injectStatsToContext\s*=\s*(true|false)/i);
     if (injectMatch) {
       if (injectMatch[1] == "true") {
@@ -18423,7 +17159,6 @@ function MCPV5Create_true_auto_stats() {
       }
     }
 
-    //log("state.injectStatsToContext: " + state.injectStatsToContext);
   }
 
   function feedPlrDataToContext(text) {
@@ -18437,7 +17172,6 @@ function MCPV5Create_true_auto_stats() {
         allStats = [];
         statText = "";
 
-        // Get all plr items
         state.players[plr].inv.item.forEach((itm, index) => {
           allItems.push(`${state.players[plr].inv.amt[index]} ${state.players[plr].inv.item[index]}`);
         })
@@ -18446,7 +17180,6 @@ function MCPV5Create_true_auto_stats() {
         }
         allItems = allItems.join(", ");
 
-        // Get all plr talents
         state.players[plr].talents.name.forEach((itm, index) => {
           talentTier = getTier(state.players[plr].talents.lvl[index]);
           allTalents.push(`${talentTier} ${state.players[plr].talents.name[index]}`);
@@ -18456,7 +17189,6 @@ function MCPV5Create_true_auto_stats() {
         }
         allTalents = allTalents.join(", ");
 
-        // Get all plr skills
         state.players[plr].skills.name.forEach((itm, index) => {
           skillTier = getTier(state.players[plr].skills.lvl[index]);
           allSkills.push(`${skillTier} ${state.players[plr].skills.name[index]}`);
@@ -18466,12 +17198,10 @@ function MCPV5Create_true_auto_stats() {
         }
         allSkills = allSkills.join(", ");
 
-        // Get all plr stats
         statKeys.forEach(key => {
           statAmt = state.players[plr].stats[key];
           maxStatAmt = state.players[plr].stats[`max${capitalizeFirst(key)}`];
 
-          // Scaling fix for tiers
           if (key == "hp" || key == "ep" || key == "mp") {
             statTier = getTier(statAmt/10);
             capTier = getCapacityTier(statAmt,maxStatAmt);
@@ -18484,12 +17214,10 @@ function MCPV5Create_true_auto_stats() {
           }
         });
 
-        // Create stat text
         if (allStats.length > 0) {
           statText = `is ${state.players[plr].race}, ${state.players[plr].class_}, Level ${state.players[plr].stats.maxLvl} (${getTier(state.players[plr].stats.maxLvl)}), has ${allStats[1]} health, ${allStats[2]} mana, ${allStats[3]} energy, ${allStats[4]} attack, ${allStats[5]} defense, ${allStats[6]} speed, ${allStats[7]} luck, ${allStats[8]} intelligence.`
         }
 
-        // Combine all plr data text for final return
         if (!onePlayerFlagger()) {
           text = insertAfterWorldLore(text, `[Assume ${plr} inventory has only ${allItems}. ${plr} talents are only ${allTalents}. ${plr} skills are only ${allSkills}. ${plr} ${statText}]\n`);
         }
@@ -18501,9 +17229,7 @@ function MCPV5Create_true_auto_stats() {
 
     return text;
   }
-  /////////////////////////////////////////////////////////////////////////////////////
 
-  // Creates initial player
   function defaultPlrCreation() {
     state.players = state.players || {};
     state.potentialTalents = state.potentialTalents || {};
@@ -18514,13 +17240,11 @@ function MCPV5Create_true_auto_stats() {
 
     log("state.playerList: " + state.playerList);
 
-    //log(state.players);
   }
 
   function onePlayerFlagger() {
     return Object.keys(state.players).length === 1;
   }
-
 
   function addPlayer(id) {
     if (!state.players[id]) {
@@ -18591,10 +17315,9 @@ function MCPV5Create_true_auto_stats() {
 
       state.playerList.push(id);
       log(`Added Player ${id}`);
-    }//end of !id
+    }
   };
 
-  // Allows user to add a player by typing /add "name"
   function addPlrCmdInput(text) {
     if (text.includes("/add") && !text.includes("say")) {
       let successAdds = [];
@@ -18641,7 +17364,6 @@ function MCPV5Create_true_auto_stats() {
           removePlayer(name);
           successRemoves.push(name);
 
-          // Remove player story cards
           removeSC(`${name} Stats`);
           removeSC(`${name} Modifiers`);
           removeSC(`${name} Inventory`);
@@ -18667,8 +17389,6 @@ function MCPV5Create_true_auto_stats() {
 
     return text;
   }
-
-  /////////////////////////////////////////////////////////////////////////////////////
 
   const raceMods = {
     human: {
@@ -19146,40 +17866,34 @@ function MCPV5Create_true_auto_stats() {
   raceNames = ["Human", "Dwarf", "Dragonkin", "Beastfolk", "Elf", "Orc", "Lizardmen", "Goblin", "Majin", "Vampire", "Fairy", "God", "Yokai", "Dragon", "Zombie", "Insectoid", "Angel", "Demon", "Daemon", "Slime", "Harpy", "Lich", "Bloodletter", "Plaguebearer", "Chiss", "Shifters", "High Elves", "Sangheili", "Kig-Yar", "Unggoy", "Minotaur", "Yautja", "Kroxigor", "Krogan", "Twi'lek", "Erinyes", "Togruta", "Skink", "Cold Ones", "Jiralhanae"];
   statKeysForMod = ["lvl", "hp", "mp", "ep", "atk", "def", "spd", "lck", "intl"];
 
-  //CREATE new sc with player Modifiers if sc doesnt exist
   function createIfNoModifierSC() {
     createFlag = false;
 
     state.playerList.forEach(plr => {
       if (!storyCards.find(sc => sc.title === `${plr} Modifiers`)) {
-        // If "Player Modifiers" card doesn't exist, create it
+
         addStoryCard(`${plr} Modifiers`, "Blank", `Player Stats`);
         createFlag = true;
 
-        // Get the plr race retrieved from stats sc
         plrRace = state.players[plr].race;
-        // If plr race modifiers is undefined
+
         if (!raceMods[plrRace]) {
           plrRace = "human";
         }
 
-        // Fetch the "Player Modifiers" card
         const modSC = storyCards.find(sc => sc.title === `${plr} Modifiers`);
         modSC.description = `Format for Modifying: MOD: num\nModifiers influence your starting stats and modify the exp you receive.\n`
 
-        // Set player modifier values in SC based on their race
         modKeys.forEach(key => {
           state.players[plr].modifiers[key] = raceMods[plrRace][key];
         });
 
-        // Apply initial race mods to stats and display them to sc
         statKeysForMod.forEach(key => {
-          // Modify normal stat
+
           temp1 = state.players[plr].stats[key] * state.players[plr].modifiers[key + "Mod"] / 100;
           state.players[plr].stats[key] = state.players[plr].stats[key] + temp1;
           state.players[plr].stats[key] = Math.round(state.players[plr].stats[key] * 100) / 100;
 
-          // Modify max stats
           maxKey = "max" + capitalizeFirst(key);
           temp2 = state.players[plr].stats[maxKey] * state.players[plr].modifiers[key + "Mod"] / 100;
           state.players[plr].stats[maxKey] = state.players[plr].stats[maxKey] + temp2;
@@ -19194,28 +17908,22 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // STORES and displays the modifiers to player in sc
   function storeModifiersToSC() {
     state.playerList.forEach(plr => {
-      // Format player modifiers holder for SC 
+
       formatForSC = [];
 
       modKeys.forEach((key, index) => {
-        const modName = key.replace("Mod", "").toUpperCase();  //ATK
-        const modFormatPart = `${modName} Modifier: ${state.players[plr].modifiers[key]}%\n`; //ATK Modifier: 0%
+        const modName = key.replace("Mod", "").toUpperCase();
+        const modFormatPart = `${modName} Modifier: ${state.players[plr].modifiers[key]}%\n`;
 
-        // Holder to hold all formatted strings
         formatForSC.push(modFormatPart);
       });
-      //log(formatForSC);
 
-      // Fetch the "Player Modifiers" card
       const modSC = storyCards.find(sc => sc.title === `${plr} Modifiers`);
 
-      // Convert holder to string, clean commas, and finally store to sc entry
       modSC.entry = String(formatForSC).replace(/,/g, '');
 
-      // Trim notes on char limit to prevent memory overfill
       if (modSC.description.length > 3000) {
         halfIndex = Math.floor(modSC.description.length / 3);
         modSC.description = modSC.description.slice(0, halfIndex);
@@ -19225,93 +17933,71 @@ function MCPV5Create_true_auto_stats() {
     });
   }
 
-  //RETRIEVE data from sc and store to playerModifiers
   function retrieveModifiersFromSC() {
     state.playerList.forEach(plr => {
-      // Fetch the "Player Modifiers" card
+
       const modSC = storyCards.find(sc => sc.title === `${plr} Modifiers`);
 
-      // Retrieve and split sc entry into (modName, value) lines
-      const modEntries = modSC.entry.split("\n"); //arr of strings
+      const modEntries = modSC.entry.split("\n");
 
-      //Loop through each line of entry from the split and extract values
       modEntries.forEach(entry => {
-        // Match and extract stat and max stat values using regex
+
         const match = entry.trim().match(/^([A-Z]+)\s+Modifier:\s*(-?\d+(?:\.\d+)?)(?:%)?$/);
-        //log("mod sc match: " + match);
 
-        //Store value in holder
         if (match) {
-          modName = match[1].toLowerCase() + 'Mod'; // e.g., "HP"
-          modValue = Number(match[2]); // e.g., 0
+          modName = match[1].toLowerCase() + 'Mod';
+          modValue = Number(match[2]);
 
-          // Finally store modValue in playerModifier
-          //OR operator safeguards against null values    
           state.players[plr].modifiers[modName] = modValue ?? state.players[plr].modifiers[modName];
 
         }
       });
     });
-    //log(state.players[plr].modifiers);
-  }
 
-  /////////////////////////////////////////////////////////////////////////////////////
+  }
 
   maxStatKeys = ["maxLvl", "maxExp", "maxHp", "maxMp", "maxEp", "maxAtk", "maxDef", "maxSpd", "maxLck", "maxIntl"];
   statKeys = ["lvl", "exp", "hp", "mp", "ep", "atk", "def", "spd", "lck", "intl"];
 
-  // NOTE: Players stats will be stored in a sc. CREATE initial stats. RETRIEVE from or STORE to player stats: SC -> <- state.playerstats
-
-  //Function to create new random player stats
   function newPlayerStats(plr) {
-    //Get a random max level
+
     state.players[plr].stats.maxLvl = randomInt(1, 25);
 
-    //Loop through each maxstat, and set max stats equal to max level
     maxStatKeys.forEach((mStat) => {
       state.players[plr].stats[mStat] = state.players[plr].stats.maxLvl;
     });
 
-    //Give player random initialized stats capped by max level
     statKeys.forEach((stat) => {
       state.players[plr].stats[stat] = randomInt(1, state.players[plr].stats.maxLvl);
     });
 
-    // EXP starts at 0 and caps at 100
     state.players[plr].stats.exp = 0;
     state.players[plr].stats.maxExp = 100;
 
-    // Stat scaling
     state.players[plr].stats.maxHp = state.players[plr].stats.maxLvl * 2 + 20;
     state.players[plr].stats.maxEp = state.players[plr].stats.maxLvl * 2 + 80;
     state.players[plr].stats.maxMp = (state.players[plr].stats.maxLvl * 1.5) + (state.players[plr].stats.intl * 2) + 80;
 
-    // Player starts at full health
     state.players[plr].stats.hp = state.players[plr].stats.maxHp;
     state.players[plr].stats.ep = state.players[plr].stats.maxEp;
     state.players[plr].stats.mp = state.players[plr].stats.maxMp;
 
   }
 
-  // CREATE new sc with random playerstats if sc doesnt exist
   function createIfNoStatSC() {
     createFlag = false;
 
     state.playerList.forEach(plr => {
       if (!storyCards.find(sc => sc.title === `${plr} Stats`)) {
-        // If `${plr} Stats` card doesn't exist, create it
+
         addStoryCard(`${plr} Stats`, "Blank", `Player Stats`);
 
-        // Fetch the `${plr} Stats` card
         const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
         statSC.description = "Format for Modifying: Stat: num/maxNum";
 
-        //Initialize and randomize new player stats
         newPlayerStats(plr);
         state.players[plr].race = getPlrRacePE();
         state.players[plr].class_ = getPlrClassPE();
-        //todo: add occupation
-
 
         createFlag = true;
       }
@@ -19322,41 +18008,33 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // STORES and displays the stats to player in sc
   function storeStatsToSC() {
     state.playerList.forEach(plr => {
-      // Format player stats holder for SC 
+
       formatForSC = [];
 
-      // Store the plr's race and class
       formatForSC.push(`Race: ${capitalizeFirst(state.players[plr].race)}\n`);
       formatForSC.push(`Class: ${capitalizeFirst(state.players[plr].class_)}\n`);
 
       maxStatKeys.forEach((key, index) => {
-        // Lvl storing exception
+
         if (key == "maxLvl") {
           statFormatPart = `LVL ${state.players[plr].stats.maxLvl}\n`
         }
         else {
-          // Remove 'max' and capitalize. Ex: maxAtk -> ATK
+
           statName = key.substring(3).toUpperCase();
 
-          // Formatted stat line. Ex: ATK: atk/maxAtk
           statFormatPart = `${statName}: ${state.players[plr].stats[statName.toLowerCase()]}/${state.players[plr].stats[key]}\n`;
         }
 
-        // Push to holder for holding all formatted strings
         formatForSC.push(statFormatPart);
       });
-      //log(formatForSC);
 
-      // Fetch the `${plr} Stats` card
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
 
-      // Convert holder to string, clean commas, and finally store to sc entry
       statSC.entry = String(formatForSC).replace(/,/g, '');
 
-      // Trim notes on char limit to prevent memory overfill
       if (statSC.description.length > 3000) {
         halfIndex = Math.floor(statSC.description.length / 3);
         statSC.description = statSC.description.slice(0, halfIndex);
@@ -19366,11 +18044,10 @@ function MCPV5Create_true_auto_stats() {
     });
   }
 
-  // RETRIEVE data from sc and store to playerstats
   function retrieveStatsFromSC() {
     state.playerList.forEach(plr => {
       const statMappings = {
-        //lvl: 'maxLvl',
+
         exp: 'maxExp',
         hp: 'maxHp',
         mp: 'maxMp',
@@ -19382,13 +18059,10 @@ function MCPV5Create_true_auto_stats() {
         intl: 'maxIntl',
       };
 
-      //Fetch SC
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
 
-      // Retrieve and split sc entry into array of stat lines
-      const statEntries = statSC.entry.split("\n"); //arr of strings
+      const statEntries = statSC.entry.split("\n");
 
-      // Loop through each stat line in array and extract values
       statEntries.forEach(entry => {
         const raceMatch = entry.trim().match(/^RACE\s*[:\-]?\s*(.+)$/i);
         if (raceMatch) {
@@ -19396,7 +18070,7 @@ function MCPV5Create_true_auto_stats() {
 
           state.players[plr].race = race ?? state.players[plr].race;
 
-          return; // Skip further processing
+          return;
         }
 
         const classMatch = entry.trim().match(/^CLASS\s*[:\-]?\s*(.+)$/i);
@@ -19405,41 +18079,35 @@ function MCPV5Create_true_auto_stats() {
 
           state.players[plr].class_ = className ?? state.players[plr].class_;
 
-          return; // Skip further processing
+          return;
         }
 
-        // Lvl retrieval exception
         const lvlMatch = entry.trim().match(/^(?:LVL|LEVEL)\s*[:\-]?\s*(\d+)$/i);
         if (lvlMatch) {
           state.players[plr].stats.maxLvl = Number(lvlMatch[1]);
-          return; // Skip lvl match when found
+          return;
         }
 
-        // Match and extract (statname, stat, maxStat)
         const match = entry.trim().match(/^([a-zA-Z]+)\s*:\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
-        //log("stat sc match: " + match);
 
-        //Store value in holder
         if (match) {
-          const statName = match[1].toLowerCase();  // stat name (Ex: 'atk')
-          const statValue = Number(match[2]);    // current stat value (Ex: '50')
-          const maxStatValue = Number(match[3]); // max stat value (Ex: '100')
+          const statName = match[1].toLowerCase();
+          const statValue = Number(match[2]);
+          const maxStatValue = Number(match[3]);
 
-          // Finally store stat and max stat in the playerStats if name is valid
-          if (statMappings[statName]) { //Ex: statMappings[atk] = 'maxAtk'
-            //OR operator safeguards against null values    
+          if (statMappings[statName]) {
+
             state.players[plr].stats[statName] = statValue ?? state.players[plr].stats[statName];
             state.players[plr].stats[statMappings[statName]] = maxStatValue ?? state.players[plr].stats[statMappings[statName]];
           }
         }
       });
     });
-    //log(state.playerStats);
+
   }
 
-  // Function to increment the player's stats
   function statUp(plr, statName, incAmt) {
-    // Ensure incAmt is a number
+
     if (typeof incAmt !== "number") {
       incAmt = 0;
     }
@@ -19447,14 +18115,12 @@ function MCPV5Create_true_auto_stats() {
     incAmt = Math.round(incAmt * 100) / 100;
     log("incAmt: " + incAmt + " " + statName);
 
-    //Intialize incAmt trackers for logging
     preModIncAmt = incAmt;
     scaledIncAmt = incAmt;
 
-    //Race modifiers influence stat gains
     plrRace = getPlrRacePE();
     temp = incAmt * state.players[plr].modifiers[statName + 'Mod'] / 100;
-    //Multiply temp by negative to ensure modifiers dont modify oppositely when incAmt is negative
+
     if (incAmt < 0) {
       temp = temp * -1;
     }
@@ -19462,27 +18128,21 @@ function MCPV5Create_true_auto_stats() {
     incAmt = Math.round(incAmt * 100) / 100;
     log("Race modded incAmt: " + incAmt + " " + statName);
 
-    // Get maxstat string key Ex: maxATK
     maxStatName = "max" + statName.charAt(0).toUpperCase() + statName.slice(1);
 
-    // Save current stat
     stat = state.players[plr].stats[statName];
     log("stat: " + stat);
     log("----------");
 
-    // Exception: Extra hp,mp,ep shouldnt lvl up player, simply increment available value
     if (statName == "hp" || statName == "mp" || statName == "ep") {
       state.players[plr].stats[statName] += incAmt;
 
-      // Only two decimal places
       state.players[plr].stats[statName] = Math.round(state.players[plr].stats[statName] * 100) / 100;
 
-      // No overflow for hp, mp, ep
       if (state.players[plr].stats[statName] > state.players[plr].stats[maxStatName]) {
         state.players[plr].stats[statName] = state.players[plr].stats[maxStatName];
       }
 
-      // Fetch the `${plr} Stats` card and log stat changes in description
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
 
       if (incAmt >= 0) { sign = "⬆️" }
@@ -19493,34 +18153,26 @@ function MCPV5Create_true_auto_stats() {
       state.msgHolder = state.msgHolder + `${plr} ${statName.toUpperCase()} ${sign} :  ${stat} → ${state.players[plr].stats[statName]}\n`;
     }
     else {
-      // Formula which decreases value of exp the higher your level and gets the new stat value after exp gain. (stat + incAmt*PercentReduction)
-      // New stat after exp scaling formula
+
       newStat = 0.01 + stat + incAmt * (1.32 * Math.exp(-0.02 * stat));
 
-      // Get scaled incAmt for logging
       scaledIncAmt = incAmt * (1.32 * Math.exp(-0.02 * stat));
       scaledIncAmt = Math.round(scaledIncAmt * 100) / 100;
       log("scaledIncAmt: " + scaledIncAmt);
 
-      // Two decimal places only
       newStat = Math.round(newStat * 100) / 100;
       log("newStat: " + newStat);
-      // todo: fix rounding at very high levels
 
-      // Update the player stat to its new stat
       state.players[plr].stats[statName] = newStat;
 
-      // Stat cant pass max stat so it overflows, get the overflow if it exists
       overflow = state.players[plr].stats[statName] - state.players[plr].stats[maxStatName];
       overflow = Math.round(overflow * 100) / 100;
       log("overflow: " + overflow);
 
-      // Fix stat to not pass maxstat
       if (state.players[plr].stats[statName] > state.players[plr].stats[maxStatName]) {
         state.players[plr].stats[statName] = state.players[plr].stats[maxStatName];
       };
 
-      // Fetch sc and log
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
 
       if (incAmt >= 0) { sign = "⬆️" }
@@ -19528,52 +18180,41 @@ function MCPV5Create_true_auto_stats() {
 
       statSC.description = `Log ${state.turnCount} | ${statName.toUpperCase()} ${sign} :  ${stat} → ${state.players[plr].stats[statName]} (Scaled: ${scaledIncAmt}, Modded: ${incAmt}, Raw: ${preModIncAmt})\n` + statSC.description;
 
-      // Log to msg
       state.msgHolder = state.msgHolder + `${plr} ${statName.toUpperCase()} ${sign} :  ${stat} → ${state.players[plr].stats[statName]}\n`;
 
-      //If there is positive stat overflow, pass it to player EXP
       if (overflow > 0) {
-        // Get current max level
+
         level = state.players[plr].stats.maxLvl;
         log("level: " + level);
 
-        // Scale overflow and add to EXP (Must scale overflow to account when player is high level but has a low stat which will overflow too much to EXP)
         state.players[plr].stats.exp = 0.01 + state.players[plr].stats.exp + (100 * overflow * (1.32 * Math.exp(-0.02 * level)));
 
-        // Round to two decimal places
         state.players[plr].stats.exp = Math.round(state.players[plr].stats.exp * 100) / 100;
         log("state.players[plr].stats.exp: " + state.players[plr].stats.exp);
 
-        //When maxEXP is reached, increment plr level and reset EXP to 0
         if (state.players[plr].stats.exp >= state.players[plr].stats.maxExp) {
-          // Calculate amt of times to increment LVL based on EXP
+
           lvlIncrement = Math.floor(state.players[plr].stats.exp / state.players[plr].stats.maxExp);
           log("lvlIncrement: " + lvlIncrement);
 
-          // Calculate leftover EXP
           leftoverExp = 100 * (state.players[plr].stats.exp / state.players[plr].stats.maxExp - lvlIncrement);
           log("leftoverExp: " + leftoverExp);
 
-          // Increment LVL
           state.players[plr].stats.maxLvl += lvlIncrement;
 
-          // Reset EXP to 0 and add leftover exp
           state.players[plr].stats.exp = 0 + leftoverExp;
           state.players[plr].stats.exp = Math.round(state.players[plr].stats.exp * 100) / 100;
 
-          // Fetch the `${plr} Stats` card and leave log in description
           const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
           statSC.description = `Log ${state.turnCount} | LVL ${level} → ${state.players[plr].stats.maxLvl}\n` + statSC.description;
 
           state.msgHolder = state.msgHolder + `${plr} LVL ${level} → ${state.players[plr].stats.maxLvl}\n`;
 
-          // Since player has leveled up, increase all max stats
           maxStatKeys.forEach((key) => {
-            //Get mod key
-            statKey = key.slice(3); // Remove "max"
+
+            statKey = key.slice(3);
             modName = statKey.toLowerCase() + "Mod";
 
-            // Apply max stat changes
             if (key == "maxHp") {
               state.players[plr].stats[key] += 5 + (5 * state.players[plr].modifiers[modName] / 100);
             }
@@ -19589,12 +18230,11 @@ function MCPV5Create_true_auto_stats() {
               }
             }
 
-            // Round to two decimal places
             state.players[plr].stats[key] = Math.round(state.players[plr].stats[key] * 100) / 100;
           });
 
-        } // End of level up
-      } //end of positive overflow
+        }
+      }
     }
 
     storeStatsToSC();
@@ -19602,33 +18242,29 @@ function MCPV5Create_true_auto_stats() {
 
   function playerNaturalRegen() {
     state.playerList.forEach(plr => {
-      // Player regens only if alive
+
       if (state.players[plr].stats.hp > 0) {
         statUp(plr, "hp", 1);
         statUp(plr, "mp", 2);
 
-        // Player loses available energy only
         if (state.players[plr].stats.ep > 0) {
           statUp(plr, "ep", -1 * randomFloat(0, 1));
         }
 
-        // Player takes damage for having no energy
         if (state.players[plr].stats.ep <= 0) {
           statUp(plr, "hp", -1 * (randomFloat(0.01, 5) + randomFloat(0.01, state.players[plr].stats.maxHp * 0.1)));
         }
 
-      }//end of is alive
+      }
     });
   }
-  //todo: add counter buffer for no energy loss while not inputting game
 
-  // Removes plr from dead plrs list if they are alive
   function updateDeadPlrs() {
     state.playerList.forEach(plr => {
       if (state.players[plr].stats.hp > 0 && state.deadPlrs.includes(plr)) {
         const index = state.deadPlrs.indexOf(plr);
         if (index > -1) {
-          state.deadPlrs.splice(index, 1); // Remove the player from deadPlrs
+          state.deadPlrs.splice(index, 1);
         }
       }
     });
@@ -19636,7 +18272,6 @@ function MCPV5Create_true_auto_stats() {
     log("state.deadPlrs: " + state.deadPlrs);
   }
 
-  // Edit text to show player health
   function warnPlayerHealth(text) {
     state.playerList.forEach(plr => {
       plrHealth = state.players[plr].stats.hp;
@@ -19647,39 +18282,32 @@ function MCPV5Create_true_auto_stats() {
 
       numTurnsDisplay = 5;
 
-      // Warn player every 5 inputs, they have 50% health
       if ((plrHealth / plrMaxHealth) >= 0.45 && (plrHealth / plrMaxHealth) <= 0.50 && state.inputCount % numTurnsDisplay === 0) {
         text = text + toCoOpLang(plr, ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${healthFeelsHalfway[randomInt(0, healthFeelsHalfway.length - 1)]}. `);
       }
 
-      // Warns at 1% to 10% health
       else if ((plrHealth / plrMaxHealth) >= 0.01 && (plrHealth / plrMaxHealth) <= 0.10 && state.inputCount % numTurnsDisplay === 0) {
         text = text + toCoOpLang(plr, ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${healthVeryLow[randomInt(0, healthVeryLow.length - 1)]}. `);
       }
 
-      // Player Death at 0%
       if (plrHealth <= 0 && state.inputCount % 2 === 0 && onePlayerFlagger()) {
         text = text + ` Suddenly, ${healthDeathArray[randomInt(0, healthDeathArray.length - 1)]} The world continues without you.`;
 
         state.msgHolder = state.msgHolder + `GAME OVER. You died!\n`;
       }
       else if (plrHealth <= 0 && !state.deadPlrs.includes(plr) && !onePlayerFlagger()) {
-        // Update dead plrs list
+
         state.deadPlrs.push(plr);
 
-        // Create flavor text
         text = text + toCoOpLang(plr, ` Suddenly, ${healthDeathArray[randomInt(0, healthDeathArray.length - 1)]} The world continues without you. `);
 
         state.msgHolder = state.msgHolder + toCoOpLang(plr, `You died!\n`);
       }
 
-
-      // Warns every 5 input, at 50% energy
       if ((plrEnergy / plrMaxEnergy) >= 0.45 && (plrEnergy / plrMaxEnergy) <= 0.50 && state.inputCount % numTurnsDisplay === 0) {
         text = text + toCoOpLang(plr, ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${halfEnergyArray[randomInt(0, halfEnergyArray.length - 1)]} `);
       }
 
-      // Warns at 1% to 10% energy
       else if ((plrEnergy / plrMaxEnergy) >= 0.01 && (plrEnergy / plrMaxEnergy) <= 0.10 && state.inputCount % numTurnsDisplay === 0) {
         text = text + toCoOpLang(plr, ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${exhaustedArray[randomInt(0, exhaustedArray.length - 1)]}`);
 
@@ -19687,7 +18315,6 @@ function MCPV5Create_true_auto_stats() {
 
       }
 
-      // No energy at 0%
       if (plrEnergy <= 0 && state.inputCount % 5 === 0) {
         text = text + toCoOpLang(plr, ` Suddenly, ${fullExhaustionArray[randomInt(0, fullExhaustionArray.length - 1)]} `);
 
@@ -19699,32 +18326,25 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  /////////////////////////////////////////////////////////////////////////////////////
-
-  // CREATE new sc with player inv if sc doesnt exist
   function createIfNoInvSC() {
     state.playerList.forEach(plr => {
       if (!storyCards.find(sc => sc.title === `${plr} Inventory`)) {
-        // If `${plr} Inventory` card doesn't exist, create it
+
         addStoryCard(`${plr} Inventory`, "Blank", `Player Stats`);
 
-        // Fetch the `${plr} Inventory` card
         const invSC = storyCards.find(sc => sc.title === `${plr} Inventory`);
         invSC.description = "Format for Modifying: ItemName (amt: X)";
       }
     });
   }
 
-  // STORE inv to sc
   function storeInvToSC() {
     state.playerList.forEach(plr => {
-      // Fetch the `${plr} Inventory` card
+
       const invSC = storyCards.find(sc => sc.title === `${plr} Inventory`);
 
-      // Format and display to sc
       invSC.entry = state.players[plr].inv.item.map((item, index) => `${item} (Amt: ${state.players[plr].inv.amt[index]})`).join("\n");
 
-      // Trim notes on char limit to prevent memory overfill
       if (invSC.description.length > 3000) {
         halfIndex = Math.floor(invSC.description.length / 3);
         invSC.description = invSC.description.slice(0, halfIndex);
@@ -19735,54 +18355,44 @@ function MCPV5Create_true_auto_stats() {
     });
   }
 
-  // RETRIEVE inv data from sc
   function retrieveInvFromSC() {
     state.playerList.forEach(plr => {
 
-      // Fetch the `${plr} Inventory` card
       const invSC = storyCards.find(sc => sc.title === `${plr} Inventory`);
 
-      // Get inv sc entry
       fromInvSC = invSC.entry;
-      //log("fromInvSC: " + fromInvSC);
 
-      // Use regex to extract item names and amounts (Ex: Ball (Amt: 2), etc. )
       matches = fromInvSC.matchAll(/(.+?)\s*\(.*?(\d+(?:\.\d+)?).*?\)/g);
 
       itemHold = [];
       amtHold = [];
       for (const match of matches) {
-        // Do not extract 0 amt items
+
         if (match[2] != 0) {
-          itemHold.push(match[1].trim()); // Extract item name to holder
-          amtHold.push(Number(match[2])); // Extract amount as integer to holder2
+          itemHold.push(match[1].trim());
+          amtHold.push(Number(match[2]));
         }
       }
 
-      // Store retrieved data to codebase 
       state.players[plr].inv.item = itemHold;
       state.players[plr].inv.amt = amtHold;
 
-      //log("state.players[plr].inv.item: " + state.players[plr].inv.item);
-      //log("state.players[plr].inv.amt: " + state.players[plr].inv.amt);
     });
   }
 
-  // Detect when the player stores item and amt to their inventory
   function detectStoreInv(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
@@ -19796,45 +18406,37 @@ function MCPV5Create_true_auto_stats() {
         }
       });
 
-      // Loop through each player and test for action
       plrsDetected.forEach(plr => {
-        // Initialize condition var
+
         startEquip = false;
         storeFlavorText = "";
 
-        // Check for inventory words in input then split text into words arr
         equipTextInput = [];
         processedText = wordsToNumber(plrText[plr]);
         equipTextInput = findTargetsThenSplit(processedText, invWords, true);
-        //equipTextInput = findTargetsThenSplit(text,equipWords,true);
+
         log("equipTextInput: " + equipTextInput);
 
-
-        // If there are inventory words, check for "you equip" in words arr using indices
         if (equipTextInput != null) {
-          //Get indices of all equip words in words arr
+
           allEquipWordIndices = [];
           allEquipWordIndices = indicesOfTargets(equipTextInput, equipWords);
           log("allEquipWordIndices: " + allEquipWordIndices);
 
-
-          // If "you" is found within x indices of equip words, start equip process
           if (allEquipWordIndices != null) {
             startEquip = checkYouBeforeIndicesArr(plr, equipTextInput, allEquipWordIndices, 3) || checkAndBeforeIndicesArr(equipTextInput, allEquipWordIndices, 2);
             log("startEquip:" + startEquip);
           }
         }
 
-        // Start equip process when "you equip + inventory" is found in words arr
         if (startEquip == true) {
-          // Initialize arrays for potential items from filtered input
+
           potentialItem = {
             tokens: [],
             indices: [],
             weights: []
           };
 
-          // Filter out words that arent potential items
           potentialItem.tokens = equipTextInput.filter(word =>
             ![...stopWords, ...equipWords, ...talentWords, ...dodgeWords, ...castWords, ...learnWords, ...invWords, ...numWords, ...youWords, ...selfWords, ...consumeWords, ...titleWords].some(fromArr => (
               fromArr.toLowerCase() === word.toLowerCase())
@@ -19845,19 +18447,15 @@ function MCPV5Create_true_auto_stats() {
           log("potentialItem.tokens: " + potentialItem.tokens);
 
           if (potentialItem.tokens.length > 0) {
-            // Get potential item indices from unfiltered input text
+
             potentialItem.indices = indicesOfTargets(equipTextInput, potentialItem.tokens);
 
-            // Remove duplicate indices
             potentialItem.indices = [...new Set(potentialItem.indices)];
             log("potentialItem.indices: " + potentialItem.indices);
 
-            // Initialize weight array to hold 0 for each potential item token
             potentialItem.weights = [];
             potentialItem.indices.forEach(word => { potentialItem.weights.push(0); });
-            //log("potentialItem.weights: " + potentialItem.weights);
 
-            // Get all indices of biased words in text, set to [] if null to avoid errors
             allEquipWordIndices = allEquipWordIndices || [];
             invWordIndices = indicesOfTargets(equipTextInput, invWords) || [];
             numIndices = getDigitIndices(equipTextInput) || [];
@@ -19875,70 +18473,61 @@ function MCPV5Create_true_auto_stats() {
             thatIndices = indicesOf(equipTextInput, "that") || [];
             thenIndices = indicesOf(equipTextInput, "then") || [];
 
-            // Weigh each token based on distance before or after biased words
-            // If token is near an "equip word"
             if (allEquipWordIndices.length > 0) {
-              // Ex: You place sword
+
               isAfterIndex(potentialItem.indices, allEquipWordIndices, 0, 3, 2.5, potentialItem.weights);
               isAfterIndex(potentialItem.indices, allEquipWordIndices, 4, 5, 1.5, potentialItem.weights);
               isAfterIndex(potentialItem.indices, allEquipWordIndices, 6, 10, 0.5, potentialItem.weights);
             }
 
-            // If token is near an "inventory word"
             if (invWordIndices.length > 0) {
-              // First 2 words before inv likely "in your" bag (Ex: ...sword in your bag)
+
               isBeforeIndex(potentialItem.indices, invWordIndices, 0, 2, -2.5, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, invWordIndices, 2, 4, 2, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, invWordIndices, 5, 6, 1.5, potentialItem.weights);
             }
 
-            // If token is near "number"
             if (numIndices.length > 0) {
-              // Ex: take 1 sword
+
               isAfterIndex(potentialItem.indices, numIndices, 0, 3, 2.5, potentialItem.weights);
             }
 
-            // If token is near "the" 
             if (theIndices.length > 0) {
-              // Ex: take the sword
+
               isAfterIndex(potentialItem.indices, theIndices, 0, 4, 2.5, potentialItem.weights);
             }
 
-            // If token is near "from"
             if (fromIndices.length > 0) {
-              // Ex: take sword from
+
               isBeforeIndex(potentialItem.indices, fromIndices, 0, 2, 1, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, fromIndices, 3, 4, 0.5, potentialItem.weights);
 
               isAfterIndex(potentialItem.indices, fromIndices, 0, 3, -2, potentialItem.weights);
 
             }
-            // If token is near "a/an"
+
             if (aIndices.length > 0 || anIndices.length > 0) {
-              // Ex: take a sword
+
               isAfterIndex(potentialItem.indices, aIndices, 0, 4, 1.5, potentialItem.weights);
               isAfterIndex(potentialItem.indices, anIndices, 0, 4, 1.5, potentialItem.weights);
             }
 
-            // If token is near "of" 
             if (ofIndices.length > 0) {
-              // Ex: take 3 of the swords
+
               isAfterIndex(potentialItem.indices, ofIndices, 0, 1, 0.5, potentialItem.weights);
               isAfterIndex(potentialItem.indices, ofIndices, 2, 4, 1, potentialItem.weights);
             }
 
-            // If token is near "in/into"  
             if (inIndices.length > 0 || intoIndices.length > 0) {
-              // Ex: take sword and put in
+
               isBeforeIndex(potentialItem.indices, inIndices, 0, 8, 1, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, intoIndices, 0, 8, 1, potentialItem.weights);
 
               isAfterIndex(potentialItem.indices, inIndices, 0, 3, -2, potentialItem.weights);
             }
 
-            // If token is near "and"
             if (andIndices.length > 0) {
-              // Ex: sword, gun, and shield
+
               isBeforeIndex(potentialItem.indices, andIndices, 0, 3, 1, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, andIndices, 4, 6, 0.5, potentialItem.weights);
 
@@ -19946,43 +18535,37 @@ function MCPV5Create_true_auto_stats() {
 
             }
 
-            // If token is near "it/its"
             if (itIndices.length > 0 || itsIndices.length > 0) {
-              //Ex: "apple and put it"
+
               isBeforeIndex(potentialItem.indices, itIndices, 0, 3, -1, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, itsIndices, 4, 8, 1.5, potentialItem.weights);
 
               isAfterIndex(potentialItem.indices, itsIndices, 0, 3, -2, potentialItem.weights);
             }
 
-            // If token is near "them"
             if (themIndices.length > 0) {
-              // Ex: "and put them"
+
               isBeforeIndex(potentialItem.indices, themIndices, 0, 3, -1.5, potentialItem.weights);
               isBeforeIndex(potentialItem.indices, themIndices, 4, 8, 1.5, potentialItem.weights);
 
               isAfterIndex(potentialItem.indices, themIndices, 0, 2, -2, potentialItem.weights);
             }
 
-            // If token is near "that"
             if (thatIndices.length > 0) {
-              // Ex: take that apple
+
               isAfterIndex(potentialItem.indices, thatIndices, 0, 3, 1.5, potentialItem.weights);
             }
 
-            // If token is near "then"
             if (thenIndices.length > 0) {
-              // Ex: take the sword then the apple
+
               isAfterIndex(potentialItem.indices, thenIndices, 0, 3, 1.5, potentialItem.weights);
 
               isBeforeIndex(potentialItem.indices, thenIndices, 0, 3, 1.5, potentialItem.weights);
             }
             log("potentialItem.weights: " + potentialItem.weights);
 
-            // Initialize holder for item tokens
             itemNameParts = [];
 
-            // Find last index that passes weight threshold to know when last item tokens will be stored
             for (let i = potentialItem.weights.length - 1; i >= 0; i--) {
               if (potentialItem.weights[i] >= 4) {
                 lastWeightIndex = i;
@@ -19990,13 +18573,11 @@ function MCPV5Create_true_auto_stats() {
               }
             }
 
-            // Push potential items into holder if they pass weight threshold
             potentialItem.weights.forEach((weight, index) => {
               if (weight >= 4) {
                 itemNameParts.push(potentialItem.tokens[index]);
                 log("itemNameParts: " + itemNameParts);
 
-                // Slice text chunk at potential item index for end of item testing
                 textChunk = processedText.replace(/(?<!>)>(?!>)/g, "")
                   .trim()
                   .split(" ")
@@ -20004,51 +18585,40 @@ function MCPV5Create_true_auto_stats() {
                   .join(" ");
                 log("textChunk: " + textChunk);
 
-                // Test for end of item name to join and store item from holder
                 pattern = new RegExp(`\\b${potentialItem.tokens[index]}\\b\\s*(,|and|\\.)`, 'i');
                 itemEnd = textChunk.search(pattern);
                 log("itemEnd: " + itemEnd);
 
                 if (itemEnd !== -1 || index == lastWeightIndex) {
-                  // Combine item name parts into final item name
+
                   finalItemName = itemNameParts.join(" ");
                   log("finalItemName: " + finalItemName);
 
-                  // Clear the array after item is stored for next possible item
                   itemNameParts = [];
 
-                  // Get item amt
                   itemAmt = findClosestNumberBefore(equipTextInput, potentialItem.indices[index]);
 
                   if (!itemAmt) {
                     itemAmt = 1;
                   }
 
-                  // Get index if already existing item in player inv 
                   alreadyItemIndex = [];
                   alreadyItemIndex = indicesOf(state.players[plr].inv.item, finalItemName);
 
-                  // Increment item amt if already existing in inv
                   if (alreadyItemIndex) {
                     state.players[plr].inv.amt[alreadyItemIndex] += itemAmt;
 
-                    // Log to messages
                     state.msgHolder = state.msgHolder + `${plr} 🎒 +${itemAmt} ${state.players[plr].inv.item[alreadyItemIndex]}\n`;
 
-
-                    // Fetch the `${plr} Inventory` card and log
                     const invSC = storyCards.find(sc => sc.title === `${plr} Inventory`);
                     invSC.description = `Log ${state.turnCount} | +${itemAmt} ${state.players[plr].inv.item[alreadyItemIndex]}\n` + invSC.description;
                   }
                   else {
-                    // Else new item is stored
+
                     state.players[plr].inv.item.push(finalItemName);
                     state.players[plr].inv.amt.push(itemAmt);
 
-                    // Log to msg
                     state.msgHolder = state.msgHolder + `${plr} 🎒 +${itemAmt} ${finalItemName}\n`;
-
-                    // Fetch the `${plr} Inventory` card and log
 
                     const invSC = storyCards.find(sc => sc.title === `${plr} Inventory`);
                     invSC.description = `Log ${state.turnCount} | +${itemAmt} ${finalItemName}\n` + invSC.description;
@@ -20057,14 +18627,13 @@ function MCPV5Create_true_auto_stats() {
               }
             });
 
-            //Update SC
             storeInvToSC();
 
             storeFlavorText = storeFlavorText + toCoOpLang(plr, ` ${itemGainPhrases[randomInt(0, itemGainPhrases.length - 1)]} `);
 
-          }//end of potentialItem.tokens.length
+          }
 
-        }//end of startEquip
+        }
 
         newText = newText + plrText[plr] + storeFlavorText;
       });
@@ -20078,26 +18647,23 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // Detect when player gives away an item
   function detectGiving(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -20107,48 +18673,39 @@ function MCPV5Create_true_auto_stats() {
         }
       });
 
-      // Loop through each player and test for action
       plrsDetected.forEach(plr => {
-        // Initialize condition
+
         startGiving = false;
         finalFlavorText = "";
 
-        // Check for give words in the text and split the input
         givingTextInput = [];
         processedText = wordsToNumber(plrText[plr]);
         givingTextInput = findTargetsThenSplit(processedText, giveWords, true);
         log("givingTextInput simplified: " + givingTextInput);
 
-        // Get all give word indices from input
         if (givingTextInput != null) {
           allGiveWordIndices = [];
           allGiveWordIndices = indicesOfTargets(givingTextInput, giveWords);
           log("allGiveWordIndices:" + allGiveWordIndices);
 
-          // Check if the input contains "you/and + give" then unlock execution
           if (allGiveWordIndices != null) {
             startGiving = checkYouBeforeIndicesArr(plr, givingTextInput, allGiveWordIndices, 3) || checkAndBeforeIndicesArr(givingTextInput, allGiveWordIndices, 2);
             log("startGiving: " + startGiving);
           }
         }
 
-
-        // Input meets requirements, execute giving
         if (startGiving) {
           itmInputIndices = [];
           itmInputAmts = [];
           itmInvIndices = [];
 
-          // Loop through each plr item to check if item is called in input
           state.players[plr].inv.item.forEach((itm, index) => {
-            // Split itm parts for multi worded itms
+
             itmParts = itm.toLowerCase().split(" ");
 
-            // Loop through each word in input and check for full item match
             for (let i = 0; i <= givingTextInput.length - itmParts.length; i++) {
               match = true;
 
-              // Checking for full item match (case and plural insensitive)
               for (let j = 0; j < itmParts.length; j++) {
                 if (itmParts[j] !== givingTextInput[i + j].toLowerCase()
                   && itmParts[j] + 's' !== givingTextInput[i + j].toLowerCase()
@@ -20157,18 +18714,14 @@ function MCPV5Create_true_auto_stats() {
                   break;
                 }
               }
-              //todo: add partial matching
 
-              // Item is matched
               if (match) {
-                // Store first part index from input in array
+
                 itmInputIndices.push(i);
 
-                // Get item amt from input and store in array
                 itmAmt = findClosestNumberBefore(givingTextInput, i) ?? 1;
                 itmInputAmts.push(itmAmt);
 
-                // Save item index from inv in array
                 itmInvIndices.push(index);
               }
             }
@@ -20182,29 +18735,25 @@ function MCPV5Create_true_auto_stats() {
           failFlavorText = [];
           zeroAmtArr = [];
 
-          // Player has called item
           if (itmInputIndices.length > 0) {
-            // Loop through each itm called 
+
             itmInputIndices.forEach((itm, index) => {
-              // Player has enough item amount in inv
+
               if (state.players[plr].inv.amt[itmInvIndices[index]] >= itmInputAmts[index]) {
-                // Subtract item amt from inventory
+
                 state.players[plr].inv.amt[itmInvIndices[index]] = state.players[plr].inv.amt[itmInvIndices[index]] - itmInputAmts[index];
 
-                // Fetch SC and log
                 const invSC = storyCards.find(sc => sc.title === `${plr} Inventory`);
                 invSC.description = `Log ${state.turnCount} | -${itmInputAmts[index]} ${state.players[plr].inv.item[itmInvIndices[index]]}\n` + invSC.description;
 
-                // Log to messages
                 state.msgHolder = state.msgHolder + `${plr} 🫴 -${itmInputAmts[index]} ${state.players[plr].inv.item[itmInvIndices[index]]}\n`
 
-                // Store item to flavor text array
                 giveFlavorText.push(state.players[plr].inv.item[itmInvIndices[index]]);
 
                 storeInvToSC();
 
               }
-              // Player doesnt have enough item amount in inv
+
               else {
                 failFlavorText.push(state.players[plr].inv.item[itmInvIndices[index]]);
               }
@@ -20213,7 +18762,6 @@ function MCPV5Create_true_auto_stats() {
           log("giveFlavorText: " + giveFlavorText);
           log("failFlavorText: " + failFlavorText);
 
-          // Execute giving flavor text
           if (giveFlavorText.length > 0) {
             finalFlavorText = finalFlavorText + ` ${toCoOpLang(plr, `The ${giveFlavorText.join(", ")} leaves your inventory.`)} `;
           }
@@ -20221,7 +18769,6 @@ function MCPV5Create_true_auto_stats() {
             finalFlavorText = finalFlavorText + ` ${toCoOpLang(plr, ` You realize you don't have enough ${failFlavorText.join(", ")}.`)} `;
           }
 
-          // Unlock Context Hook feed to influence AI to reject lack of items or wrong items to give
           allItems = [];
           state.players[plr].inv.item.forEach((itm, index) => {
             allItems.push(`${state.players[plr].inv.amt[index]} ${state.players[plr].inv.item[index]}`);
@@ -20238,11 +18785,10 @@ function MCPV5Create_true_auto_stats() {
             state.invCheckText = state.invCheckText + ` ${plr} realizes they have nothing in their inventory but only ${allItems}. ${plr} anticipates failure for not having the right items or amount. `;
           }
 
-
           state.unlockInvToContext = true;
           log("state.unlockInvToContext: " + state.unlockInvToContext);
 
-        }//end of startgiving
+        }
 
         newText = newText + plrText[plr] + finalFlavorText;
       });
@@ -20256,11 +18802,9 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // Succeeding function for detectGiving, sends the inventory and rejection check text to AI on context hook
   function feedInvToContext(text) {
     if (state.unlockInvToContext) {
       text = text + state.invCheckText;
-      //log("state.invCheckText: " + state.invCheckText);
 
       state.invCheckText = "";
     }
@@ -20270,16 +18814,12 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  /////////////////////////////////////////////////////////////////////////////////////
-
-  // CREATE initial SC if none.
   function createIfNoTalentSC() {
     state.playerList.forEach(plr => {
-      // If "Player Talents" card doesn't exist, create it
+
       if (!storyCards.find(sc => sc.title === `${plr} Talents`)) {
         addStoryCard(`${plr} Talents`, "Blank", `Player Stats`);
 
-        // Fetch SC and give it a description
         const talentSC = storyCards.find(sc => sc.title === `${plr} Talents`)
         talentSC.description = "Format for Modifying: Talent Name (LVL) (EP) (Optional Key1, Key2, etc.)";
 
@@ -20287,16 +18827,13 @@ function MCPV5Create_true_auto_stats() {
     });
   }
 
-  // To STORE talent to sc
   function storeTalentsToSC() {
     state.playerList.forEach(plr => {
-      // Fetch talent sc
+
       const talentSC = storyCards.find(sc => sc.title === `${plr} Talents`);
 
-      // Format and display to sc 
       talentSC.entry = state.players[plr].talents.name.map((talent, index) => `${talent} (Lvl ${state.players[plr].talents.lvl[index]}) (${state.players[plr].talents.cost[index]} EP) (Keys: ${state.players[plr].talents.keys[index]})`).join("\n");
 
-      // Trim notes on char limit to prevent memory overfill
       if (talentSC.description.length > 3000) {
         halfIndex = Math.floor(talentSC.description.length / 3);
         talentSC.description = talentSC.description.slice(0, halfIndex);
@@ -20308,14 +18845,11 @@ function MCPV5Create_true_auto_stats() {
     return true;
   }
 
-  // To RETRIEVE talent from SC. Put in output script so retreiving is not limited to on input.
   function retrieveTalentsFromSC() {
     state.playerList.forEach(plr => {
 
-      // Fetch SC
       const talentSC = storyCards.find(sc => sc.title === `${plr} Talents`)
 
-      // Hold the talent sc entry string
       temp = talentSC.entry;
 
       nameHolder = [];
@@ -20323,18 +18857,16 @@ function MCPV5Create_true_auto_stats() {
       costHolder = [];
       keysHolder = [];
 
-      // Extract talent name lvl cost
       let matches = temp.matchAll(/(.+?)\s*\(.*?(\d+(?:\.\d+)?).*?\)\s*\(.*?(\d+(?:\.\d+)?).*?\)(?:\s*\(\s*(?:Keys:\s*)?([^)]+?)\s*\))?/g);
 
-      // Store in respective arrays holders
       for (const match of matches) {
-        // First capture group (talent name)
+
         nameHolder.push(match[1]);
-        // Second capture group (talent lvl to number)
+
         lvlHolder.push(Number(match[2]));
-        // Third, talent cost to number
+
         costHolder.push(Number(match[3]));
-        // Fourth, talent keys
+
         if (match[4]) {
           keysHolder.push(match[4].trim() ?? "");
         }
@@ -20344,41 +18876,31 @@ function MCPV5Create_true_auto_stats() {
 
       }
 
-      // Finally store to code base
       state.players[plr].talents.name = nameHolder;
       state.players[plr].talents.lvl = lvlHolder;
       state.players[plr].talents.cost = costHolder;
       state.players[plr].talents.keys = keysHolder;
 
-      //log("state.players[plr].talents.name : " + state.players[plr].talents.name);
-      //log("state.players[plr].talents.lvl : " + state.players[plr].talents.lvl);
-      //log("state.players[plr].talents.cost : " + state.players[plr].talents.cost);
-      //log("state.players[plr].talents.keys : " + state.players[plr].talents.keys);
-
-
     });
   }
 
-  // Weighs learning input tokens based on frequency to create and store new talents after set turns. NOTE: Talent learning happens on input and finishes after getting energy cost on output.
   function talentLearningProcess(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag == true) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -20392,29 +18914,25 @@ function MCPV5Create_true_auto_stats() {
         startLearning = false;
         learningFlavorText = "";
 
-        // Check input for learn words then split
         learnTextInput = [];
         learnTextInput = findTargetsThenSplit(plrText[plr], learnWords, true);
         log("learnTextInput: " + learnTextInput);
 
-        // If there are learn words, then get their indices
         if (learnTextInput != null) {
-          // Loop through each learn word and store their indices in an array
+
           allLearnWordIndices = [];
           allLearnWordIndices = indicesOfTargets(learnTextInput, learnWords);
 
-          // If there are learn word indices, then see if there is "you + learn"
           if (allLearnWordIndices != null) {
-            // Check if there is a "you" three words before each learn word index to unlock
+
             startLearning = checkYouBeforeIndicesArr(plr, learnTextInput, allLearnWordIndices, 3) || checkAndBeforeIndicesArr(learnTextInput, allLearnWordIndices, 2);
             log("allLearnWordIndices: " + allLearnWordIndices);
             log("startLearning: " + startLearning);
           }
         }
 
-        // If you + learnword exist, unlock talent learning process
         if (startLearning) {
-          // Must filter out likely nontalent words from learnTextInput
+
           filterArr = [...stopWords, ...learnWords, ...titleWords, ...youWords, ...selfWords, ...[plr, plr.toLowerCase()]];
 
           learnTextInput = [];
@@ -20426,17 +18944,14 @@ function MCPV5Create_true_auto_stats() {
             || (word.toLowerCase() === fromArr.toLowerCase() + "es")
           ));
 
-          // Now you have an array of strings that could be talent names player is trying to learn
           likelyTalentNames = [];
           likelyTalentNames = learnTextInput;
 
-          // If likelytalent names exist and isnt filtered to empty
           if (likelyTalentNames.length > 0) {
-            // Remove duplicates so player cant spam learn talents in one input
+
             likelyTalentNames = [...new Set(likelyTalentNames)]
             log("likelyTalentNames: " + likelyTalentNames);
 
-            // Table of values influencing amt of turns to learn talent/likelihood of filtered input being a talent
             state.points = {
               capitalization: 1.5,
               newTalent: 0,
@@ -20446,40 +18961,35 @@ function MCPV5Create_true_auto_stats() {
               existing: 1
             };
 
-            // Loop through each likelytalentname for storage as potential talents or gives exp to existing potential talents.
             likelyTalentNames.forEach(likelyTalentNames => {
-              // Either returns existing potential talent's index or returns its nonexistence
+
               let index = state.potentialTalents[plr].name.indexOf(likelyTalentNames);
 
-              // New likly talent names are added to the potential talents list
               if (index === -1) {
                 state.potentialTalents[plr].name.push(likelyTalentNames);
 
-                // Capitalization grants more exp b/c more likely to be actual talent name
                 if (isFirstLetterCapitalized(likelyTalentNames)) {
                   state.potentialTalents[plr].exp.push(state.points.capitalization);
                 }
                 else {
-                  // Default exp for new talent names
+
                   state.potentialTalents[plr].exp.push(state.points.newTalent);
                 }
 
               }
-              // Existing potential talents get exp
+
               else {
                 state.potentialTalents[plr].exp[index] += state.points.existing;
               }
             });
 
-            // Decrement unused talent names.
             for (let i = 0; i < state.potentialTalents[plr].name.length; i++) {
-              // Exclude recently incremented talent names
+
               if (!likelyTalentNames.includes(state.potentialTalents[plr].name[i])) {
                 state.potentialTalents[plr].exp[i] -= state.points.decay;
               }
             }
 
-            // Remove decayed below zero talent names
             for (i = 0; i < state.potentialTalents[plr].name.length; i++) {
               if (state.potentialTalents[plr].exp[i] < 0) {
                 state.potentialTalents[plr].name.splice(i, 1);
@@ -20488,66 +18998,54 @@ function MCPV5Create_true_auto_stats() {
               }
             }
 
-            // Log in skill sc, talent learning progress 
             const talentSC = storyCards.find(sc => sc.title === `${plr} Talents`)
             talentSC.description = `Log ${state.turnCount} | Currently Learning: ${state.potentialTalents[plr].name}, Weight: ${state.potentialTalents[plr].exp}\n` + talentSC.description;
 
-            // Loop through the potentialtalents index to check for finished talents and put in a holder
             talentNameHolder = [];
             for (i = 0; i < state.potentialTalents[plr].name.length; i++) {
-              // Set the exp threshold for potential talents to be learned
+
               if (state.potentialTalents[plr].exp[i] >= state.points.threshold) {
-                // Store string(s) of talent name when threshold is hit
+
                 talentNameHolder.push(state.potentialTalents[plr].name[i]);
 
-                // Once threshold is hit, no longer a potential talent so erase
                 state.potentialTalents[plr].name.splice(i, 1);
                 state.potentialTalents[plr].exp.splice(i, 1);
 
-                // Decrement to fix splice edits
                 i--;
               }
             }
 
-            // Full holder means final talent exists, dont push empty holder into player talent
             if (talentNameHolder.length > 0) {
-              // Capitalize the talent, merge all individual string names in holder into the final talent name
+
               talentNameHolder = talentNameHolder.map(word => word[0].toUpperCase() + word.slice(1).toLowerCase());
               talentNameHolder = talentNameHolder.join(" ");
               log("talentNameHolder: " + talentNameHolder);
 
-              // Store the learned talent, dont add duplicates to player talent
               if (!state.players[plr].talents.name.includes(talentNameHolder) && !state.players[plr].skills.name.includes(talentNameHolder)) {
                 state.players[plr].talents.name.push(talentNameHolder);
                 state.players[plr].talents.lvl.push(randomInt(0, 3));
                 state.players[plr].talents.keys.push("");
-                // Temp cost before getEnergy output hook
+
                 state.players[plr].talents.cost.push(randomInt(5, 30));
 
-                // Decrement all potentialTalents exp since a talent was learned
                 for (i = 0; i < state.potentialTalents[plr].name.length; i++) {
                   state.potentialTalents[plr].exp[i] -= state.points.outpaced;
                 }
 
-                // Energy cost determined by AI output, unlock on output function
                 state.askEnergyCost[plr] = true;
                 log("state.askEnergyCost[plr]: " + state.askEnergyCost[plr]);
 
-                // Talent Learn Success Message
                 learningFlavorText = learningFlavorText + toCoOpLang(plr, " You end up successfully learning the \"") + String(talentNameHolder) + "\" talent! ";
 
                 if (!onePlayerFlagger()) {
                   learningFlavorText = learningFlavorText + toCoOpLang(plr, "You check how many energy points the talent requires.");
                   log("state.players[plr].talents.name after learning: " + state.players[plr].talents.name);
                 }
-              }//end of store learned talent
-            }//end of final talent exists
-          } //end of if likelytalent names exist
+              }
+            }
+          }
 
-        }//end of right conditions met so process talent learning
-
-        //log("state.potentialTalents[plr].name: " + state.potentialTalents[plr].name);
-        //log("state.potentialTalents[plr].exp: " + state.potentialTalents[plr].exp);
+        }
 
       });
     }
@@ -20560,37 +19058,31 @@ function MCPV5Create_true_auto_stats() {
     else {
       return text;
     }
-  }//end of function
+  }
 
-
-  // Succeeds talentLearningProcess. Gets energy cost from Output Hook and then stores learned talent and cost into sc.
   function getNewTalentEP(text) {
     state.playerList.forEach(plr => {
       if (state.askEnergyCost[plr] == true) {
-        // Extract numbers from the output string to arr
+
         let numbers = text.match(/\d+/g);
         log("numbers: " + numbers);
 
-        // Convert to numbers to number type
         let arrEnergyValue = numbers ? numbers.map(Number) : [];
 
-        // Filter out 100 for x/100 AI outputs
         if (arrEnergyValue.length > 1) {
           arrEnergyValue = arrEnergyValue.filter(value => value != 100);
         }
         log("arrEnergyValue: " + arrEnergyValue);
 
-        // Find the highest number
         highestEnergyValue = arrEnergyValue.length > 0 ? Math.max(...arrEnergyValue) : null;
         log("highestEnergyValue: " + highestEnergyValue);
 
-        // Use highest number in output as energy cost of talent
         if (highestEnergyValue !== null && highestEnergyValue > 0 && onePlayerFlagger()) {
           state.players[plr].talents.cost[state.players[plr].talents.cost.length - 1] = highestEnergyValue;
           log("state.players[plr].talents.cost(AI) after learning: " + state.players[plr].talents.cost);
         }
         else {
-          // If no energy value in output, use random energy value
+
           randEpCost = randomInt(5, 50 + (state.players[plr].stats.lvl * 0.1));
           state.players[plr].talents.cost[state.players[plr].talents.cost.length - 1] = randEpCost;
           log("randEpCost: " + randEpCost);
@@ -20598,7 +19090,6 @@ function MCPV5Create_true_auto_stats() {
           text = "\"" + state.players[plr].talents.name[state.players[plr].talents.name.length - 1] + "\" will cost " + state.players[plr].talents.cost[state.players[plr].talents.cost.length - 1] + " energy to use. " + text;
         }
 
-        // Learning grants intl
         statUp(plr, "intl", randomFloat(0.01, 3));
 
         state.askEnergyCost[plr] = false;
@@ -20606,40 +19097,33 @@ function MCPV5Create_true_auto_stats() {
       }
     });
 
-    // Learned talent name and cost have been finalized. Store them to SC.
     storeTalentsToSC();
     storeStatsToSC();
 
     return text;
   }
 
-  // Applies a name upgrade to a talent once level floor is reached
   function talentNameUpgrade(plr, level, talentIndex, tierWordArr, text) {
     if (Math.floor(state.players[plr].talents.lvl[talentIndex]) == level) {
-      // Increase level to prevent repeated upgrades
+
       state.players[plr].talents.lvl[talentIndex] = level + 1;
 
-      // Energy cost reduction (if applicable)
       state.players[plr].talents.cost[talentIndex] = Math.round(state.players[plr].talents.cost[talentIndex] * 0.95 * 100) / 100;
 
-      // Store old talent name
       const oldTalentName = state.players[plr].talents.name[talentIndex];
 
-      // Apply prefix logic
       if (tierWordArr === upgradeTier1) {
-        // No previous prefix assumed
+
         state.players[plr].talents.name[talentIndex] = tierWordArr[randomInt(0, tierWordArr.length - 1)] + ' ' + oldTalentName;
       } else {
-        // Remove previous prefix (assumes format: "Prefix TalentName")
+
         const words = oldTalentName.split(' ');
         const baseName = words.length > 1 ? words.slice(1).join(' ') : oldTalentName;
 
-        // Apply new prefix
         const newPrefix = tierWordArr[randomInt(0, tierWordArr.length - 1)];
         state.players[plr].talents.name[talentIndex] = `${newPrefix} ${baseName}`;
       }
 
-      // Notify player
       text += toCoOpLang(plr, ` Your ${oldTalentName} talent has been upgraded to ${state.players[plr].talents.name[talentIndex]}!`);
 
       return text;
@@ -20667,26 +19151,20 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  ///////////////////////////////////////////////////////////////////////////////////
-
-  /// Player skills will be stored in an sc. CREATE initial sc. Skills will STORE TO or RETREIVE FROM sc.
-
-  // Function to create new class skills for player and store to their skills
   function createClassSkills(plr, numOfSkills, wipeOldSkills) {
     classString = state.players[plr].class_;
     createdHolder = [];
 
     if (classString && classSkillParts[classString]) {
-      // Wipe old skills if flag is set
+
       if (wipeOldSkills) {
         state.players[plr].skills.name = [];
         state.players[plr].skills.lvl = [];
         state.players[plr].skills.cost = [];
       }
 
-      // Make starting skills
       for (let i = 0; i < numOfSkills; i++) {
-        // Pick two different random skill parts to combine
+
         let part1, part2;
         do {
           part1 = classSkillParts[classString][randomInt(0, classSkillParts[classString].length - 1)];
@@ -20702,7 +19180,6 @@ function MCPV5Create_true_auto_stats() {
       }
     }
 
-    // Return string of created skills
     if (createdHolder.length > 0) {
       createdHolder = createdHolder.join(", ");
     }
@@ -20710,21 +19187,18 @@ function MCPV5Create_true_auto_stats() {
     return createdHolder;
   }
 
-  // Always CREATE initial sc if none.
   function createIfNoSkillSC() {
     createFlag = false;
 
     state.playerList.forEach(plr => {
-      //If "Player Skills" card doesn't exist, create it
+
       if (!storyCards.find(sc => sc.title === `${plr} Skills`)) {
         addStoryCard(`${plr} Skills`, "Blank", `Player Stats`);
         createFlag = true;
 
-        // Fetch SC and give it a description
         const skillSC = storyCards.find(sc => sc.title === `${plr} Skills`)
         skillSC.description = "Format for Modifying: SkillName (LVL) (MP), etc.";
 
-        // Get player class and create the skills they start with
         createClassSkills(plr, 3, true);
       }
     });
@@ -20734,16 +19208,13 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  //To STORE skill to sc
   function storeSkillsToSC() {
     state.playerList.forEach(plr => {
-      // Fetch skill sc
+
       const skillSC = storyCards.find(sc => sc.title === `${plr} Skills`)
 
-      // Format and display to sc Ex: Fireball (20 MP)
       skillSC.entry = state.players[plr].skills.name.map((skill, index) => `${skill} (Lvl ${state.players[plr].skills.lvl[index]}) (${state.players[plr].skills.cost[index]} MP)`).join("\n");
 
-      // Trim notes on char limit to prevent memory overfill
       if (skillSC.description.length > 3000) {
         halfIndex = Math.floor(skillSC.description.length / 3);
         skillSC.description = skillSC.description.slice(0, halfIndex);
@@ -20753,71 +19224,57 @@ function MCPV5Create_true_auto_stats() {
     });
   }
 
-  // To RETRIEVE skills from SC. Put in output script so retreiving is not limited to on input.
   function retrieveSkillsFromSC() {
     state.playerList.forEach(plr => {
-      //Fetch skill sc
+
       const skillSC = storyCards.find(sc => sc.title === `${plr} Skills`)
 
-      //Hold the skill sc entry string
       temp = skillSC.entry;
-
 
       skillHolder = [];
       lvlHolder = [];
       costHolder = [];
-      // Extract skill name and MP cost using regex. Discard wrong formats
+
       let matches = temp.matchAll(/(.+?)\s*\(.*?(\d+(?:\.\d+)?).*?\)\s*\(.*?(\d+(?:\.\d+)?).*?\)/g);
 
-      // Store in respective arrays holders
       for (const match of matches) {
-        // First capture group (skill name)
+
         skillHolder.push(match[1]);
-        // Second capture group (skill lvl)
+
         lvlHolder.push(Number(match[2]));
-        // Third (skill cost)
+
         costHolder.push(Number(match[3]))
       }
 
-      //Final store to code base
       state.players[plr].skills.name = skillHolder;
       state.players[plr].skills.lvl = lvlHolder;
       state.players[plr].skills.cost = costHolder;
 
-      //log("state.players[plr].skills.name: " + state.players[plr].skills.name);
-      //log("state.players[plr].skills.lvl: " + state.players[plr].skills.lvl);
-      //log("state.players[plr].skills.cost: " + state.players[plr].skills.cost);
     });
   }
 
-  // Part of upgradePlayerSkills, applies skill name change once lvlfloor is reached
   function skillNameUpgrade(plr, level, skillIndex, tierWordArr, text) {
     if (Math.floor(state.players[plr].skills.lvl[skillIndex]) == level) {
-      //Level up skill to avoid another upgrade
+
       state.players[plr].skills.lvl[skillIndex] = level + 1;
 
-      //Mana cost reduction
       state.players[plr].skills.cost[skillIndex] = Math.round(state.players[plr].skills.cost[skillIndex] * 0.95 * 100) / 100;
 
-      //store old skill name
       oldSkillName = state.players[plr].skills.name[skillIndex];
 
-      //Update skill name
       if (tierWordArr == upgradeTier1) {
         state.players[plr].skills.name[skillIndex] = tierWordArr[randomInt(0, tierWordArr.length - 1)] + ' ' + state.players[plr].skills.name[skillIndex];
       }
-      // already upgraded skills get their old prefixes removed
+
       else {
-        // Sanitize old upgraded skill name (remove existing prefix if present)
+
         words = oldSkillName.split(' ');
         baseName = words.length > 1 ? words.slice(1).join(' ') : oldSkillName;
 
-        // Apply new prefix
         newPrefix = tierWordArr[randomInt(0, tierWordArr.length - 1)];
         state.players[plr].skills.name[skillIndex] = `${newPrefix} ${baseName}`;
       }
 
-      // Notify in player input
       text = text + toCoOpLang(plr, ` Your ${oldSkillName} skill has been upgraded to ${state.players[plr].skills.name[skillIndex]}!`);
 
       return text;
@@ -20825,7 +19282,6 @@ function MCPV5Create_true_auto_stats() {
 
     return text;
   }
-
 
   function upgradePlayerSkills(text) {
     state.playerList.forEach(plr => {
@@ -20846,44 +19302,37 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  // Rewards a skill to plr every set level
   function rewardSkillForLevelUp(text) {
     skillRewardText = "";
-    // How many levels needed to get a new skill
+
     lvlReqForSkillReward = 5;
 
     state.playerList.forEach(plr => {
       plrLvl = state.players[plr].stats.maxLvl;
 
-      // Initialize old lvl tracker
       if (!state.oldLvlHolder[plr]) {
         state.oldLvlHolder[plr] = plrLvl || 1;
       }
 
-      // Hold player's old lvl until they meet the lvl req for a new skill
       if (state.oldLvlHolder[plr] && plrLvl) {
         lvlsAbove = plrLvl - state.oldLvlHolder[plr];
         log("lvlsAbove: " + lvlsAbove);
         log("plrLvl: " + plrLvl);
         log("state.oldLvlHolder[plr]: " + state.oldLvlHolder[plr]);
 
-        // Player has met the lvl req for new skill
         if (lvlsAbove >= lvlReqForSkillReward) {
-          // Increment num of skill rewards according to num of times lvl req is fulfilled
+
           numSkillReward = Math.floor(lvlsAbove / lvlReqForSkillReward);
           log("numSkillReward: " + numSkillReward);
 
-          // Update old lvl tracker to new lvl minus remainder. Tracker must follow lvl req intervals
           trackCorrection = lvlsAbove % lvlReqForSkillReward
           state.oldLvlHolder[plr] = plrLvl - trackCorrection;
-
 
           learnedSkills = createClassSkills(plr, numSkillReward, false);
 
           skillRewardText += toCoOpLang(plr, ` ${skillAcquisitionPhrases[randomInt(0, skillAcquisitionPhrases.length - 1)].replace("[Skill]", learnedSkills)}`);
         }
 
-        // If player has edited their lvl to below tracked lvl, update tracked lvl
         if (plrLvl < state.oldLvlHolder[plr]) {
           state.oldLvlHolder[plr] = plrLvl;
         }
@@ -20896,22 +19345,15 @@ function MCPV5Create_true_auto_stats() {
     return text + skillRewardText;
   }
 
-  /////////////////////////////////////////////////////////////////////////////////////
-
-  // Converts talents that are casted into a skill by detecting if closest action word of talent is a cast word
   function talentCastedToSkill(plr, wordsArr, talentIndex, actionWordIndices) {
-    // Ensure talent exists in case player turns same talent to skill multiple times
-    if (state.players[plr].talents.name[talentIndex]) {
-      // Get index of talent from input
-      let i_talentInput = indexOfStr(state.players[plr].talents.name[talentIndex], wordsArr);
-      //log('i_talentInput: ' + i_talentInput);
 
-      // After get index check if closest action word is a cast word
+    if (state.players[plr].talents.name[talentIndex]) {
+
+      let i_talentInput = indexOfStr(state.players[plr].talents.name[talentIndex], wordsArr);
+
       if (i_talentInput >= 0) {
         let closestIndex = closestIndexBeforeTarget(actionWordIndices, i_talentInput);
-        //log('closestIndex: ' + closestIndex);
 
-        // Turn talent to skill if closest action word is a cast word
         if (castWords.includes(wordsArr[closestIndex].toLowerCase())) {
           state.players[plr].skills.name.push(state.players[plr].talents.name[talentIndex]);
           state.players[plr].skills.lvl.push(state.players[plr].talents.lvl[talentIndex]);
@@ -20922,8 +19364,6 @@ function MCPV5Create_true_auto_stats() {
           state.players[plr].talents.cost.splice(talentIndex, 1);
           state.players[plr].talents.keys.splice(talentIndex, 1);
 
-
-
           storeTalentsToSC();
           storeSkillsToSC();
         }
@@ -20931,33 +19371,27 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-
-  // Creates a partial or full talent use flavor text
   function executeTalent(plr, fullTalentFlag, index) {
     talentFlavorText = "";
 
-    // Ensure talent exists
     if (state.players[plr].talents.name[index]) {
 
       energyCost = state.players[plr].talents.cost[index];
 
-      // Subtract ep cost from player ep
       statUp(plr, "ep", -1 * energyCost);
       storeStatsToSC();
 
-      // Using talents boost stats
       statUp(plr, "intl", randomFloat(0.01, 2));
       storeStatsToSC();
 
-      // Override normal skill text if healing skill
       healResult = detectHeal(plr, "talent", index);
       if (healResult[0]) {
         talentFlavorText = ` ${healResult[1]}`;
       }
       else {
-        // Create flavor text if FULL talent
+
         if (fullTalentFlag) {
-          // Define the ranges of talent effectiveness and the corresponding talent power messages
+
           const talentPowerRanges = [
             { min: 0, max: 10, msg: talentPower1 },
             { min: 10, max: 20, msg: talentPower2 },
@@ -20971,7 +19405,6 @@ function MCPV5Create_true_auto_stats() {
             { min: 90, max: Infinity, msg: talentPower10 }
           ];
 
-          // Create talent flavor text
           talentLevel = state.players[plr].talents.lvl[index];
 
           for (let range of talentPowerRanges) {
@@ -20981,30 +19414,24 @@ function MCPV5Create_true_auto_stats() {
             }
           }
         }
-        // Create flavor text for PARTIAL talent
+
         else {
           talentFlavorText = ` You attempt to harness your existing ${state.players[plr].talents.name[index]} talent.`
         }
       }
 
-      // Save current as old talent lvl for logging
       oldTalentLvl = state.players[plr].talents.lvl[index];
 
-      // Using talents grants talent exp
       talentExp = randomFloat(0, 0.8);
       log("talentExp: " + talentExp);
 
-      // Increase the talent's level by the generated experience
       state.players[plr].talents.lvl[index] += talentExp;
 
-      // Round the talent level to two decimal places
       state.players[plr].talents.lvl[index] = Math.round(state.players[plr].talents.lvl[index] * 100) / 100;
 
-      // Log talent lvl change in talent sc notes
       const talentSC = storyCards.find(sc => sc.title === `${plr} Talents`);
       talentSC.description = `Log ${state.turnCount} | ${state.players[plr].talents.name[index]} gained ${talentExp.toFixed(2)} lvl. Lvl ${oldTalentLvl} => ${state.players[plr].talents.lvl[index]}\n` + talentSC.description;
 
-      // Save the updated talent data to the storage container
       storeTalentsToSC();
 
     }
@@ -21012,28 +19439,24 @@ function MCPV5Create_true_auto_stats() {
     return talentFlavorText;
   }
 
-  // Creates a partial or full skill use flavor text
   function executeskill(plr, fullSkillFlag, index) {
     skillFlavorText = "";
     manaCost = state.players[plr].skills.cost[index];
 
-    // Subtract mana cost from player mana
     statUp(plr, "mp", manaCost * -1);
 
-    // Override normal skill text if healing skill
     healResult = detectHeal(plr, "skill", index);
     if (healResult[0]) {
       skillFlavorText = ` ${healResult[1]}`;
     }
     else {
-      // Using skills boost stats
+
       statUp(plr, "atk", randomFloat(0.01, 2));
       statUp(plr, "intl", randomFloat(0.01, 2));
       storeStatsToSC();
 
-      // Create flavor text if FULL SKILL
       if (fullSkillFlag) {
-        // Define the ranges of skill effectiveness and the corresponding skill power messages
+
         const skillPowerRanges = [
           { min: 0, max: 10, msg: skillPower1 },
           { min: 10, max: 20, msg: skillPower2 },
@@ -21047,7 +19470,6 @@ function MCPV5Create_true_auto_stats() {
           { min: 90, max: Infinity, msg: skillPower10 }
         ];
 
-        // Create skill flavor text
         skillLevel = state.players[plr].skills.lvl[index];
 
         for (let range of skillPowerRanges) {
@@ -21057,81 +19479,66 @@ function MCPV5Create_true_auto_stats() {
           }
         }
       }
-      // Create flavor text if PARTIAL SKILL
+
       else {
-        // Create skill harness flavor text
+
         const randomIndex = randomInt(0, harnessSkill.length - 1);
         skillFlavorText = ` ${harnessSkill[randomIndex].replace("[Skill]", state.players[plr].skills.name[index])}`;
       }
     }
 
-    // Save current as old skill lvl for logging
     oldSkillLvl = state.players[plr].skills.lvl[index];
 
-    // Using skills grants skill exp
     skillExp = randomFloat(0, 0.8);
     log("skillExp: " + skillExp);
 
-    // Increase the skill's level by the generated experience
     state.players[plr].skills.lvl[index] += skillExp;
 
-    // Round the skill level to two decimal places
     state.players[plr].skills.lvl[index] = Math.round(state.players[plr].skills.lvl[index] * 100) / 100;
 
-    // Log skill lvl change in skill sc notes
     const skillSC = storyCards.find(sc => sc.title === `${plr} Skills`)
     skillSC.description = `Log ${state.turnCount} | ${state.players[plr].skills.name[index]} gained ${skillExp.toFixed(2)} lvl. Lvl ${oldSkillLvl} => ${state.players[plr].skills.lvl[index]}\n` + skillSC.description;
 
-
-    // Save the updated skill data to the storage container
     storeSkillsToSC();
-
 
     return skillFlavorText;
   }
 
-  // Detects if the player is performing a heal action and executes the healing process then returns healflag and flavor text
   function detectHeal(plr, strgType, index) {
     healFlavorText = "";
     healFlag = false;
     healingSelf = false;
 
-    // Check if the player is performing a healing action. Use text b/c inp targetwords were simplified
     healing = cleanStringCheckForTargets(healingWords, text);
     log("healing: " + healing);
 
-    // Check if the player is attempting to heal themselves
     healingSelf = cleanStringCheckForTargets(selfWords, text);
     log("healingSelf: " + healingSelf);
 
-    // If both a healing action and self-healing are detected, proceed with healing
     if (healing && healingSelf) {
-      // Set heal flag to true
+
       healFlag = true;
 
-      // Healing self with item
       if (strgType == "item") {
-        //todo: item heal
+
       }
-      // Healing self with talent
+
       if (strgType == "talent") {
-        // Heal amount scales with talent level and intl
+
         healAmt = (0.1 * state.players[plr].stats.intl) + (2 * state.players[plr].talents.lvl[index]);
         log('healAmt: ' + healAmt);
 
-        // Apply heal to stats
         statUp(plr, "hp", healAmt);
 
         healFlavorText = healFlavorText + " Your talent recovers some health."
-        //todo: edit text
+
       }
-      // Heal self with skill
+
       if (strgType == "skill") {
-        // Heal amt scales with skill level and intl
+
         healAmt = (0.25 * state.players[plr].stats.intl) + (2 * state.players[plr].skills.lvl[index]);
         log('healAmt: ' + healAmt);
 
-        // Apply heal to stats
         statUp(plr, "hp", healAmt);
 
         healFlavorText = healFlavorText + " Your skill recovers some health."
@@ -21141,11 +19548,9 @@ function MCPV5Create_true_auto_stats() {
     return [healFlag, healFlavorText];
   }
 
-  // Child function of detectStorageCallActions. On context hook, feed the things in player's storage to the AI context
   function feedStrgToContext(text) {
     if (state.unlockStrgToContext) {
       text = text + state.strgCheckText;
-      //log("state.strgCheckText: " + state.strgCheckText);
 
       state.strgCheckText = "";
     }
@@ -21155,7 +19560,6 @@ function MCPV5Create_true_auto_stats() {
     return text;
   }
 
-  // Translate number level to english tier
   function getTier(number) {
     toTier = Math.floor(number / 10);
 
@@ -21184,26 +19588,23 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // Checks for "you + actions" that require items, talents, or skills. Checks if player has something to fulfill it and executes result along with text result
   function detectStorageCallActions(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -21218,7 +19619,6 @@ function MCPV5Create_true_auto_stats() {
         actionFlavorText = "";
         actionTextInput = [];
 
-        // Get talent keys to store as action words
         allTalentKeys = [];
         state.players[plr].talents.keys.forEach((keys, index) => {
           if (keys.length > 2) {
@@ -21230,13 +19630,12 @@ function MCPV5Create_true_auto_stats() {
         });
         log('allTalentKeys: ' + allTalentKeys);
 
-        // Check input for action words and split the input
         allActionWords = [...castWords, ...talentWords, ...healingWords, ...allTalentKeys];
         actionTextInput = findTargetsThenSplit(plrText[plr], allActionWords, true);
         log("actionTextInput simplified: " + actionTextInput);
 
         if (actionTextInput != null) {
-          // Simplify action words for each action type cumulatively and split input 
+
           cumulText = plrText[plr];
 
           actionTextInput = findTargetsThenSplit(cumulText, castWords, true);
@@ -21254,12 +19653,10 @@ function MCPV5Create_true_auto_stats() {
           actionTextInput = cumulText.trim().split(" ");
           log("actionTextInput simplified: " + actionTextInput);
 
-          // If input has action words get their indices
           allActionWordIndices = [];
           allActionWordIndices = indicesOfTargets(actionTextInput, allActionWords);
           log("allActionWordIndices:" + allActionWordIndices);
 
-          // Detect if there is  "you/and + actionword" 
           if (allActionWordIndices != null) {
             startAction = checkYouBeforeIndicesArr(plr, actionTextInput, allActionWordIndices, 3) || checkAndBeforeIndicesArr(actionTextInput, allActionWordIndices, 2);
             log("startAction: " + startAction);
@@ -21267,7 +19664,7 @@ function MCPV5Create_true_auto_stats() {
         }
 
         if (startAction) {
-          // Intialize storage copies
+
           plrStorage = {
             types: [state.players[plr].inv.item, state.players[plr].talents.name, state.players[plr].skills.name],
             lvls: [null, state.players[plr].talents.lvl, state.players[plr].skills.lvl],
@@ -21275,11 +19672,11 @@ function MCPV5Create_true_auto_stats() {
           };
 
           plrThings = {
-            // 0 is item, 1 is talent, 2 is skill
+
             types: [],
-            // index of thing in storage
+
             indices: [],
-            // True for full match, false for partial match
+
             fullMatchFlags: []
           };
 
@@ -21289,20 +19686,17 @@ function MCPV5Create_true_auto_stats() {
             fullMatchFlags: []
           };
 
-          // For each input word
           for (let i = 0; i < actionTextInput.length; i++) {
-            // Loop through each type of storage
+
             for (let x = 0; x < plrStorage.types.length; x++) {
-              // Find all things in the storage that the word can call
+
               plrStorage.types[x].forEach((thing, ind) => {
-                // Initialize flags
+
                 isFullMatch = true;
                 isPartialMatch = false;
 
-                // Split to parts for multi worded things (case insensitive)
                 thingParts = thing.toLowerCase().split(" ");
 
-                // Check if current thing in current storage is a PARTIAL match of current word (complete/prefix match)
                 if (
                   !stopWords.includes(actionTextInput[i]) &&
                   (
@@ -21312,12 +19706,12 @@ function MCPV5Create_true_auto_stats() {
                 ) {
                   isPartialMatch = true;
                 }
-                // Prevent matching things past input length. -1 to account for thingParts matching current index
+
                 if (i + thingParts.length - 1 > actionTextInput.length - 1) {
                   isFullMatch = false;
                 }
                 else {
-                  // Check if current thing in current storage is a FULL match of current word 
+
                   for (j = 0; j < thingParts.length; j++) {
                     if (thingParts[j] !== actionTextInput[i + j].toLowerCase()) {
                       isFullMatch = false;
@@ -21326,26 +19720,23 @@ function MCPV5Create_true_auto_stats() {
                   }
                 }
 
-                // If current thing is a FULL match (override partial match), push its type, its storage index, and full match flag into a respective array
                 if (isFullMatch) {
                   plrThings.types.push(x);
                   plrThings.indices.push(ind);
                   plrThings.fullMatchFlags.push(true);
 
-                  // Move input index forward by matched thing length to avoid duplicate matching. -1 to accomodate loop increment.
                   i = i + thingParts.length - 1;
                 }
-                // If current thing is a PARTIAL match, push its type, its storage index, and full match flag into a respective array
+
                 else if (isPartialMatch) {
                   plrThings.types.push(x);
                   plrThings.indices.push(ind);
                   plrThings.fullMatchFlags.push(false);
                 }
 
-              }); //end of for thing
-            } //end of for playerstorage
+              });
+            }
 
-            // If any talent keys are matched, push respective talent thing
             state.players[plr].talents.keys.forEach((keys, index) => {
               if (keys.includes(actionTextInput[i])) {
                 plrThings.types.push(1);
@@ -21354,19 +19745,17 @@ function MCPV5Create_true_auto_stats() {
               }
             });
 
-            // After looping through all things and storages for the current word, push array of matched things into calls. A call is an array of matched things found for a word.
             if (plrThings.types.length > 0) {
               calls.types.push(plrThings.types);
               calls.indices.push(plrThings.indices);
               calls.fullMatchFlags.push(plrThings.fullMatchFlags);
 
-              // Reset arrays for the next word call
               plrThings.types = [];
               plrThings.indices = [];
               plrThings.fullMatchFlags = [];
             }
 
-          } //end of for input
+          }
           for (i = 0; i < calls.types.length; i++) {
             log('calls.types: ' + calls.types[i]);
             log('calls.indices: ' + calls.indices[i]);
@@ -21374,9 +19763,8 @@ function MCPV5Create_true_auto_stats() {
             log("----------------");
           }
 
-          // Case A: If NO matches found, feed storages to AI context for AI to write rejection and send flavor text to output
           if (calls.types.length === 0) {
-            // Get mp and ep penalty for action fail. Ensure deduction does not turn stat negative
+
             penalty = 15;
             if (state.players[plr].stats.mp < penalty) {
               penalty = state.players[plr].stats.mp;
@@ -21388,12 +19776,10 @@ function MCPV5Create_true_auto_stats() {
             }
             statUp(plr, "ep", -1 * randomFloat(0.01, penalty));
 
-            // Unlock Context Hook feed to influence AI to reject 
             allItems = [];
             allTalents = [];
             allSkills = [];
 
-            // Get all plr items
             state.players[plr].inv.item.forEach((itm, index) => {
               allItems.push(`${state.players[plr].inv.amt[index]} ${state.players[plr].inv.item[index]}`);
             })
@@ -21402,7 +19788,6 @@ function MCPV5Create_true_auto_stats() {
             }
             allItems = allItems.join(", ");
 
-            // Get all plr talents
             state.players[plr].talents.name.forEach((itm, index) => {
               talentTier = getTier(state.players[plr].talents.lvl[index]);
               allTalents.push(`${talentTier} ${state.players[plr].talents.name[index]}`);
@@ -21412,7 +19797,6 @@ function MCPV5Create_true_auto_stats() {
             }
             allTalents = allTalents.join(", ");
 
-            // Get all plr skills
             state.players[plr].skills.name.forEach((itm, index) => {
               skillTier = getTier(state.players[plr].skills.lvl[index]);
               allSkills.push(`${skillTier} ${state.players[plr].skills.name[index]}`);
@@ -21432,9 +19816,9 @@ function MCPV5Create_true_auto_stats() {
             state.unlockStrgToContext = true;
             log("state.unlockStrgToContext: " + state.unlockStrgToContext);
           }
-          // Case B: Things HAVE been matched
+
           if (calls.types.length > 0) {
-            // For each word call (array of matched things)
+
             calls.types.forEach((wordCall, i_currentCall) => {
               final = {
                 fullTypes: [],
@@ -21452,20 +19836,17 @@ function MCPV5Create_true_auto_stats() {
 
               statPassFlags = [];
 
-              // For current word call, for each matched thing, perform and store a stat check
               wordCall.forEach((typeOfTheThing, i_currentThing) => {
-                // is an ITEM
+
                 if (typeOfTheThing == 0) {
                   itemIndex = calls.indices[i_currentCall][i_currentThing];
 
-                  //todo: fix
                   statPassFlags.push(true);
                 }
-                // is a TALENT, store index of current thing in current call
+
                 if (typeOfTheThing == 1) {
                   talentIndex = calls.indices[i_currentCall][i_currentThing];
 
-                  // Checks if player will have enough ep for the talent
                   if (state.players[plr].stats.ep < state.players[plr].talents.cost[talentIndex]) {
                     statPassFlags.push(false);
                   }
@@ -21473,11 +19854,10 @@ function MCPV5Create_true_auto_stats() {
                     statPassFlags.push(true);
                   }
                 }
-                // is a SKILL 
+
                 if (typeOfTheThing == 2) {
                   skillIndex = calls.indices[i_currentCall][i_currentThing];
 
-                  // Checks if player will have enough mp for the skill
                   if (state.players[plr].stats.mp < state.players[plr].skills.cost[skillIndex]) {
                     statPassFlags.push(false);
                   }
@@ -21488,29 +19868,28 @@ function MCPV5Create_true_auto_stats() {
               });
               log('statPassFlags: ' + statPassFlags);
 
-              // For the current word call, for each thing, store things that pass stat req. as final matches
               statPassFlags.forEach((thingPassesReq, i_currentMatch) => {
-                // If player HAS the stat requirement
+
                 if (thingPassesReq) {
-                  // If FULL match, store as final matches
+
                   if (calls.fullMatchFlags[i_currentCall][i_currentMatch]) {
                     final.fullTypes.push(calls.types[i_currentCall][i_currentMatch]);
                     final.fullIndices.push(calls.indices[i_currentCall][i_currentMatch]);
                   }
-                  // If PARTIAL match, store as final matches
+
                   if (!calls.fullMatchFlags[i_currentCall][i_currentMatch]) {
                     final.partialTypes.push(calls.types[i_currentCall][i_currentMatch]);
                     final.partialIndices.push(calls.indices[i_currentCall][i_currentMatch]);
                   }
                 }
-                // If player does NOT have the stat requirements
+
                 else {
-                  // FULL matches that fail the stat req
+
                   if (calls.fullMatchFlags[i_currentCall][i_currentMatch]) {
                     notEnough.fullTypes.push(calls.types[i_currentCall][i_currentMatch]);
                     notEnough.fullIndices.push(calls.indices[i_currentCall][i_currentMatch]);
                   }
-                  // PARTIAL matches that fail the stat req
+
                   if (!calls.fullMatchFlags[i_currentCall][i_currentMatch]) {
                     notEnough.partialTypes.push(calls.types[i_currentCall][i_currentMatch]);
                     notEnough.partialIndices.push(calls.indices[i_currentCall][i_currentMatch]);
@@ -21527,78 +19906,73 @@ function MCPV5Create_true_auto_stats() {
               log('notEnough.partialIndices: ' + notEnough.partialIndices);
               log("----------------");
 
-              // Case 1: If player has final FULL thing, execute random one if more than one. Partials are overriden due to exact match found.
               if (final.fullIndices.length > 0) {
-                // Get random thing
+
                 randomed = randomInt(0, final.fullIndices.length - 1)
                 index = final.fullIndices[randomed];
                 type = final.fullTypes[randomed];
 
-                // Final is a FULL TALENT
                 if (type == 1) {
                   actionFlavorText = actionFlavorText + executeTalent(plr, true, index);
                   talentCastedToSkill(plr, actionTextInput, index, allActionWordIndices);
                 }
-                // Final is a FULL SKILL
+
                 else if (type == 2) {
                   actionFlavorText = actionFlavorText + executeskill(plr, true, index);
                 }
 
               }
-              // Case 2: If player has only final PARTIAL thing, execute random one if more than one.
+
               else if (final.partialIndices.length > 0) {
-                // Get random thing
+
                 randomed = randomInt(0, final.partialIndices.length - 1);
                 index = final.partialIndices[randomed];
                 type = final.partialTypes[randomed];
 
-                // Final is a PARTIAL TALENT
                 if (type == 1) {
                   actionFlavorText = actionFlavorText + executeTalent(plr, false, index);
                 }
-                // Final is PARTIAL SKILL
+
                 else if (type == 2) {
                   actionFlavorText = actionFlavorText + executeskill(plr, false, index);
                 }
               }
-              // If player has matched things, whether partial or full, but NOTHING passes the stat req, this means player does not have enough stat to execute thing
+
               if (final.fullIndices.length === 0 && final.partialIndices.length === 0) {
-                // Case 3: Not enough for a FULL thing, choose random if more than one and execute fail. Partials are overriden due to exact match found.
+
                 if (notEnough.fullIndices.length > 0) {
-                  // Get random thing
+
                   randomed = randomInt(0, notEnough.fullIndices.length - 1)
                   index = notEnough.fullIndices[randomed];
                   type = notEnough.fullTypes[randomed];
 
-                  // notEnough is a FULL TALENT
                   if (type == 1) {
                     actionFlavorText = actionFlavorText + ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${notEnoughPhrases[randomInt(0, notEnoughPhrases.length - 1)].toLowerCase().replace("[stat]", "energy").replace("[thing]", state.players[plr].talents.name[index])}`
                   }
-                  // notEnough is a FULL SKILL
+
                   else if (type == 2) {
                     actionFlavorText = actionFlavorText + ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${notEnoughPhrases[randomInt(0, notEnoughPhrases.length - 1)].toLowerCase().replace("[stat]", "mana").replace("[thing]", state.players[plr].skills.name[index])}`
                   }
                 }
-                // Case 4: Not enough for a PARTIAL thing. Choose random if more than one and execute fail.
+
                 else if (notEnough.partialIndices.length > 0) {
-                  // Get random thing
+
                   randomed = randomInt(0, notEnough.partialIndices.length - 1)
                   index = notEnough.partialIndices[randomed];
                   type = notEnough.partialTypes[randomed];
 
-                  // notEnough is a PARTIAL TALENT
                   if (type == 1) {
                     actionFlavorText = actionFlavorText + ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${notEnoughPhrases[randomInt(0, notEnoughPhrases.length - 1)].toLowerCase().replace("[stat]", "energy").replace("[thing]", state.players[plr].talents.name[index])}`
                   }
-                  // notEnough is a PARTIAL SKILL
+
                   else if (type == 2) {
                     actionFlavorText = actionFlavorText + ` ${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${notEnoughPhrases[randomInt(0, notEnoughPhrases.length - 1)].toLowerCase().replace("[stat]", "mana").replace("[thing]", state.players[plr].skills.name[index])}`
                   }
                 }
               }
             });
-          }//end of things matched
-        }//end of start action
+          }
+        }
 
         newText = newText + plrText[plr] + toCoOpLang(plr, actionFlavorText);
       });
@@ -21611,14 +19985,10 @@ function MCPV5Create_true_auto_stats() {
       return text;
     }
   }
-  //todo: modify rest values for hp mp ep, sleep no fix bleed
-  /////////////////////////////////////////////////////////////////////////////////////
 
-  // Check if player is first entering, then is entering into rest, and replenish their stats according to their rest intensity
   function detectResting(text) {
     let newText = "";
 
-    // Check if player is not dialoguing
     let dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
@@ -21627,12 +19997,11 @@ function MCPV5Create_true_auto_stats() {
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       let result = separateByPlr(text);
       let plrsDetected = Object.keys(result);
       let plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -21650,13 +20019,11 @@ function MCPV5Create_true_auto_stats() {
         restingTextInput = findTargetsThenSplit(plrText[plr], enterWords, true);
         log("restingTextInput simplified: " + restingTextInput);
 
-        //If input has enter words get their indices
         if (restingTextInput != null) {
           allEnterWordsIndices = [];
           allEnterWordsIndices = indicesOfTargets(restingTextInput, enterWords);
           log("allEnterWordsIndices:" + allEnterWordsIndices);
 
-          //Detect if there is  you + enter or and + enter
           if (allEnterWordsIndices != null) {
             isEntering = checkYouBeforeIndicesArr(plr, restingTextInput, allEnterWordsIndices, 3) || checkAndBeforeIndicesArr(restingTextInput, allEnterWordsIndices, 2);
 
@@ -21703,12 +20070,9 @@ function MCPV5Create_true_auto_stats() {
     return newText !== "" ? newText : text;
   }
 
-
-  //Detects when player consumes something which heals them.
   function detectConsuming(text) {
     let newText = "";
 
-    // Check for dialog phrases
     let dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
@@ -21717,7 +20081,7 @@ function MCPV5Create_true_auto_stats() {
     });
 
     if (dialogueFlag == true) {
-      // Split text by player
+
       let result = separateByPlr(text);
       let plrsDetected = Object.keys(result);
       let plrText = {};
@@ -21734,24 +20098,20 @@ function MCPV5Create_true_auto_stats() {
         let startConsume = false;
         let consumeFlavorText = "";
 
-        // Check input for consume words and split the input
         consumingTextInput = []
         consumingTextInput = findTargetsThenSplit(plrText[plr], consumeWords, true);
         log("consumingTextInput simplified: " + consumingTextInput);
 
-        // If input has consume words get their indices
         if (consumingTextInput != null) {
           allConsumeWordsIndices = [];
           allConsumeWordsIndices = indicesOfTargets(consumingTextInput, consumeWords);
           log("allConsumeWordsIndices:" + allConsumeWordsIndices);
 
-          // Detect if there is  you + consume or and + consume
           if (allConsumeWordsIndices != null) {
             startConsume = checkYouBeforeIndicesArr(plr, consumingTextInput, allConsumeWordsIndices, 3) || checkAndBeforeIndicesArr(consumingTextInput, allConsumeWordsIndices, 2);
             log("startConsume: " + startConsume);
           }
         }
-
 
         if (startConsume) {
           let lightHeal = cleanStringCheckForTargets(lightHealWords, plrText[plr]);
@@ -21798,26 +20158,23 @@ function MCPV5Create_true_auto_stats() {
     return newText !== "" ? newText : text;
   }
 
-
   function detectAttack(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -21831,31 +20188,26 @@ function MCPV5Create_true_auto_stats() {
         startAttack = false;
         attackFlavorText = "";
 
-        // Check input for atk words and split the input
         attackTextInput = []
         attackTextInput = findTargetsThenSplit(plrText[plr], attackWords, true);
         log("attackTextInput simplified: " + attackTextInput);
 
-        // If input has atk words get their indices
         if (attackTextInput != null) {
           allAttackWordIndices = [];
           allAttackWordIndices = indicesOfTargets(attackTextInput, attackWords);
           log("allAttackWordIndices:" + allAttackWordIndices);
 
-          // Detect if there is you + atk or and + atk
           if (allAttackWordIndices != null) {
             startAttack = checkYouBeforeIndicesArr(plr, attackTextInput, allAttackWordIndices, 3) || checkAndBeforeIndicesArr(attackTextInput, allAttackWordIndices, 2);
             log("startAttack: " + startAttack)
           }
         }
 
-
         if (startAttack) {
-          // Get the player's attack and speed stats
+
           plrAtk = state.players[plr].stats.atk;
           plrSpd = state.players[plr].stats.spd;
 
-          // Define attack strength ranges with corresponding attack messages
           const atkRanges = [
             { min: 0, max: 10, atk: attackTier1 },
             { min: 10, max: 20, atk: attackTier2 },
@@ -21869,8 +20221,6 @@ function MCPV5Create_true_auto_stats() {
             { min: 90, max: Infinity, atk: attackTier10 }
           ];
 
-
-          // Define speed stat ranges with corresponding speed messages
           const spdRanges = [
             { min: 0, max: 10, spd: atkSpdTier1 },
             { min: 10, max: 20, spd: atkSpdTier2 },
@@ -21884,73 +20234,61 @@ function MCPV5Create_true_auto_stats() {
             { min: 90, max: Infinity, spd: atkSpdTier10 }
           ];
 
-
-          // Calculate energy requirements for attack
           atkEnergyLoss = (2 * (plrAtk / 10) + randomInt(0, 5)) * -1;
           if (plrAtk > 100) {
             atkEnergyLoss = (20 + plrAtk / 25) * -1;
           }
           log("Atk energy loss: " + atkEnergyLoss);
 
-          // Attack energy check defaults to false
           atkEnergyCheck = false;
-          // If player has enough energy, turn on check
+
           if (state.players[plr].stats.ep >= Math.abs(atkEnergyLoss) && state.players[plr].stats.ep >= 0) {
             atkEnergyCheck = true;
           }
           log("atkEnergyCheck: " + atkEnergyCheck);
 
-          // If player does not have enough energy to attack, create flavor text
           if (!atkEnergyCheck) {
             attackFlavorText = attackFlavorText + ` ${toCoOpLang(plr, `${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${notEnoughPhrases[randomInt(0, notEnoughPhrases.length - 1)].toLowerCase().replace("[stat]", "energy").replace("[thing]", "your attack")}`)} `
           }
 
-          // If player has enough energy to attack, execute the attack
           if (atkEnergyCheck) {
-            // Check the player's speed range and create a message based on their speed
+
             for (let range of spdRanges) {
               if (plrSpd >= range.min && plrSpd < range.max) {
-                // Append the speed message to the attack text
+
                 attackFlavorText = attackFlavorText + ` ${toCoOpLang(plr, `${range.spd[randomInt(0, range.spd.length - 1)]}`)} `;
 
-                // Attacking grants SPD exp
                 statUp(plr, "spd", randomFloat(0.01, 2));
                 break;
               }
             }
 
-            // Check the player's attack range/strength, check energy requirement, and save attack text
             for (let range of atkRanges) {
               if (plrAtk >= range.min && plrAtk < range.max) {
-                // Save the attack message based on the attack strength
+
                 attackFlavorText = attackFlavorText + `and ${toCoOpLang(plr, `${range.atk[randomInt(0, range.atk.length - 1)].toLowerCase()}`)} `;
 
-                // Attacking grants ATK exp
                 statUp(plr, "atk", randomFloat(0.01, 2));
 
                 break;
               }
             }
 
-            // Apply energy loss from attack
             statUp(plr, "ep", atkEnergyLoss);
 
-            // Determine if the attack has a luck modifier
-            atkLuckRoll = randomInt(1, 100); // Generate a random luck roll between 1 and 100
-            log("atkLuckRoll: " + atkLuckRoll); // Log the luck roll for debugging
+            atkLuckRoll = randomInt(1, 100);
+            log("atkLuckRoll: " + atkLuckRoll);
 
             if (atkLuckRoll <= state.players[plr].stats.lck && atkLuckRoll >= 1) {
-              // If the luck roll is within the player's luck range, append a lucky phrase to the text
+
               attackFlavorText = attackFlavorText + ` ${toCoOpLang(plr, `${graspPhrases[randomInt(0, graspPhrases.length - 1)]} ${luckyPhrases[randomInt(0, luckyPhrases.length - 1)]}.`)} `;
 
-              //Grant the player luck exp for using luck
               statUp(plr, "lck", randomFloat(0.01, 2));
             }
 
-
             storeStatsToSC();
-          } // End of has atk energy
-        } // End of startAttack
+          }
+        }
 
         newText = newText + plrText[plr] + attackFlavorText;
       });
@@ -21964,190 +20302,144 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  /////////////////////////////////////////////////////////////////////////////////////
-
-  // Function to check if the output contains any "hurt" words or patterns, and if so, apply damage to the player's stats
   function testHurt(plr, hurtType, dmg, text) {
-    // Loop through all the regex patterns in hurtType to detect any matching "hurt" words in the output text
+
     const matchedPattern = hurtType.find(pattern => pattern.test(text));
 
-    // If a hurt word is found, apply damage to the player's HP and increase the DEF stat
     if (matchedPattern) {
-      // Apply damage to the player's HP stat
+
       statUp(plr, "hp", dmg);
 
-      // Find the `${plr} Stats` card to log the damage information
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
 
-      // Match the text with the pattern and fetch the matching portion (if any)
       const matchText = text.match(matchedPattern);
 
-      // If the `${plr} Stats` card exists and we have matched text, log the damage details
       if (statSC && matchText) {
-        // Add a new log entry to the Player Stats card, indicating the output count and damage reason
+
         statSC.description = `Log ${state.turnCount} | Dmg Reason: ${matchText}\n` + statSC.description;
 
-        // Log the percentage of damage reduction based on the player's DEF stat
         statSC.description = `Log ${state.turnCount} | Dmg Reduced by DEF: ${((1 - dmgPercent) * 100).toFixed(2)}% (${(dmg / dmgPercent).toFixed(2)} → ${dmg.toFixed(2)})\n` + statSC.description;
       }
 
-      // Applying damage triggers an increase in the player's DEF stat as a form of experience
       statUp(plr, "def", randomFloat(0.01, 1.5));
 
-      // Store updated player stats to the game state
       storeStatsToSC();
     }
   }
 
-  // Function to check output if player got damaged and applies hp dmg to stats
   function detectHurt(text) {
 
-    //todo: fix so plr doesnt get dmged when about to dmg instead, use array?
-    //Pain that can be brushed off
     lightHurtWords = [
-      //Ex: Scraping you/your body
+
       new RegExp(`\\b(?:bump|bumps|bumping|bruise|bruised|bruising|graze|grazed|grazes|grazing|nick|nicked|nicking|nicks|scorching|scorched|scorches|scrape|scraped|scrapes|scraping|singeing|singes|sting|stinging|stings)(?:\\s+\\w+){0,4}\\s+(?:you|your)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-      //Ex: You feel throbbing
       new RegExp(`\\byou(?:\\s+\\w+){0,3}\\s+feel(?:\\s+\\w+){0,5}\\s+(?:ache|aching|bruise|bruising|bruised|sting|stinging|throb|throbbing)\\b`, "i"),
 
-      //Ex: You stumble back
       new RegExp(`\\byou(?:\\s+\\w+){0,3}\\s+(?:fall|falling|falls|fell|stumble|stumbled|stumbles|stumbling|slam|slammed|slamming|slams|trip|tripping|trips|tumbled)(?:\\s+\\w+){0,3}\\s+(?:against|around|back|backward|down|forward|into|on|off|over|sideways|towards)\\b`, "i"),
 
-      //Ex: The pain is throbbing
       new RegExp(`\\bThe(?:\\s+\\w+){0,3}\\s+pain(?:\\s+\\w+){0,4}\\s+(?:throbbing)\\b`, "i")
 
     ];
 
-    //Pain that hurts or lightly draws blood
     moderateHurtWords = [
-      //Ex: slicing you/your body
+
       new RegExp(`\\b(?:bite|biting|bites|burn|burning|burns|catches|catching|dig|digs|digging|hit|hitting|hits|jab|jabbing|jabs|knock|knocked|knocking|sear|sears|searing|shock|shocking|shocks|strike|strikes|striking|struck|whack|whacked|whacking|whacks)(?:\\s+\\w+){0,3}\\s+(?:you|your)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-      //Ex: sends you crashing
       new RegExp(`\\b(?:send|sending|sends)(?:\\s+\\w+){0,3}\\s+you(?:\\s+\\w+){0,5}\\s+(?:crumpling|crashing|flailing|reeling|skidding|slamming|smashing|sprawling|toppling|tumbling)\\b`, "i"),
 
-      //Ex: The pain is burning
       new RegExp(`\\bThe(?:\\s+\\w+){0,3}\\s+pain(?:\\s+\\w+){0,4}\\s+(?:burning|searing)\\b`, "i")
 
     ];
 
-    //Pain that is drawing average blood or internal dmg
     strongHurtWords = [
-      //Ex: piercing you/your body
+
       new RegExp(`\\b(?:agony|agonizing|batter|battered|battering|collide|collides|fling|flinging|flung|pierce|pierced|pierces|piercing|slam|slams|slammed|slamming|slice|slices|sliced|slicing|shoot|shooting|shoots|slash|slashes|slashed|slashing|gashes)(?:\\s+\\w+){0,3}\\s+(?:you|your)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-      //Ex: The pain is excrutiating
       new RegExp(`\\bThe(?:\\s+\\w+){0,3}\\s+pain(?:\\s+\\w+){0,4}\\s+(?:agonizing|blistering|blinding|extreme|gnawing|gripping|horrible|immediate|intense|piercing|radiating|sharp|shooting|stabbing|tremendous|unbearable)\\b`, "i")
-
 
     ];
 
-    //Pain that is significantly drawing blood
     greatHurtWords = [
-      //Ex: Blasting you/your body
+
       new RegExp(`\\b(?:blasts|blasted|blasting|explodes|exploding|fractures|fractured|fracturing|impale|impales|impaled|impaling|pierce|pierces|pierced|piercing|rip|rips|ripped|ripping|shred|shreds|shredded|shredding|tear into|tears into|tearing into|tore|torn)(?:\\s+\\w+){0,3}\\s+(?:you|your)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i")
     ];
 
-    //Pain that is debilitating
     severeHurtWords = [
-      //Ex: Crushing you/your body
+
       new RegExp(`\\b(?:crush|crushes|crushed|crushing|demolish|demolishes|demolished|demolishing|devastate|devastates|devastated|devastating|obliterate|obliterates|obliterated|obliterating|rupture|ruptures|ruptured|rupturing|shatter|shatters|shattered|shattering|splinter|splinters|splintered|splintering)(?:\\s+\\w+){0,3}\\s+(?:you|your)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i")
     ];
 
-
     state.playerList.forEach(plr => {
-      // Pain that can be brushed off
+
       lightHurtWords_coop = [
-        //Ex: Scraping plr's body
+
         new RegExp(`\\b(?:bump|bumps|bumping|bruise|bruised|bruising|graze|grazed|grazes|grazing|nick|nicked|nicking|nicks|pressing|presses|scorching|scorched|scorches|scrape|scraped|scrapes|scraping|singeing|singes|sting|stinging|stings)(?:\\s+\\w+){0,4}\\s+(?:${plr}|${plr}'s)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: plr feels throbbing
         new RegExp(`\\b${plr}(?:\\s+\\w+){0,3}\\s+(?:feeling|felt|feels|winces|wincing|winced)(?:\\s+\\w+){0,5}\\s+(?:ache|aching|bruise|bruising|bruised|sting|stinging|throb|throbbing)\\b`, "i"),
 
-        //Ex: plr's body aches
         new RegExp(`\\b(?:${plr}'s)\\s+(?:${bodyParts.join("|")})\\s+(?:throb|throbs|throbbing|ache|aches|aching|contorts|contorting|snaps shut)\\b`, "i"),
 
-        //Ex: Plr stumbles
         new RegExp(`\\b${plr}(?:\\s+\\w+){0,3}\\s+(?:contorts|contorting|fall|falling|falls|fell|stumble|stumbled|stumbles|stumbling|strains|straining|slam|slammed|slamming|slams|staggers|staggering|trip|tripping|trips|tumbled|yanked)\\b`, "i")
       ];
 
-      // Pain that hurts or lightly draws blood
       moderateHurtWords_coop = [
-        //Ex: Plr chokes
+
         new RegExp(`\\b${plr}(?:\\s+\\w+){0,3}\\s+(?:chokes|sputters|coughs|fights for air|wheezes|wheezing)\\b`, "i"),
 
-        //Ex: knocks plr
         new RegExp(`\\b(?:knocks|knocking|slamming|slams)(?:\\s+\\w+){0,3}\\s+${plr}\\b`, "i"),
 
-        //Ex: slicing plr's body
         new RegExp(`\\b(?:bite|biting|bites|burn|burning|burns|catches|catching|driving|drives|dig|digs|digging|hit|hitting|hits|jab|jabbing|jabs|knock|knocked|knocking|ramming|rams|sear|sears|searing|shock|shocking|shocks|strike|strikes|striking|struck|sharp|whack|whacked|whacking|whacks)(?:\\s+\\w+){0,3}\\s+(?:${plr}|${plr}'s)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: sends plr crashing
         new RegExp(`\\b(?:send|sending|sends|throws|throwing)(?:\\s+\\w+){0,3}\\s+${plr}(?:\\s+\\w+){0,5}\\s+(?:crumpling|crashing|flailing|reeling|skidding|slamming|smashing|sprawling|toppling|tumbling)\\b`, "i"),
 
-        //Ex: Pain pulses through Plr's body
         new RegExp(`\\b(?:pain|sting)\\b(?:\\s+\\w+){0,3}\\s+(?:flares|pulses|burns|shoots)(?:\\s+\\w+){0,5}\\s+(?:through|along|across|down|into|up)\\s+(?:\\w+\\s+)?(?:${plr}'s)\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: shock up plr's body
         new RegExp(`\\b(?:shock|shocks|shocking|shocked)(?:\\s+\\w+){0,2}\\s+(?:up|down|through|along)\\s+(?:${plr}'s)\\s+(?:${bodyParts.join("|")})\\b`, "i")
 
       ];
 
-      // Pain that is drawing average blood or internal dmg
       strongHurtWords_coop = [
-        //Ex: piercing plr's body
+
         new RegExp(`\\b(?:agony|agonizing|batter|battered|battering|collide|collides|fling|flinging|flung|pierce|pierced|pierces|piercing|slam|slams|slammed|slamming|slice|slices|sliced|slicing|shoot|shooting|shoots|slash|slashes|slashed|slashing|gashes)(?:\\s+\\w+){0,3}\\s+(?:${plr}|${plr}'s)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: Pain explodes through plr's body
         new RegExp(`\\b(?:pain|sting)\\b(?:\\s+\\w+){0,3}\\s+(?:blossoms|explode|explodes|bursts)(?:\\s+\\w+){0,5}\\s+(?:through|along|across|down|into)\\s+(?:\\w+\\s+)?(?:${plr}'s)\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: Plr cries out in pain
         new RegExp(`\\b(?:${plr})\\b(?:\\s+\\w+){0,2}\\s+(?:cry|cries|cried|crying|screams|screaming|yells|yelling|welps|welping)\\s+out(?:\\s+\\w+){0,3}\\s+in\\s+(?:pain|agony)\\b`, "i"),
 
-        //Ex: Plr clutches their body
         new RegExp(`\\b(?:${plr})\\b(?:\\s+\\w+){0,2}\\s+(?:clutch|clutches|clutched|clutching)(?:\\s+\\w+){0,3}\\s+(?:his|her|their|your)\\s+(?:bleeding|wounded|injured|hurt)?\\s*(?:${bodyParts.join("|")})\\b`, "i")
       ];
 
-      //Pain that is significantly drawing blood
       greatHurtWords_coop = [
-        //Ex: Blasting plr's body
+
         new RegExp(`\\b(?:blasts|blasted|blasting|explodes|exploding|fractures|fractured|fracturing|impale|impales|impaled|impaling|pierce|pierces|pierced|piercing|rip|rips|ripped|ripping|shred|shreds|shredded|shredding|tear into|tears into|tearing into|tore|torn)(?:\\s+\\w+){0,3}\\s+(?:${plr}|${plr}'s)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: gouges plr's body
         new RegExp(`\\b(?:gouge|gouges|gouging)(?:\\s+\\w+){0,3}\\s+(?:${plr}'s)\\s+(?:${bodyParts.join("|")})\\b`, "i"),
 
-        //Ex: Plr crumpled
         new RegExp(`\\b${plr}(?:\\s+\\w+){0,3}\\s+(?:collapse|collapses|collapsed|collapsing|crumple|crumpled|crumples|crumpling)\\b`, "i")
       ];
 
-      //Pain that is debilitating
       severeHurtWords_coop = [
-        //Ex: Crushing plr's body
+
         new RegExp(`\\b(?:crush|crushes|crushed|crushing|demolish|demolishes|demolished|demolishing|devastate|devastates|devastated|devastating|obliterate|obliterates|obliterated|obliterating|rupture|ruptures|ruptured|rupturing|shatter|shatters|shattered|shattering|splinter|splinters|splintered|splintering)(?:\\s+\\w+){0,3}\\s+(?:${plr}|${plr}'s)(?:\\s+\\w+){0,5}\\s+(?:${bodyParts.join("|")})\\b`, "i")
       ];
 
-      //Initialize dmg values and defense reduction
       df = state.players[plr].stats.def;
 
-      // X def reduces X/2 % dmg
       if (df <= 100) {
-        dmgPercent = 1 - (df / 200); //Ex: Def: 90, 1 - 0.45 = 0.55 dmg taken
+        dmgPercent = 1 - (df / 200);
       }
-      //Past 100 def reduces 50% + (~1% per 10 def) dmg
+
       else if (df > 100) {
         dmgPercent = 1 - (-0.25 + 0.161 * Math.log(df));
       }
       log("dmgPercent: " + dmgPercent);
 
-      // Randomize and save damage for each dmg intensity
       severeDmg = -1 * randomFloat(25, 40) * dmgPercent;
       greatDmg = -1 * randomFloat(15, 25) * dmgPercent;
       strongDmg = -1 * randomFloat(5, 15) * dmgPercent;
       moderateDmg = -1 * randomFloat(3, 5) * dmgPercent;
       lightDmg = -1 * randomFloat(0.1, 3) * dmgPercent;
 
-      // Loop through each regex, if output text matches damage text, apply damage
       if (onePlayerFlagger()) {
         testHurt(plr, severeHurtWords, severeDmg, text);
         testHurt(plr, greatHurtWords, greatDmg, text);
@@ -22156,7 +20448,7 @@ function MCPV5Create_true_auto_stats() {
         testHurt(plr, lightHurtWords, lightDmg, text);
       }
       else {
-        // Replace you/your with first plr in coop mode for matching
+
         if (!onePlayerFlagger()) {
           adjustedText = text
             .replace(/\byou\b/gi, state.playerList[0])
@@ -22174,30 +20466,24 @@ function MCPV5Create_true_auto_stats() {
 
     return text;
   }
-  // todo: enemy strength/type changes dmg lvl
 
-  /////////////////////////////////////////////////////////////////////////////////////
-
-  // Function to detect when the player attempts to dodge
   function detectDodge(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -22211,32 +20497,25 @@ function MCPV5Create_true_auto_stats() {
         startDodge = false;
         dodgeFlavorText = "";
 
-        // Check if the input contains any dodge-related words
         dodgeTextInput = [];
 
-        // Find all the dodge-related words in the text and split the input accordingly
         dodgeTextInput = findTargetsThenSplit(plrText[plr], dodgeWords, true);
         log("dodgeTextInput simplified: " + dodgeTextInput);
 
-        // If the input contains dodge words, find their indices in the text
         if (dodgeTextInput != null) {
           allDodgeWordIndices = [];
           allDodgeWordIndices = indicesOfTargets(dodgeTextInput, dodgeWords);
           log("allDodgeWordIndices:" + allDodgeWordIndices);
 
-          // Check if the sentence contains "you + dodge" or "and + dodge" to trigger the dodge action
           if (allDodgeWordIndices != null) {
             startDodge = checkYouBeforeIndicesArr(plr, dodgeTextInput, allDodgeWordIndices, 3) || checkAndBeforeIndicesArr(dodgeTextInput, allDodgeWordIndices, 2);
             log("startDodge: " + startDodge)
           }
         }
 
-
-        // If the dodge action is triggered (startDodge is true), calculate the player's dodge response based on SPD stat
         if (startDodge) {
           plrSpd = state.players[plr].stats.spd;
 
-          // Define SPD stat ranges and corresponding dodge messages
           const spdRanges = [
             { min: 0, max: 10, spd: spdTier1 },
             { min: 10, max: 20, spd: spdTier2 },
@@ -22250,60 +20529,50 @@ function MCPV5Create_true_auto_stats() {
             { min: 90, max: Infinity, spd: spdTier10 }
           ];
 
-
-          // Calculate energy requirements for dodging
           dodgeEnergyLoss = (2 * (plrSpd / 10) + randomInt(0, 5)) * -1;
           if (plrSpd > 100) {
             dodgeEnergyLoss = (20 + plrSpd / 25) * -1;
           }
           log("dodgeEnergyLoss: " + dodgeEnergyLoss);
 
-          // Dodge energy check defaults to false
           dodgeEnergyCheck = false;
-          // If player has enough energy, turn on check
+
           if (state.players[plr].stats.ep >= Math.abs(dodgeEnergyLoss) && state.players[plr].stats.ep >= 0) {
             dodgeEnergyCheck = true;
           }
           log("dodgeEnergyCheck: " + dodgeEnergyCheck);
 
-          // If player doesnt have enough energy to dodge, create flavor text
           if (dodgeEnergyCheck == false) {
             dodgeFlavorText = dodgeFlavorText + ` ${toCoOpLang(plr, `${realizePhrases[randomInt(0, realizePhrases.length - 1)]} ${notEnoughPhrases[randomInt(0, notEnoughPhrases.length - 1)].toLowerCase().replace("[stat]", "energy").replace("[thing]", "your movement")}`)} `;
           }
 
-          // If player has enough energy to dodge, execute dodge
           if (dodgeEnergyCheck) {
-            // Based on the player's SPD stat, select an appropriate dodge message and save dodge text
+
             for (let range of spdRanges) {
               if (plrSpd >= range.min && plrSpd < range.max) {
-                // Save dodge text based on player SPD stat
+
                 dodgeFlavorText = dodgeFlavorText + ` ${toCoOpLang(plr, `${range.spd[randomInt(0, range.spd.length - 1)]}`)} `;
 
                 break;
               }
             }
 
-            // Consume energy for dodging
             statUp(plr, "ep", dodgeEnergyLoss);
 
-            // Dodging grants SPD stat
             statUp(plr, "spd", randomFloat(0.01, 2));
 
-            // Check if the player's luck allows for a dodge boost based on their LCK stat
             dodgeLuckRoll = randomInt(1, 100);
             log("dodgeLuckRoll: " + dodgeLuckRoll);
 
-            // If the player's luck stat rolls successfully, append a lucky dodge message
             if (dodgeLuckRoll <= state.players[plr].stats.lck && dodgeLuckRoll >= 1) {
               dodgeFlavorText = dodgeFlavorText + `${toCoOpLang(plr, `${graspPhrases[randomInt(0, graspPhrases.length - 1)]} ${luckyPhrases[randomInt(0, luckyPhrases.length - 1)]}.`)} `;
 
-              // Grant the player luck exp for using luck
               statUp(plr, "lck", randomFloat(0.01, 2));
             }
 
             storeStatsToSC();
-          }// End of dodgeEnergyCheck
-        } // End of startDodge check
+          }
+        }
 
         newText = newText + plrText[plr] + dodgeFlavorText;
       });
@@ -22317,26 +20586,23 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // Function that detects when a player looks around the environment, and based on their INTL stat, affects the level of detail in the results displayed to the player.
   function detectScout(text) {
     newText = "";
 
-    // Verify player is not dialoguing (case-insensitive)
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
-        // Disable check dialoguing exists
+
         dialogueFlag = false;
       }
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       result = separateByPlr(text);
       plrsDetected = Object.keys(result);
       plrText = {};
 
-      // Store each player's text
       plrsDetected.forEach(plr => {
         if (result[plr].length > 0) {
           plrText[plr] = result[plr].join(" ").replace(/(?<!>)>(?!>)/g, "");
@@ -22350,32 +20616,25 @@ function MCPV5Create_true_auto_stats() {
         startScout = false;
         scoutFlavorText = "";
 
-        // Check for scout-related words
         scoutTextInput = [];
 
-        // Find scout-related words within the input and split the input accordingly
         scoutTextInput = findTargetsThenSplit(plrText[plr], scoutWords, true);
         log("scoutTextInput simplified: " + scoutTextInput);
 
-        // If the input contains scout words, find their indices in the text
         if (scoutTextInput != null) {
           allScoutWordIndices = [];
           allScoutWordIndices = indicesOfTargets(scoutTextInput, scoutWords);
           log("allScoutWordIndices:" + allScoutWordIndices);
 
-          // Check if the sentence starts with "you + scout" or "and + scout" to trigger scouting action
           if (allScoutWordIndices != null) {
             startScout = checkYouBeforeIndicesArr(plr, scoutTextInput, allScoutWordIndices, 3) || checkAndBeforeIndicesArr(scoutTextInput, allScoutWordIndices, 2);
             log("startScout: " + startScout)
           }
         }
 
-
-        // If the scouting action is triggered (startScout is true), process the INTL stat to provide results
         if (startScout) {
           plrIntl = state.players[plr].stats.intl;
 
-          // Define the ranges of INTL stat and the corresponding messages that will be shown to the player
           const detailRanges = [
             { min: 0, max: 10, msg: detail1 },
             { min: 10, max: 20, msg: detail2 },
@@ -22389,32 +20648,28 @@ function MCPV5Create_true_auto_stats() {
             { min: 90, max: Infinity, msg: detail10 }
           ];
 
-          // Iterate through the defined ranges to find the appropriate level of detail based on the player's INTL stat
           for (let range of detailRanges) {
             if (plrIntl >= range.min && plrIntl < range.max) {
-              // Add the relevant detail message to the text
+
               scoutFlavorText = ` ${toCoOpLang(plr, `${range.msg[randomInt(0, range.msg.length - 1)]}`)} `;
 
-              // Award the player INTL experience for successfully performing a scout action
               statUp(plr, "intl", randomFloat(0.01, 2));
-              break; // Stop checking once the correct range is found
+              break;
             }
           }
 
-          // Check for the possibility of a lucky scout action based on the player's luck stat
           scoutLuckRoll = randomInt(1, 100);
           log("scoutLuckRoll: " + scoutLuckRoll);
 
           if (scoutLuckRoll <= state.players[plr].stats.lck && scoutLuckRoll >= 1) {
-            // If the luck roll is successful, add a lucky phrase to the result
+
             scoutFlavorText = scoutFlavorText + ` ${toCoOpLang(plr, `${graspPhrases[randomInt(0, graspPhrases.length - 1)]} ${luckyPhrases[randomInt(0, luckyPhrases.length - 1)]}.`)} `;
 
-            // Grant the player luck exp for using luck
             statUp(plr, "lck", randomFloat(0.01, 2));
           }
 
           storeStatsToSC();
-        } // End of startScout
+        }
 
         newText = newText + plrText[plr] + scoutFlavorText;
       });
@@ -22428,11 +20683,9 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  // Function that detects when a player defends. Defense effectiveness based on plr DEF stat
   function detectDefend(text) {
     let newText = "";
 
-    // Verify player is not dialoguing
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
@@ -22441,7 +20694,7 @@ function MCPV5Create_true_auto_stats() {
     });
 
     if (dialogueFlag) {
-      // Check which players are in the input and store their name and corresponding text
+
       const result = separateByPlr(text);
       const plrsDetected = Object.keys(result);
       const plrText = {};
@@ -22454,20 +20707,16 @@ function MCPV5Create_true_auto_stats() {
         let startDefend = false;
         let defendFlavorText = "";
 
-        // If the player isn't dialoguing, proceed to check for defend-related words
         defendTextInput = [];
 
-        // Find defend-related words within the input and split the input accordingly
         defendTextInput = findTargetsThenSplit(plrText[plr], defendWords, true);
         log("defendTextInput simplified: " + defendTextInput);
 
-        // If the input contains defend words, find their indices in the text
         if (defendTextInput != null) {
           allDefendWordIndices = [];
           allDefendWordIndices = indicesOfTargets(defendTextInput, defendWords);
           log("allDefendWordIndices:" + allDefendWordIndices);
 
-          // Check if the sentence starts with "you + defend" or "and + defend" to trigger defend action
           if (allDefendWordIndices != null) {
             startDefend = checkYouBeforeIndicesArr(plr, defendTextInput, allDefendWordIndices, 3) || checkAndBeforeIndicesArr(defendTextInput, allDefendWordIndices, 2);
             log("startDefend: " + startDefend);
@@ -22478,7 +20727,6 @@ function MCPV5Create_true_auto_stats() {
           const plrDef = state.players[plr].stats.def;
           const plrLck = state.players[plr].stats.lck;
 
-          // Define DEF tiers (adjust these ranges as needed)
           const defendRanges = [
             { min: 0, max: 10, phrases: defendTiers.tier1 },
             { min: 10, max: 20, phrases: defendTiers.tier2 },
@@ -22500,7 +20748,6 @@ function MCPV5Create_true_auto_stats() {
             }
           }
 
-          // Luck bonus (optional)
           const luckRoll = randomInt(1, 100);
           if (luckRoll <= plrLck && luckRoll >= 1) {
             defendFlavorText += ` ${toCoOpLang(plr, `${graspPhrases[randomInt(0, graspPhrases.length - 1)]} ${luckyPhrases[randomInt(0, luckyPhrases.length - 1)]}.`)}`;
@@ -22525,8 +20772,6 @@ function MCPV5Create_true_auto_stats() {
   function detectExercise(text) {
     let newText = "";
 
-
-    // Verify player is not dialoguing
     dialogueFlag = true;
     dialoguePhrases.forEach(phrase => {
       if (text.toLowerCase().includes(phrase.toLowerCase())) {
@@ -22535,7 +20780,7 @@ function MCPV5Create_true_auto_stats() {
     });
 
     if (dialogueFlag == true) {
-      // Check which players are in the input and store their name and corresponding text
+
       const result = separateByPlr(text);
       const plrsDetected = Object.keys(result);
       const plrText = {};
@@ -22549,20 +20794,16 @@ function MCPV5Create_true_auto_stats() {
         let isDoing = false;
         let exerciseFlavorText = "";
 
-        // If the player isn't dialoguing, proceed to check for exercise-related words
         exerciseTextInput = [];
 
-        // Find exercise-related words within the input and split the input accordingly
         exerciseTextInput = findTargetsThenSplit(plrText[plr], exerciseWords, true);
         log("exerciseTextInput simplified: " + exerciseTextInput);
 
-        // If the input contains exercise words, find their indices in the text
         if (exerciseTextInput != null) {
           allExerciseWordIndices = [];
           allExerciseWordIndices = indicesOfTargets(exerciseTextInput, exerciseWords);
           log("allExerciseWordIndices:" + allExerciseWordIndices);
 
-          // Check if the sentence starts with "you + exercise" or "and + exercise" to trigger exercise action
           if (allExerciseWordIndices != null) {
             startExercise = checkYouBeforeIndicesArr(plr, exerciseTextInput, allExerciseWordIndices, 3) || checkAndBeforeIndicesArr(exerciseTextInput, allExerciseWordIndices, 2);
             log("startExercise: " + startExercise);
@@ -22617,7 +20858,6 @@ function MCPV5Create_true_auto_stats() {
           state.players[plr].stats.maxEp += maxEpGain;
           state.players[plr].stats.maxEp = Math.floor(state.players[plr].stats.maxEp * 100) / 100;
 
-
           storeStatsToSC();
 
           exerciseFlavorText = toCoOpLang(plr, `${exerciseResultPhrases[randomInt(0, exerciseResultPhrases.length - 1)].replace("[num]", `${finishedReps}`)}`);
@@ -22636,58 +20876,40 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
-  //persistent injuries
-  //race evos
-  //add random skill learning, make it context based
-  //spiritualism increases luck
-  //buff and debuff
-  //add exp reward for killing
-  //add reading
-  //add armor, you put the helmet "on your head"
-  //time skip
-
   function run(tab) {
     if (tab === "input") {
       return (function () {
-        // TAS Input Script
 
-        const modifier = (text) => { 
+        const modifier = (text) => {
           text = onInput_TAS(text);
 
           return { text }
-        }//end of modifier
+        }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
     if (tab === "context") {
       return (function () {
-        // TAS Context Script
 
-        // Every script needs a modifier function
         const modifier = (text) => {
           text = onContext_TAS(text);
-         
+
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
     if (tab === "output") {
       return (function () {
-        // TAS Output Script
 
-        // Every script needs a modifier function
         const modifier = (text) => {
           text = onOutput_TAS(text);
-         
-          return { text }
-        }//end of modifier
 
-        // Don't modify this part
+          return { text }
+        }
+
         return modifier(text);
       })();
     }
@@ -22698,23 +20920,14 @@ function MCPV5Create_true_auto_stats() {
 }
 
 function MCPV5Create_story_arc_engine() {
-  // Library Script
-
-  // Story Arc Engine Script by Yi1i1i
-
-  /* Credits: 
-    LewdLeah - Idea for AI calling, debugging, testing, feedback
-    Purplejump - Testing, feedback
-  */
 
   onLibrary_SAE();
   function onLibrary_SAE(){
-    // Update settingsSC at start of every hook
+
     createIfNoSettingsSC();
     retrieveSettingsFromSC();
     storeSettingsToSC();
-    
-    // Update ArcSC at the start of every hook
+
     createIfNoArcSC();
     retrieveArcFromSC();
     storeArcToSC();
@@ -22746,7 +20959,6 @@ function MCPV5Create_story_arc_engine() {
     text = feedStoryArc(text);
 
     text = logContextToSettingsSC(text);
-    //log(text);
 
     return text;
   }
@@ -22759,11 +20971,8 @@ function MCPV5Create_story_arc_engine() {
     text = helpCommandOutput_SAE(text);
 
     text = saveStoryArc(text);
-    //log("state.storyArc", state.storyArc);
 
     text = callAIForArc(text);
-
-    //log(text);
 
     arcElementRemoval();
 
@@ -22776,9 +20985,9 @@ function MCPV5Create_story_arc_engine() {
     if(text.includes("/help sae")){
       text = " ";
 
-      state.commandCenter_SAE = 
+      state.commandCenter_SAE =
       `
-      << 
+      <<
       STORY ARC ENGINE By Yi1i1i
       - Story Arc Engine calls the AI to create a story arc in the Author's notes to better guide future storytelling.
       - Type "Story Arc" into story cards to access and modify settings. Logs are logged in the notes.
@@ -22806,23 +21015,21 @@ function MCPV5Create_story_arc_engine() {
     return text;
   }
 
-  // Prompt to be fed to AI context
   state.arcPrompt = state.arcPrompt || [`
-  <<</SYSTEM>  
-  - Stop the story.  
-  - Only write a structured story arc outline for the future succeeding the current story by following these strict instructions:  
-  - Write a numbered list of 11 major events within the story arc.  
-  - Each event must be under 7 words.  
-  - Events must be in chronological order.  
-  - Each event must build on the last and be further in the future.  
-  - Dont write clichés, dialogue, description, and prose.  
-  - Dont write the protagonist, main character, and player.  
-  - Use only brief, non rigid, high-level story developments.  
-  - Events contain turning points, twists, discoveries, conflicts, motives, and lore.  
+  <<</SYSTEM>
+  - Stop the story.
+  - Only write a structured story arc outline for the future succeeding the current story by following these strict instructions:
+  - Write a numbered list of 11 major events within the story arc.
+  - Each event must be under 7 words.
+  - Events must be in chronological order.
+  - Each event must build on the last and be further in the future.
+  - Dont write clichés, dialogue, description, and prose.
+  - Dont write the protagonist, main character, and player.
+  - Use only brief, non rigid, high-level story developments.
+  - Events contain turning points, twists, discoveries, conflicts, motives, and lore.
   - Maintain immersion and consistent narrative tone.>>`
   ];
 
-  // Initialize variables
   if(state.stop_SAE == undefined){
     state.stop_SAE = false
   }
@@ -22854,24 +21061,20 @@ function MCPV5Create_story_arc_engine() {
   state.turnsPerAICall = state.turnsPerAICall || 35;
   log("state.turnsPerAICall: " + state.turnsPerAICall);
 
-  // SAE Functions
-  // Increment turn counter at end of onOutput
   function turnCounter_SAE(){
     state.turnNum_SAE += 1;
     log("state.turnNum_SAE: " + state.turnNum_SAE);
   }
 
-  // Remove script texts to clean AI context
   function removeAngleText(text) {
     return text.replace(/<<[\s\S]*?>>/g, '');
   }
 
   function createIfNoArcSC(){
     if (!storyCards.find(sc => sc.title === "Current Story Arc")) {
-      // If sc doesn't exist, create it
+
       addStoryCard("Current Story Arc", "", "Current Story Arc");
 
-      // Fetch the sc
       const arcSC = storyCards.find(sc => sc.title === "Current Story Arc");
       arcSC.keys = "/Current Story Arc"
       arcSC.description = "SPOILERS! This story card stores the story arc being fed to the AI to improve storytelling. Feel free to modify the contents.";
@@ -22879,14 +21082,14 @@ function MCPV5Create_story_arc_engine() {
   }
 
   function storeArcToSC(){
-    // Fetch the sc
+
     const arcSC = storyCards.find(sc => sc.title === "Current Story Arc");
 
     arcSC.entry = state.storyArc;
   }
 
   function retrieveArcFromSC(){
-    // Fetch the sc
+
     const arcSC = storyCards.find(sc => sc.title === "Current Story Arc");
 
     state.storyArc = arcSC.entry;
@@ -22894,10 +21097,9 @@ function MCPV5Create_story_arc_engine() {
 
   function createIfNoSettingsSC(){
     if (!storyCards.find(sc => sc.title === "Story Arc Settings")) {
-      // If sc doesn't exist, create it
+
       addStoryCard("Story Arc Settings", "", "Story Arc Settings");
 
-      // Fetch the sc
       const settingsSC = storyCards.find(sc => sc.title === "Story Arc Settings");
       settingsSC.description = `
       Type /help sae for more info.
@@ -22911,17 +21113,16 @@ function MCPV5Create_story_arc_engine() {
   }
 
   function storeSettingsToSC(){
-    // Fetch the sc
+
     const settingsSC = storyCards.find(sc => sc.title === "Story Arc Settings");
 
     settingsSC.entry = `stop_SAE = ${state.stop_SAE}\nturnsPerAICall = ${state.turnsPerAICall}\nattemptLimit = ${state.attemptLimit}\nturnsPerElemRemoval = ${state.turnsPerElemRemoval}\narcPrompt = ${state.arcPrompt}`
   }
 
   function retrieveSettingsFromSC(){
-    // Fetch the sc
+
     const settingsSC = storyCards.find(sc => sc.title === "Story Arc Settings");
 
-    // Extract stop_SAE
     const stopSAEMatch = settingsSC.entry.match(/stop_SAE\s*=\s*([A-Za-z]+)/);
     if(stopSAEMatch == null){
     }
@@ -22933,25 +21134,21 @@ function MCPV5Create_story_arc_engine() {
     }
     log("state.stop_SAE: " + state.stop_SAE)
 
-    // Extract turnsPerAICall
     const turnsMatch = settingsSC.entry.match(/turnsPerAICall\s*=\s*(\d+)/);
     if (turnsMatch) {
       state.turnsPerAICall = Number(turnsMatch[1]) ?? state.turnsPerAICall;
     }
 
-    // Extract attemptLimit
     const limitMatch = settingsSC.entry.match(/attemptLimit\s*=\s*(\d+)/);
     if (limitMatch) {
       state.attemptLimit = Number(limitMatch[1]) ?? state.attemptLimit;
     }
 
-    // Extract turnsPerElemRemoval
     const removalMatch = settingsSC.entry.match(/turnsPerElemRemoval\s*=\s*(\d+)/);
     if (removalMatch) {
       state.turnsPerElemRemoval = Number(removalMatch[1]) ?? state.turnsPerElemRemoval;
     }
 
-    // Extract arcPrompt block
     const promptMatch = settingsSC.entry.match(/arcPrompt\s*=\s*(<<[\s\S]*?>>)/);
     if (promptMatch) {
       state.arcPrompt = promptMatch[1];
@@ -22959,17 +21156,14 @@ function MCPV5Create_story_arc_engine() {
 
   }
 
-  // On output, waits for the correct turn to call AI for generating story arc
   function callAIForArc(text){
     if (state.turnNum_SAE == 1 || state.turnNum_SAE % state.turnsPerAICall === 0) {
-      // Warn player of AI call next turn
+
       text = text + "\n\n<< ⚠️ Updating Story Arc Next Turn! Click 'Continue' or type '/stop'. >>";
 
-      // Unlock feed prompt to AI for onContext
       state.unlockFeedAIPrompt = true;
       log("state.unlockFeedAIPrompt: " + state.unlockFeedAIPrompt);
 
-      // Unlock save resulting output to save story arc for next onOutput
       state.saveOutput = true;
       log("state.saveOutput: " + state.saveOutput);
     }
@@ -22977,25 +21171,21 @@ function MCPV5Create_story_arc_engine() {
     return text;
   }
 
-  // After AI is called, this function will feed the prompt onContext for AI to create a story arc
   function feedAIPrompt(text){
     if(state.unlockFeedAIPrompt){
       text = text + " " + state.arcPrompt;
 
-      // Turn off after done feeding
       state.unlockFeedAIPrompt = false;
     }
 
     return text;
   }
 
-  // After AI call and prompt is fed to context, this function saves the generated story arc during the following output hook
   function saveStoryArc(text){
     if(state.saveOutput){
-      // Copy the generated story arc from the output text
+
       outputtedArc = text;
 
-      // Clean story arc text to ensure no incomplete numbered lines
       log("Before: ", outputtedArc);
       outputtedArc = outputtedArc.replace(/\n?\d+\.\s*$/, '');
       outputtedArc = outputtedArc
@@ -23004,9 +21194,8 @@ function MCPV5Create_story_arc_engine() {
         .join('\n');
       log("After: ", outputtedArc);
 
-      // Incorrect story arc formatting recalls AI
       if (!/[89]/.test(outputtedArc)) {
-        // SAE Attempt Limit
+
         if (state.attemptCounter == state.attemptLimit) {
           state.saveOutput = false;
 
@@ -23024,7 +21213,7 @@ function MCPV5Create_story_arc_engine() {
           text = `\n<< ⏳ Generating Story Arc (Attempt ${state.attemptCounter}/${state.attemptLimit})... Click 'Continue' or type '/stop'. >>`;
         }
       }
-      // Correct story arc formatting gets saved
+
       else {
         state.attemptCounter = 0;
 
@@ -23032,11 +21221,9 @@ function MCPV5Create_story_arc_engine() {
 
         text = "\n<< ✅ Story Arc generated and saved! Click 'Continue'. >>\n\n";
 
-        // Fetch the sc and log the previous arc in sc notes
         const arcSC = storyCards.find(sc => sc.title === "Current Story Arc");
         arcSC.description = `Log ${state.turnNum_SAE} | Previous Story Arc:\n${arcSC.entry}\n` + arcSC.description;
 
-        // Trim notes on char limit to prevent memory overfill
         if (arcSC.description.length > 3000) {
           halfIndex = Math.floor(arcSC.description.length / 2);
           arcSC.description = arcSC.description.slice(0, halfIndex);
@@ -23044,10 +21231,8 @@ function MCPV5Create_story_arc_engine() {
           console.log("Trimming arcSC description to prevent memory overload.");
         }
 
-        // Save the new story arc to the sc
         storeArcToSC();
 
-        // Turn off save output when done saving story arc
         state.saveOutput = false;
 
       }
@@ -23056,9 +21241,8 @@ function MCPV5Create_story_arc_engine() {
     return text;
   }
 
-  // Feeds the Story Arc into the Author's Note in the AI context every turn
   function feedStoryArc(text){
-    // Ensure story arc is fed only when a new story arc is not being generated
+
     if(state.saveOutput == false){
       text = text.replace(
         /(\[Author's note: [\s\S]*?)(])/,
@@ -23097,7 +21281,7 @@ function MCPV5Create_story_arc_engine() {
   function logContextToSettingsSC(text){
     // Fetch the sc
     const settingsSC = storyCards.find(sc => sc.title === "Story Arc Settings");
-    
+
     // Trim notes on char limit to prevent memory overfill
     if(settingsSC.description.length > 3000){
       halfIndex = Math.floor(settingsSC.description.length / 2);
@@ -23139,8 +21323,8 @@ function MCPV5Create_story_arc_engine() {
   // Remove the first plot element in story arc every set turn to help clean and progress story arc
   function arcElementRemoval(){
     if(state.saveOutput == false
-    && state.turnNum_SAE >= 5 
-    && state.turnNum_SAE % state.turnsPerElemRemoval == 0 
+    && state.turnNum_SAE >= 5
+    && state.turnNum_SAE % state.turnsPerElemRemoval == 0
     && state.turnsPerElemRemoval !== 0
     ){
       // Fetch the sc and log the previous arc in sc notes
@@ -23158,7 +21342,6 @@ function MCPV5Create_story_arc_engine() {
       log("\narcElementRemoval ran.")
     }
   }
-
 
   function run(tab) {
     if (tab === "input") {
@@ -23178,33 +21361,25 @@ function MCPV5Create_story_arc_engine() {
     }
     if (tab === "context") {
       return (function () {
-        //Context Script
 
-
-        // Every script needs a modifier function
-        const modifier = (text) => { 
+        const modifier = (text) => {
           text = onContext_SAE(text);
-          
+
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
     if (tab === "output") {
       return (function () {
-        //Output Script
 
-
-        // Every script needs a modifier function
         const modifier = (text) => {
           text = onOutput_SAE(text);
-           
+
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
@@ -23216,52 +21391,48 @@ function MCPV5Create_story_arc_engine() {
 
 function MCPV5Create_narrative_governor() {
 
-
   function run(tab) {
     if (tab === "input") {
       return (function () {
-        /* === STORY ARC CONFIGURATION === */
 
-        state.initialHeatValue = 0 //Increasing this will increase the chance of the temperature increasing in the first few moments of the story.
-        state.initialTemperatureValue = 1 //Increasing this will increase the amount of conflict and tension in the initial sections of the story.
-        state.temperatureIncreaseChance = 15 //Increasing this value makes the conflict and tension in the story advance quicker.
+        state.initialHeatValue = 0
+        state.initialTemperatureValue = 1
+        state.temperatureIncreaseChance = 15
 
-        state.heatIncreaseValue = 1 //Increasing this value makes the temperature increase more often, creating a faster paced story.
-        state.temperatureIncreaseValue = 1 //Increasing this value makes the conflit and tension in the story advance by larger segments, so the story will feel less like a gradual slope of tension and more like big steps.
+        state.heatIncreaseValue = 1
+        state.temperatureIncreaseValue = 1
 
-        state.playerIncreaseHeatImpact = 2 //The impact that the player has on increasing the conflict, so if the player attacks an NPC or does something drama inducing, the conflict and tension will increase by this amount.
-        state.playerDecreaseHeatImpact = 2 //The impact that the player has on decreasing the conflict, so if the player helps others or is doing something relaxing, the conflict and tension will decrease by this amount.
-        state.playerIncreaseTemperatureImpact = 1 //The impact that the player has on increasing the conflict, so if the player attacks an NPC or does something drama inducing, the conflict and tension will increase by this amount.
-        state.playerDecreaseTemperatureImpact = 1 //The impact that the player has on decreasing the conflict, so if the player helps others or is doing something relaxing, the conflict and tension will decrease by this amount.
-        state.threshholdPlayerIncreaseTemperature = 2 //This is the number of conflict words that have to be said by the player in their input in order to increase the temperature.
-        state.threshholdPlayerDecreaseTemperature = 2 //This is the number of calming words that have to be said by the player in their input in order to decrease the temperature.
+        state.playerIncreaseHeatImpact = 2
+        state.playerDecreaseHeatImpact = 2
+        state.playerIncreaseTemperatureImpact = 1
+        state.playerDecreaseTemperatureImpact = 1
+        state.threshholdPlayerIncreaseTemperature = 2
+        state.threshholdPlayerDecreaseTemperature = 2
 
-        state.modelIncreaseHeatImpact = 1 //The impact that the AI model has on increasing the conflict.
-        state.modelDecreaseHeatImpact = 2 //The impact that the AI model has on decreasing the conflict.
-        state.modelIncreaseTemperatureImpact = 1 //The impact that the AI model has on increasing the conflict.
-        state.modelDecreaseTemperatureImpact = 1 //The impact that the AI model has on decreasing the conflict.
-        state.threshholdModelIncreaseTemperature = 3 //This is the number of conflict words that have to be said by the AI Model in in order to increase the temperature.
-        state.threshholdModelDecreaseTemperature = 3 //This is the number of conflict words that have to be said by the AI Model in in order to decrease the temperature.
+        state.modelIncreaseHeatImpact = 1
+        state.modelDecreaseHeatImpact = 2
+        state.modelIncreaseTemperatureImpact = 1
+        state.modelDecreaseTemperatureImpact = 1
+        state.threshholdModelIncreaseTemperature = 3
+        state.threshholdModelDecreaseTemperature = 3
 
-        state.maximumTemperature = 12 //This is the maximum level of conflict the story can get to. Lower values make for a more calm experience, while higher values can make the story go overboard with the AI trying to kill you at every step. Be careful with this value, as it can get out of hand quite quickly.
-        state.trueMaximumTemperature = 15 //This determines the actual maximum temperature, as random explosions can cause the normal maxmium temperature to increase beyond its normal state. Players cannot cause the temperature to increase beyond the normal maximum. !WARNING! TRUE MAXIMUM TEMPERATURE VALUES ABOVE 15 CAN CAUSE CHAOTIC AND HIGHLY DESTRUCTIVE EVENTS TO RUIN YOUR STORY. ONLY ENABLE VALUES ABOVE 15 IF YOU WANT A REALLY PUNISHING EXPERIENCE.
+        state.maximumTemperature = 12
+        state.trueMaximumTemperature = 15
 
-        state.minimumTemperature = 1 //This determines the lowest value that the player can get the temperature to. Systems like AI influence can reduce it to whatever the true minimum temperature value is.
-        state.trueMinimumTemperature = 1 //This determines the true lowest value that the temperature can get to. No system can set the value of the temperature to anything lower.
+        state.minimumTemperature = 1
+        state.trueMinimumTemperature = 1
 
-        state.overheatTimer = 4 //After the maximum temperature is reached, the script will go into overheat mode, meaning that after this many actions, the temperature will start to decrease. This is good if you want your maximum tension point to last multiple actions before calming down.
-        state.overheatReductionForHeat = 5 //After the overheat timer is over, the temperature will decrease by this amount. A higher number will make the story much calmer after the maxmium temperature point, a lower number will make the action decrease more gradually.
-        state.overheatReductionForTemperature = 1 //After the overheat timer is over, the temperature will decrease by this amount. A higher number will make the story much calmer after the maxmium temperature point, a lower number will make the action decrease more gradually.
+        state.overheatTimer = 4
+        state.overheatReductionForHeat = 5
+        state.overheatReductionForTemperature = 1
 
-        state.cooldownTimer = 5 //After the overheat timer is over, this cooldown timer determines the number of actions the story will take before being able to increase the temperature and conflict again. A higher value will allow the player to have more downtime, a lower value will push the player to jump into the next conflict faster.
-        state.cooldownRate = 2 //For each action that the cooldown phase goes for, the temperature will reduce by this amount. A higher value will make the temperature decrease more rapidly, a lower value will make the cooldown more of a gradual slope.
+        state.cooldownTimer = 5
+        state.cooldownRate = 2
 
-        state.randomExplosionChance = 3 //This determines the percent chance that the story will suddenly have the temperature increased by a large value.
-        state.randomExplosionHeatIncreaseValue = 5 //This determines the impact of the random temperature increase. A higher value will make the story suddenly have something crazy happen, a lower value will make more of a mild surprise.
-        state.randomExplosionTemperatureIncreaseValue = 2 //This determines the impact of the random temperature increase. A higher value will make the story suddenly have something crazy happen, a lower value will make more of a mild surprise.
+        state.randomExplosionChance = 3
+        state.randomExplosionHeatIncreaseValue = 5
+        state.randomExplosionTemperatureIncreaseValue = 2
 
-
-        /* DONT MODIFY ANYTHING BEYOND THIS POINT */
         function randomint(min, max) {
           min = Math.ceil(min)
           max = Math.floor(max)
@@ -23309,7 +21480,7 @@ function MCPV5Create_narrative_governor() {
                 log(`Detected ${conflictCount} conflict words (Player). Increasing heat.`)
               }
             }
-            
+
             if (calmingCount > 0) {
               state.heat -= conflictCount * state.playerDecreaseHeatImpact
               if (calmingCount >= state.threshholdPlayerDecreaseTemperature){
@@ -23380,7 +21551,7 @@ function MCPV5Create_narrative_governor() {
 
           if (state.cooldownMode == false){
             log("cooldownMode false, deploying prompt")
-          //Non-Optimized Story Prompts
+
             if (state.storyTemperature == 1) {
               state.originalAuthorsNote = "Story Phase: Introduction. Introduce characters and locations. There should be no conflict or tension in the story. "
             }
@@ -23427,33 +21598,33 @@ function MCPV5Create_narrative_governor() {
               state.originalAuthorsNote = "Story Phase: Climax. Advance the climax of the story. Emphisise major conflict. Push the characters to their limits. Punish bad decisions that the characters make. Be unfair at times, but make unfairness in the story make sense with the current plot. "
             }
             if (state.storyTemperature == 16) {
-              //!WARNING! IT IS NOT RECOMMENDED FOR YOUR STORY TO GET TO THIS STATE. ONLY ENABLE YOUR TRUE MAXIMUM TEMPERATURE TO THIS VALUE IF YOU REALLY REALLY WANT IT TO BE PUNISHING.
+
               state.originalAuthorsNote = "Story Phase: Ultimate Climax. Emphisise increadibly difficult conflict. Push the characters to their limits. Punish bad decisions that the characters make. Be unfair at times. "
             }
             if (state.storyTemperature == 17) {
-              //!WARNING! IT IS NOT RECOMMENDED FOR YOUR STORY TO GET TO THIS STATE. ONLY ENABLE YOUR TRUE MAXIMUM TEMPERATURE TO THIS VALUE IF YOU REALLY REALLY WANT IT TO BE PUNISHING.
+
               state.originalAuthorsNote = "Story Phase: Ultimate Climax. Emphisise insanely difficult conflict. Push the characters to their absolute limits. Punish bad decisions that the characters make. Make the challenges unfair for characters. "
             }
             if (state.storyTemperature == 18) {
-              //!WARNING! IT IS NOT RECOMMENDED FOR YOUR STORY TO GET TO THIS STATE. ONLY ENABLE YOUR TRUE MAXIMUM TEMPERATURE TO THIS VALUE IF YOU REALLY REALLY WANT IT TO BE PUNISHING.
+
               state.originalAuthorsNote = "Story Phase: Ultimate Climax. Emphisise insanely difficult conflict. Push the characters to their absolute limits. Heavily punish bad decisions that the characters make. Make the challenges increadibly unfair. "
             }
             if (state.storyTemperature == 19) {
-              //!WARNING! IT IS NOT RECOMMENDED FOR YOUR STORY TO GET TO THIS STATE. ONLY ENABLE YOUR TRUE MAXIMUM TEMPERATURE TO THIS VALUE IF YOU REALLY REALLY WANT IT TO BE PUNISHING.
+
               state.originalAuthorsNote = "Story Phase: Ultimate Climax. Emphisise impossibly difficult conflict. Push the characters to their absolute limits. Very heavily punish bad decisions that the characters make. Make the challenges increadibly unfair. "
             }
             if (state.storyTemperature == 20) {
-              //!WARNING! IT IS NOT RECOMMENDED FOR YOUR STORY TO GET TO THIS STATE. ONLY ENABLE YOUR TRUE MAXIMUM TEMPERATURE TO THIS VALUE IF YOU REALLY REALLY WANT IT TO BE PUNISHING.
+
               state.originalAuthorsNote = "Story Phase: Omega Insane Ultimate Climax of Doom. Emphisise insanely difficult conflict. Push the characters to their absolute limits. Very heavily punish bad decisions that the characters make. Make the challenges increadibly unfair. There is no success. "
             }
             if (state.storyTemperature > 20) {
-              //!WARNING! IT IS NOT RECOMMENDED FOR YOUR STORY TO GET TO THIS STATE. ONLY ENABLE YOUR TRUE MAXIMUM TEMPERATURE TO THIS VALUE IF YOU REALLY REALLY WANT IT TO BE PUNISHING.
+
               state.originalAuthorsNote = "Story Phase: Apocalypse. Emphisise impossible conflict. There is no success. Make challenges blatently unfair. Punish every decision. Actively attempt to push the characters away from their goal in any way possible. "
             }
           }
           else{
             log("cooldownMode true, deploying alternate prompt")
-          //Cooldown Prompts
+
             if (state.storyTemperature <= 1) {
               state.cooldownMode = false
             }
@@ -23515,11 +21686,10 @@ function MCPV5Create_narrative_governor() {
               state.originalAuthorsNote = "Story Phase: Omega Extreme Falling Action. Tension and conflict is still extremely high. "
             }
           }
-          // state.authorsNoteStorage = state.memory.authorsNote
+
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
@@ -23530,14 +21700,11 @@ function MCPV5Create_narrative_governor() {
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
     if (tab === "output") {
       return (function () {
-
-        //DO NOT CHANGE ANYTHING HERE (Exept the conflict & calming word strings if you want to make them better)
 
         const conflictWords = [
           "attack", "stab", "destroy", "break", "steal", "ruin", "burn", "smash", "sabotage", "disrupt",
@@ -23583,10 +21750,9 @@ function MCPV5Create_narrative_governor() {
           "quiet", "still", "calming", "relief", "refresh",
           "bloom", "grow", "flourish", "thrive", "prosper",
           "sunshine", "meadow", "breeze", "ocean", "forest",
-          "garden", "music", "lullaby", "whisper", "embrace", 
+          "garden", "music", "lullaby", "whisper", "embrace",
           "together", "happiness", "peaceful", "kindness", "charity"
         ];
-
 
         const modifier = (text) => {
           const lowerText = text.toLowerCase()
@@ -23614,7 +21780,7 @@ function MCPV5Create_narrative_governor() {
               log(`Detected ${conflictCount} conflict words (AI). Increasing heat.`)
             }
           }
-          
+
           if (calmingCount > 0) {
             state.heat -= calmingCount * state.modelDecreaseHeatImpact
             if (calmingCount >= state.threshholdModelDecreaseTemperature){
@@ -23636,17 +21802,11 @@ function MCPV5Create_narrative_governor() {
             log("Temperature under minimum, recalibrating...")
           }
 
-
-          // if (state.memory.authorsNote == state.originalAuthorsNote){
-          //   state.memory.authorsNote = state.authorsNoteStorage
-          // }
-
           log("Heat: " + state.heat)
           log("Temperature: " + state.storyTemperature)
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
@@ -23662,12 +21822,6 @@ function MCPV5Create_stackable_inventory() {
   const addStoryCard = MCPV5CardAPI.addStoryCard;
   const updateStoryCard = MCPV5CardAPI.updateStoryCard;
   const removeStoryCard = MCPV5CardAPI.removeStoryCard;
-  // ===== Stackable Inventory System & Wallet (SIS) v 0.7 =====
-  // script by bottledfox
-
-  // ---------------------------------------------------------------------------
-  // 0) Constants
-  // ---------------------------------------------------------------------------
 
   const INVENTORY_CARD_NAME = "Inventory";
   const INVENTORY_HEADER    = "## Inventory";
@@ -23676,18 +21830,12 @@ function MCPV5Create_stackable_inventory() {
   const CUSTOM_COMMAND_HEADER    = "## Custom Commands";
   const INVENTORY_ITEM_CAP  = 99;
 
-  // ---------------------------------------------------------------------------
-  // 1) Inventory & Wallet State
-  // ---------------------------------------------------------------------------
-
-  // State guard: ensure state.vars.inventory exists and is an array
   function ensureInventoryState() {
     if (!state.vars) state.vars = {};
     if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
     return state.vars.inventory;
   }
 
-  // Case-insensitive count of a given item name in inventory
   function countInInventory(name) {
     if (!state.vars) state.vars = {};
     if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
@@ -23695,7 +21843,6 @@ function MCPV5Create_stackable_inventory() {
     return state.vars.inventory.filter(s => String(s).toLowerCase() === k).length;
   }
 
-  // Remove up to n copies of a given name (case-insensitive), scanning from the end
   function removeFromInventory(name, n) {
     if (!state.vars) state.vars = {};
     if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
@@ -23709,10 +21856,9 @@ function MCPV5Create_stackable_inventory() {
     return n - remaining;
   }
 
-  // Add up to `amount` copies without exceeding the cap.
   function addToInventoryCapped(name, amount, cap = INVENTORY_ITEM_CAP) {
     ensureInventoryState();
-    const have   = countInInventory(name);                 // case-insensitive
+    const have   = countInInventory(name);
     const want   = Math.max(0, amount | 0);
     const room   = Math.max(0, cap - have);
     const toAdd  = Math.min(want, room);
@@ -23749,25 +21895,19 @@ function MCPV5Create_stackable_inventory() {
     const w = ensureWalletState();
     const keys = Object.keys(w).filter(k => Number.isFinite(w[k]) && w[k] !== 0);
     if (keys.length === 0) return [`- (empty)`];
-    // stable alpha sort; feel free to swap to a priority list later
+
     keys.sort((a,b) => a.localeCompare(b));
     return keys.map(k => `- ${k}: ${w[k]}`);
   }
 
-  // ---------------------------------------------------------------------------
-  // 2) Card Builders
-  // ---------------------------------------------------------------------------
-
   function ensureCard(keys, type, entry, title) {
     if (!Array.isArray(storyCards)) return null;
 
-    // 1) If it exists, return the object
     let idx = storyCards.findIndex(c => c && c.keys === keys);
     if (idx >= 0) return storyCards[idx];
 
-    // 2) Create via API only
     if (typeof addStoryCard === "function") {
-      addStoryCard(keys, entry, type); // API is authoritative
+      addStoryCard(keys, entry, type);
 
       idx = storyCards.findIndex(c => c && c.keys === keys);
       if (idx >= 0) return storyCards[idx];
@@ -23775,7 +21915,6 @@ function MCPV5Create_stackable_inventory() {
     return null;
   }
 
-  // Story-card guard: ensure a single "Inventory" card exists in the global storyCards
   function ensureInventoryCard() {
     ensureInventoryState()
     const entry = `${WALLET_HEADER}\n- (empty)\n\n${INVENTORY_HEADER}\n- (empty)\n`;
@@ -23783,17 +21922,15 @@ function MCPV5Create_stackable_inventory() {
   }
 
   function rebuildInventoryCardFromState() {
-    const inv  = ensureInventoryState();     // should return an array (possibly empty)
-    const card = ensureInventoryCard();      // must return the card object (API-only ensure)
+    const inv  = ensureInventoryState();
+    const card = ensureInventoryCard();
 
     if (!card || typeof updateStoryCard !== "function" || !Array.isArray(storyCards)) return;
 
-    // --- wallet block (render first) ---
     const wl = (typeof renderWalletLines === "function") ? renderWalletLines() : [];
     const walletLines = Array.isArray(wl) ? wl : String(wl || "").split(/\r?\n/).filter(Boolean);
     const walletBlock = `${WALLET_HEADER}\n${walletLines.join("\n")}\n`;
 
-    // --- inventory list ---
     let invBlock;
     if (!Array.isArray(inv) || inv.length === 0) {
       invBlock = `${INVENTORY_HEADER}\n- (empty)\n`;
@@ -23812,7 +21949,6 @@ function MCPV5Create_stackable_inventory() {
 
     const entry = `${walletBlock}\n${invBlock}`;
 
-    // --- API-only update ---
     const idx = storyCards.findIndex(c => c && c.keys === (card.keys || INVENTORY_CARD_NAME));
     if (idx < 0) return;
 
@@ -23820,7 +21956,7 @@ function MCPV5Create_stackable_inventory() {
   }
 
   function ensureCustomCommandCard() {
-    const entry =   
+    const entry =
     `${CUSTOM_COMMAND_HEADER}
     Name: /example
     Type: add|remove
@@ -23833,14 +21969,8 @@ function MCPV5Create_stackable_inventory() {
     ensureCustomCommandCard?.();
   }
 
-  // ---------------------------------------------------------------------------
-  // 3) Parsing Helpers
-  // ---------------------------------------------------------------------------
-
-  // Escape a literal for safe insertion into a RegExp
   function rxEscape(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
-  // Try to match the name of an inventory item at the start of the args
   function matchItem(args, invOverride) {
     const argsStr = String(args || "").trim();
     if (!argsStr) return null;
@@ -23851,7 +21981,6 @@ function MCPV5Create_stackable_inventory() {
 
     if (!inv.length) return null;
 
-    // Build unique canonical names
     const seen = new Set();
     const uniq = [];
     for (const s of inv) {
@@ -23864,7 +21993,6 @@ function MCPV5Create_stackable_inventory() {
       }
     }
 
-    // Prefer longest to avoid prefix-capture collisions
     uniq.sort((a, b) => b.length - a.length);
 
     for (const name of uniq) {
@@ -23880,11 +22008,9 @@ function MCPV5Create_stackable_inventory() {
     return null;
   }
 
-  // Normalize AID "You ..." prefixes and anything before the first slash.
   function normalizeCommandText(text) {
     let t = String(text || "");
 
-    // Drop leading "> You ..." narrations and punctuation
     t = t.replace(/^\s*>\s*you\b[:\-]?\s*/i, "");
     t = t.replace(/^[^/]*?(?=\/)/, "");
     t = t.replace(/[.,]/g, "");
@@ -23893,7 +22019,6 @@ function MCPV5Create_stackable_inventory() {
     return t.trim();
   }
 
-  // Extract "/name" and the rest as args
   function parseSlashCommand(text) {
     const t = normalizeCommandText(text);
     const m = t.match(/^\/([a-z][a-z0-9_]*)\b(?:\s+(.*))?$/i);
@@ -23901,13 +22026,11 @@ function MCPV5Create_stackable_inventory() {
     return { name: m[1].toLowerCase(), args: (m[2] || "").trim() };
   }
 
-  // Split "a, b, c" into parts; trims whitespace and strips trailing ASCII periods
   function parseCSVArgs(argStr) {
     if (!argStr) return [];
     return argStr.split(",").map(s => s.trim().replace(/\.+$/, "")).filter(Boolean);
   }
 
-  // Try to match a wallet currency name at the start of args
   function matchWallet(args) {
     const tokens = String(args || "").trim().split(/\s+/).filter(Boolean);
     if (!tokens.length) return null;
@@ -23939,7 +22062,7 @@ function MCPV5Create_stackable_inventory() {
     const tokens = String(args || "").trim().split(/\s+/);
 
     if (/^\d+$/.test(tokens[0])) {
-      // Case A: amount first
+
       amount = parseInt(tokens[0], 10);
       const rest = tokens.slice(1).join(" ");
       let match = matchItem(rest) || matchWallet(rest);
@@ -23950,7 +22073,7 @@ function MCPV5Create_stackable_inventory() {
       amount = amtParse.amount;
       tail = parseTail(amtParse.remainder);
     } else {
-      // Case B: item first
+
       let match = matchItem(args) || matchWallet(args);
       if (!match) return null;
       itemName = match.itemName;
@@ -23959,11 +22082,10 @@ function MCPV5Create_stackable_inventory() {
       amount = amtParse.amount;
       tail = parseTail(amtParse.remainder);
     }
-    
+
     return { itemName, amount, tail };
   }
 
-  // Just turn leftover string into a tail (leading space if nonempty)
   function parseTail(argStr) {
     const t = String(argStr || "").trim();
     return t ? ` ${t}` : "";
@@ -23973,11 +22095,6 @@ function MCPV5Create_stackable_inventory() {
     return String(argStr || "").trim();
   }
 
-  // ---------------------------------------------------------------------------
-  // 4) Core Command Handlers
-  // ---------------------------------------------------------------------------
-
-  // /take command
   function handleTakeCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "take") return null;
@@ -23991,11 +22108,11 @@ function MCPV5Create_stackable_inventory() {
     const tokens = args.split(/\s+/);
 
     if (/^\d+$/.test(tokens[0])) {
-      // Case A: amount first
+
       amount = parseInt(tokens[0], 10);
       itemName = parseItemName(tokens.slice(1).join(" "));
     } else {
-      // Case B: item first (defaults to 1)
+
       itemName = parseItemName(args);
     }
 
@@ -24005,7 +22122,6 @@ function MCPV5Create_stackable_inventory() {
 
     ensureInventoryState();
 
-    // Gate like custom adds
     if (state?.vars?.awaitingGate) {
       return "⚠️ An inventory check is already in progress. Try again next turn.";
     }
@@ -24024,7 +22140,6 @@ function MCPV5Create_stackable_inventory() {
       : `You attempt to take ${amount} × ${itemName}...`;
   }
 
-  // /use command
   function handleUseCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "use") return null;
@@ -24037,14 +22152,13 @@ function MCPV5Create_stackable_inventory() {
     const have = countInInventory(itemName);
     if (have < 1) return `⚠️ You don't have any ${itemName}.`;
 
-    removeFromInventory(itemName, 1); // consume one item
+    removeFromInventory(itemName, 1);
     if (typeof rebuildInventoryCardFromState === "function") rebuildInventoryCardFromState();
 
     const tail = remainder ? ` ${remainder}` : "";
     return `You use ${itemName}${tail}`;
   }
 
-  // /drop command
   function handleDropCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "drop") return null;
@@ -24060,7 +22174,6 @@ function MCPV5Create_stackable_inventory() {
       return "⚠️ Amount must be a positive integer.";
     }
 
-    // --- Wallet branch ---
     if (walletAmount(itemName) > 0) {
       if (walletAmount(itemName) < amount) {
         return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
@@ -24073,7 +22186,6 @@ function MCPV5Create_stackable_inventory() {
         : `You drop ${amount} ${itemName}${tail}.`;
     }
 
-    // --- Inventory branch ---
     const have = countInInventory(itemName);
     if (have < amount) {
       return `⚠️ You only have ${have} × ${itemName}.`;
@@ -24088,7 +22200,6 @@ function MCPV5Create_stackable_inventory() {
       : `You drop ${amount} × ${itemName}${tail}.`;
   }
 
-  // /give command
   function handleGiveCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "give") return null;
@@ -24105,7 +22216,6 @@ function MCPV5Create_stackable_inventory() {
       return "⚠️ Amount must be a positive integer.";
     }
 
-    // --- Wallet branch ---
     if (walletAmount(itemName) > 0) {
       if (walletAmount(itemName) < amount) {
         return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
@@ -24120,7 +22230,6 @@ function MCPV5Create_stackable_inventory() {
         : `You give ${amount} ${itemName}${tail}.`;
     }
 
-    // --- Inventory branch ---
     const haveItems = countInInventory(itemName);
     if (haveItems < amount) {
       return `⚠️ You only have ${haveItems} × ${itemName}.`;
@@ -24136,7 +22245,6 @@ function MCPV5Create_stackable_inventory() {
       : `You give ${amount} × ${itemName}${tail}.`;
   }
 
-  // /throw command
   function handleThrowCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "throw") return null;
@@ -24152,7 +22260,6 @@ function MCPV5Create_stackable_inventory() {
       return "⚠️ Amount must be a positive integer.";
     }
 
-    // --- Wallet branch ---
     if (walletAmount(itemName) > 0) {
       if (walletAmount(itemName) < amount) {
         return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
@@ -24165,7 +22272,6 @@ function MCPV5Create_stackable_inventory() {
         : `You throw ${amount} ${itemName}${tail}.`;
     }
 
-    // --- Inventory branch ---
     const have = countInInventory(itemName);
     if (have < amount) {
       return `⚠️ You only have ${have} × ${itemName}.`;
@@ -24180,7 +22286,6 @@ function MCPV5Create_stackable_inventory() {
       : `You throw ${amount} × ${itemName}${tail}.`;
   }
 
-  // /collect command
   function handleCollectCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "collect") return null;
@@ -24198,11 +22303,11 @@ function MCPV5Create_stackable_inventory() {
     const tokens = args.split(/\s+/);
 
     if (/^\d+$/.test(tokens[0])) {
-      // Case A: amount first
+
       amount = parseInt(tokens[0], 10);
       currency = parseItemName(tokens.slice(1).join(" "));
     } else {
-      // Case B: currency first
+
       currency = parseItemName(args);
     }
 
@@ -24212,12 +22317,10 @@ function MCPV5Create_stackable_inventory() {
 
     state.vars.pendingCollect = { currency, amount };
 
-    // Kick off wallet gate
     startMoneyGate();
     return `You attempt to collect ${amount} ${currency}...`;
   }
 
-  // /undo command
   function handleUndoCommand(text) {
     const cmd = parseSlashCommand(text);
     if (!cmd || cmd.name !== "undo") return null;
@@ -24255,11 +22358,6 @@ function MCPV5Create_stackable_inventory() {
     return msg;
   }
 
-  // ---------------------------------------------------------------------------
-  // 5) Custom Commands System
-  // ---------------------------------------------------------------------------
-
-  // --- Read "Custom Commands" card config
   function readCustomCommandConfigs() {
     if (!Array.isArray(storyCards)) return [];
     const card = storyCards.find(c => c?.title === "Custom Commands");
@@ -24282,7 +22380,7 @@ function MCPV5Create_stackable_inventory() {
           if (typeof cur.multiples !== "boolean") cur.multiples = false;
           out.push(cur);
         }
-        const raw = m[1];                    // preserve as typed (no slash)
+        const raw = m[1];
         cur = { name: raw.toLowerCase(), label: raw, type: null, multiples: false };
         continue;
       }
@@ -24301,11 +22399,10 @@ function MCPV5Create_stackable_inventory() {
     }
 
     if (!state.vars) state.vars = {};
-    state.vars.customCommands = out;       // <-- store all parsed configs
+    state.vars.customCommands = out;
     return out;
   }
 
-  // --- Dynamic custom commands
   function handleCustomCommand(text) {
     const cfgs = readCustomCommandConfigs();
     if (!cfgs.length) return null;
@@ -24313,11 +22410,9 @@ function MCPV5Create_stackable_inventory() {
     const cmd = parseSlashCommand(text);
     if (!cmd) return null;
 
-    // If duplicate names exist, prefer the LAST definition in the card
     const cfg = [...cfgs].reverse().find(c => c.name === cmd.name);
-    if (!cfg) return null; // not a custom command; let other handlers try
+    if (!cfg) return null;
 
-    // Parse args. Parse adds permissively (like /take); removes still match stock.
     let parsed;
     if (cfg.type === "add") {
       const a = String(cmd.args || "").trim();
@@ -24331,7 +22426,7 @@ function MCPV5Create_stackable_inventory() {
           parsed = { itemName: a, amount: 1, tail: "" };
         }
       } else {
-        // Multiples off: the whole argument string is the item name, quantity 1.
+
         parsed = { itemName: a, amount: 1, tail: "" };
       }
       if (parsed && !parsed.itemName) parsed = null;
@@ -24350,9 +22445,8 @@ function MCPV5Create_stackable_inventory() {
     }
 
     ensureInventoryState();
-    const verb = cfg.label || cfg.name; // e.g. "stash", "donate"
+    const verb = cfg.label || cfg.name;
 
-    // ADD branch
     if (cfg.type === "add") {
       if (state?.vars?.awaitingGate) {
         return "⚠️ An inventory check is already in progress. Try again next turn.";
@@ -24372,8 +22466,6 @@ function MCPV5Create_stackable_inventory() {
         : `You attempt to ${verb} ${amount} × ${itemName}${tail}...`;
     }
 
-    // REMOVE branch
-    // --- Wallet branch ---
     if (walletAmount(itemName) > 0) {
       if (walletAmount(itemName) < amount) {
         return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
@@ -24388,7 +22480,6 @@ function MCPV5Create_stackable_inventory() {
         : `You ${verb} ${amount} ${itemName}${tail}`;
     }
 
-    // --- Inventory branch ---
     const have = countInInventory(itemName);
     if (have < amount) {
       return `⚠️ You only have ${have} × ${itemName}.`;
@@ -24405,14 +22496,9 @@ function MCPV5Create_stackable_inventory() {
       : `You ${verb} ${amount} × ${itemName}${tail}, removing them from your inventory.`;
   }
 
-  // ---------------------------------------------------------------------------
-  // 6) Gates (Validation Prompts)
-  // ---------------------------------------------------------------------------
-
-  // Start a 1-turn inventory gate via frontMemory (context-only)
   function startInventoryGate() {
     const prompt = `
-    <SYSTEM> 
+    <SYSTEM>
     You are the rules arbiter for inventory changes. Before narrating, quickly verify the requested change(s) against story context.
 
     Approve only if the item(s) are:
@@ -24441,7 +22527,7 @@ function MCPV5Create_stackable_inventory() {
     - Explicitly obtainable
     - Reasonable in quantity
     - Not a living creature
-    - Plausibly a currency in this story's setting 
+    - Plausibly a currency in this story's setting
 
     Output exactly one line (verbatim keys):
     APPROVE or REJECT
@@ -24462,21 +22548,15 @@ function MCPV5Create_stackable_inventory() {
     state.vars.awaitingGate = false;
   }
 
-  // Defensive clear of the gate's frontMemory prompt
   function removeGateText() {
     if (state?.memory) state.memory.frontMemory = "";
   }
-
-  // ---------------------------------------------------------------------------
-  // 7) Input & Output
-  // ---------------------------------------------------------------------------
 
   function SIS_onInput(text) {
     if (!state.vars) state.vars = {};
 
     ensureAllCards();
 
-    // --- 4) Command routing ---
     const reply =
       handleCollectCommand?.(text) ||
       handleCustomCommand?.(text)  ||
@@ -24491,13 +22571,13 @@ function MCPV5Create_stackable_inventory() {
   }
 
   function SIS_onOutput(text) {
-    // --- finalize gated operations depending on kind of gate (wallet vs inv) ---
+
     try {
       const kind    = state?.vars?.gateKind || null;
       const verdict = state?.vars?.lastGateVerdict || null;
 
       if (kind && verdict) {
-        // --- WALLET GATE ---
+
         if (kind === "wallet") {
           const p = state?.vars?.pendingCollect || null;
           if (p && p.currency && p.amount > 0) {
@@ -24518,7 +22598,6 @@ function MCPV5Create_stackable_inventory() {
           removeGateText?.();
           clearUnifiedGate?.();
 
-        // --- INVENTORY GATE ---
         } else if (kind === "inv") {
           const p = state?.vars?.pendingAdd || null;
           if (p && p.itemName) {
@@ -24547,32 +22626,25 @@ function MCPV5Create_stackable_inventory() {
       }
     } catch {}
 
-    // Strip leftover "APPROVE"/"REJECT" lines from visible output.
     text = String(text || "").replace(/^\s*(APPROVE|REJECT)\s*$/gim, "").trim();
 
     return text;
   }
 
-  // ---------------------------------------------------------------------------
-  // 8) Action Logging
-  // ---------------------------------------------------------------------------
-
   function recordInventoryAction(kind, itemName, amount, source = null) {
     if (!state?.vars) state.vars = {};
     if (!Array.isArray(state.vars.invHistory)) state.vars.invHistory = [];
 
-    // Keep only a few records to prevent memory bloat
     if (state.vars.invHistory.length > 20) state.vars.invHistory.shift();
 
     state.vars.invHistory.push({
-      kind,       // "add" | "remove" | "wallet_add" | "wallet_remove"
+      kind,
       itemName,
       amount,
-      source,     // optional: command name like "take" or "drop"
+      source,
       ts: Date.now()
     });
   }
-
 
   function run(tab) {
     if (tab === "input") {
@@ -24584,7 +22656,6 @@ function MCPV5Create_stackable_inventory() {
           return { text }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
@@ -24595,36 +22666,30 @@ function MCPV5Create_stackable_inventory() {
           return { text, stop }
         }
 
-        // Don't modify this part
         return modifier(text);
       })();
     }
     if (tab === "output") {
       return (function () {
-        // Gate parser for add command validation
+
         (function parseGate(){
           try {
             if (!state?.vars) return;
 
-            // Check if ANY kind of gate is currently pending (wallet, inventory, or legacy flag)
             const pending = !!(state.vars.awaitingGate || state.vars.awaitingMoneyGate || state.vars.awaitingInvGate);
             if (!pending) return;
 
-            // Look for a single-line verdict "APPROVE" or "REJECT" in the model's output
             const rxVerdict = /^\s*(APPROVE|REJECT)\s*$/im;
             const m = String(text || "").match(rxVerdict);
             if (!m) return;
 
-            // Store the verdict and mark the unified flag resolved.
             state.vars.lastGateVerdict = m[1].toUpperCase();
             state.vars.awaitingGate = false;
 
-            // Clear the temporary system prompt from frontMemory once verdict captured.
             if (state?.memory) state.memory.frontMemory = "";
           } catch {}
         })();
 
-        // ===== Main Output Modifier =====
         const modifier = (text) => {
 
           text = SIS_onOutput(text);
@@ -24647,661 +22712,1059 @@ function MCPV5Create_realmheart() {
   const addStoryCard = MCPV5CardAPI.addStoryCard;
   const updateStoryCard = MCPV5CardAPI.updateStoryCard;
   const removeStoryCard = MCPV5CardAPI.removeStoryCard;
-  // ============================================================
-  // Realmheart — Economy & World State System  v2.3
-  // ============================================================
-  // A full economy, inventory, and world-state tracking system
-  // for AI Dungeon scenarios.
-  //
-  // FEATURES
-  //   - Multi-tier currency (fantasy / modern / sci-fi)
-  //   - Auto-detects currency gains and losses from text
-  //   - Inventory tracking with auto-detection
-  //   - Recurring bills and income with scheduling
-  //   - Calendar, clock, and weather system
-  //   - Holidays and story event tracking
-  //   - Bounty board with preset-appropriate job tiers
-  //   - Goods & services price list
-  //   - Narrator mode for NPC-only AI output
-  //
-  // STORY CARDS  (auto-created under category: Realmheart)
-  //   Inventory          — live item list, player-editable
-  //   Configure Realmheart — master settings and toggles
-  //   Configure Time     — calendar, clock, hours-per-turn
-  //   Bills              — recurring expenses and income
-  //   Ledger             — balance and transaction history
-  //   Prices & Goods     — currency tiers and price list
-  //   Bounty Board       — job and hunt payout tiers
-  //   Holidays           — fixed annual calendar events
-  //   Events             — time-windowed story events
-  //   Seasons            — weather and seasonal mood (read-only)
-  //
-  // QUICK START
-  //   1. Paste this script into your scenario Library tab.
-  //   2. Set your preferred preset below (fantasy/modern/sci-fi).
-  //   3. Start a new adventure — story cards are created on first load.
-  //   4. Use /help in-game for a full command reference.
-  //
-  // CONFIGURATION
-  //   Edit the config block below to set your starting balance,
-  //   inventory, calendar date, and default bills.
-  //   All other settings are adjustable in-game via story cards.
-  // ============================================================
+// ============================================================
+// Realmheart — Economy & World State System  v2.5
+// ============================================================
+// A full economy, inventory, and world-state tracking system
+// for AI Dungeon scenarios.
+//
+// FEATURES
+//   - Multi-tier currency (fantasy / modern / sci-fi)
+//   - Auto-detects currency gains and losses from text
+//   - Unified purchase & sale detection (buy/sell/trade coordinate
+//     currency and inventory together in one action)
+//   - Inventory tracking with auto-detection
+//   - Recurring bills and income with scheduling
+//   - Resource Wells & Drains (item-based recurring income/cost)
+//   - Optional Hardmode Consequences: bills/drains floor instead of
+//     going negative, with escalating narrative consequences
+//   - Gambling Hall: Jackpot, Coin Flip, Dice, High Stakes, plus
+//     fully custom player-defined games with currency/item/narrative
+//     stake types
+//   - Calendar, clock, and weather system
+//   - Holidays and story event tracking
+//   - Bounty board with preset-appropriate job tiers
+//   - Goods & services price list
+//   - Narrator mode for NPC-only AI output
+//
+// STORY CARDS  (auto-created under category: Realmheart)
+//   Inventory          — live item list, player-editable
+//   Configure Realmheart — master settings and toggles
+//   Configure Time     — calendar, clock, hours-per-turn
+//   Bills              — bills, income, resource wells & drains
+//   Ledger             — balance and transaction history
+//   Prices & Goods     — currency tiers and price list
+//   Bounty Board       — job and hunt payout tiers
+//   Holidays           — fixed annual calendar events
+//   Events             — time-windowed story events
+//   Seasons            — weather and seasonal mood (read-only)
+//   Gambling Hall      — casino games, custom games, stats
+//
+// QUICK START
+//   1. Paste this script into your scenario Library tab.
+//   2. Set your preferred preset below (fantasy/modern/sci-fi).
+//   3. Start a new adventure — story cards are created on first load.
+//   4. Use /help in-game for a full command reference.
+//
+// CONFIGURATION
+//   Edit the config block below to set your starting balance,
+//   inventory, calendar date, and default bills.
+//   All other settings are adjustable in-game via story cards.
+// ============================================================
 
-  // ------------------------------------------------------------
-  // SECTION 1 — CONFIGURATION
-  // ------------------------------------------------------------
-  var UBIS_CONFIG={
-    preset:"fantasy",
+// ------------------------------------------------------------
+// SECTION 1 — CONFIGURATION
+// ------------------------------------------------------------
+var UBIS_CONFIG={
+  preset:"fantasy",
 
-    // — Starting State ———————————————————————————————————————
-    startingBalance:null,
-    startingInventory:null,
-    startYear:1200,startMonth:1,startDay:1,startHour:6,hoursPerTurn:2,
-    startingBills:[{name:"Inn Stay",amount:20,intervalDays:1,enabled:true,items:[]}],
-    startingIncome:[{name:"Merchant Salary",amount:100,intervalDays:30,enabled:false}],
+  // — Starting State ———————————————————————————————————————
+  startingBalance:null,
+  startingInventory:null,
+  startYear:1200,startMonth:1,startDay:1,startHour:6,hoursPerTurn:2,
+  startingBills:[{name:"Inn Stay",amount:20,intervalDays:1,enabled:true,items:[]}],
+  startingIncome:[{name:"Merchant Salary",amount:100,intervalDays:30,enabled:false}],
 
-    // — Feature Toggles ——————————————————————————————————————
-    scriptEnabled:true,inventoryEnabled:true,currencyEnabled:true,
-    timeEnabled:true,billsEnabled:true,narratorMode:false,
+  // — Gambling Hall Games (null = use built-in defaults below) ————
+  // Edit odds/payouts here, or leave null and edit live via the
+  // Gambling Hall card once in-game. Each game: name, flags
+  // (n=narrative, i=item, c=currency, any combo), outcomes
+  // (label, pct chance, payout multiplier -- percentages per game
+  // should sum to 100), and a short description shown to the AI.
+  gamblingGames:null,
 
-    // — Label Overrides (null = use preset default) ——————————
-    currencyLabel:null,inventoryLabel:null,
+  // — Feature Toggles ——————————————————————————————————————
+  scriptEnabled:true,inventoryEnabled:true,currencyEnabled:true,
+  timeEnabled:true,billsEnabled:true,narratorMode:false,
+  gamblingEnabled:false,seasonsEnabled:true,requireInventoryForSales:false,
 
-    // — Card Visibility ——————————————————————————————————————
-    cardsEnabled:{master:true,inventory:true,configUBIS:true,configTime:true,
-      bills:true,ledger:true,pricesGoods:true,holidays:true,events:true,seasons:true},
-    currencyContextEnabled:true,
+  // — Label Overrides (null = use preset default) ——————————
+  currencyLabel:null,inventoryLabel:null,
 
-    // — World Data (null = use preset default) ———————————————
-    seasons:null,
-    priceList:null,
-    holidays:null,
-    events:[{name:"Example Event",startMonth:6,startDay:15,endMonth:null,endDay:null,leadDays:2,
-      description:"This is an example event entry. Replace this with your own event, or delete it using DEL: Example Event. Any event added here will appear in the AI's context as active or upcoming once enabled.",
-      repeat:null,priority:true,enabled:false}],
-    jobPayouts:{
-      fantasy:[{label:"Easy",minPay:20,maxPay:80,desc:"Common pests, simple deliveries, easy escorts"},{label:"Medium",minPay:100,maxPay:400,desc:"Dangerous monsters, risky cargo, troubled roads"},{label:"Hard",minPay:500,maxPay:1500,desc:"Powerful creatures, corrupt officials, rare relics"},{label:"Legendary",minPay:2000,maxPay:10000,desc:"Ancient evils, legendary beasts, world-shaking deeds"}],
-      modern:[{label:"Low Risk",minPay:50,maxPay:200,desc:"Deliveries, basic surveillance, small errands"},{label:"Moderate",minPay:300,maxPay:900,desc:"Bodyguard work, investigations, data collection"},{label:"High Stakes",minPay:1000,maxPay:5000,desc:"Corporate espionage, extraction, armed conflict"},{label:"Extreme",minPay:8000,maxPay:50000,desc:"Black ops, cartel hits, government-level risk"}],
-      scifi:[{label:"Routine",minPay:100,maxPay:400,desc:"Cargo runs, scouting, standard patrols"},{label:"Hazardous",minPay:500,maxPay:2000,desc:"Armed escorts, salvage in hot zones, alien recon"},{label:"Critical",minPay:3000,maxPay:10000,desc:"Hostile sector ops, rogue AI, high-value targets"},{label:"Black Ops",minPay:15000,maxPay:100000,desc:"Classified missions, galactic-scale threats"}]
+  // — Card Visibility ——————————————————————————————————————
+  cardsEnabled:{master:true,inventory:true,configUBIS:true,configTime:true,
+    bills:true,ledger:true,pricesGoods:true,holidays:true,events:true,seasons:true,gamblingHall:false},
+  currencyContextEnabled:true,
+
+  // — World Data ——————————————————————————————————————————
+  events:[{name:"Example Event",startMonth:6,startDay:15,endMonth:null,endDay:null,leadDays:2,
+    description:"This is an example event entry. Replace this with your own event, or delete it using DEL: Example Event. Any event added here will appear in the AI's context as active or upcoming once enabled.",
+    repeat:null,priority:true,enabled:false}],
+  jobPayouts:{
+    fantasy:[{label:"Easy",minPay:20,maxPay:80,desc:"Common pests, simple deliveries, easy escorts"},{label:"Medium",minPay:100,maxPay:400,desc:"Dangerous monsters, risky cargo, troubled roads"},{label:"Hard",minPay:500,maxPay:1500,desc:"Powerful creatures, corrupt officials, rare relics"},{label:"Legendary",minPay:2000,maxPay:10000,desc:"Ancient evils, legendary beasts, world-shaking deeds"}],
+    modern:[{label:"Low Risk",minPay:50,maxPay:200,desc:"Deliveries, basic surveillance, small errands"},{label:"Moderate",minPay:300,maxPay:900,desc:"Bodyguard work, investigations, data collection"},{label:"High Stakes",minPay:1000,maxPay:5000,desc:"Corporate espionage, extraction, armed conflict"},{label:"Extreme",minPay:8000,maxPay:50000,desc:"Black ops, cartel hits, government-level risk"}],
+    scifi:[{label:"Routine",minPay:100,maxPay:400,desc:"Cargo runs, scouting, standard patrols"},{label:"Hazardous",minPay:500,maxPay:2000,desc:"Armed escorts, salvage in hot zones, alien recon"},{label:"Critical",minPay:3000,maxPay:10000,desc:"Hostile sector ops, rogue AI, high-value targets"},{label:"Black Ops",minPay:15000,maxPay:100000,desc:"Classified missions, galactic-scale threats"}]
+  }
+};
+
+// ------------------------------------------------------------
+// SECTION 2 — CONSTANTS  (months, tiers, word lists)
+// ------------------------------------------------------------
+var UBIS_MONTHS=[{name:"January",days:31},{name:"February",days:28},{name:"March",days:31},{name:"April",days:30},{name:"May",days:31},{name:"June",days:30},{name:"July",days:31},{name:"August",days:31},{name:"September",days:30},{name:"October",days:31},{name:"November",days:30},{name:"December",days:31}];
+var UBIS_TIERS=[{name:"Gold",plural:"Gold",valueInBase:100},{name:"Silver",plural:"Silver",valueInBase:10},{name:"Copper",plural:"Copper",valueInBase:1}];
+var UBIS_WORD_NUMBERS={"a hundred":100,"one hundred":100,"a handful of":5,"a couple of":2,"half a dozen":6,"a dozen":12,"a handful":5,"a couple":2,"a few":3,"several":5,"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90,"nineteen":19,"eighteen":18,"seventeen":17,"sixteen":16,"fifteen":15,"fourteen":14,"thirteen":13,"eleven":11,"twelve":12,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,"a":1,"an":1,"another":1};
+var UBIS_COIN_WORDS=["coin","coins","piece","pieces","penny","pennies","bit","bits","crown","crowns","mark","marks","currency","money","funds","purse","payment"];
+var UBIS_PLAYER_ADD=["you pick up ","you picked up ","you grab ","you grabbed ","you snatch ","you take the ","you take a ","you take an ","you took the ","you took a ","you took an ","you took ","you pocket ","you pocketed ","you loot ","you looted ","you collect ","you collected ","you steal ","you stole ","you gather ","you gathered ","you retrieve ","you retrieved ","you claim ","you receive ","you received ","you obtain ","you acquire ","you accept ","you accepted ","you purchase ","you purchased ","you buy ","you bought ","you trade for ","you barter for ","you find ","you found ","you pick ","i pick up ","i picked up ","i grab ","i grabbed ","i snatch ","i take ","i took ","i pocket ","i pocketed ","i loot ","i looted ","i collect ","i collected ","i steal ","i stole ","i gather ","i gathered ","i retrieve ","i retrieved ","i claim ","i receive ","i received ","i obtain ","i acquire ","i accept ","i accepted ","i purchase ","i purchased ","i buy ","i bought ","i trade for ","i barter for ","i find ","i found ","i obtain ","i obtained ","you obtain ","you obtained ","pick up ","grab ","take the ","take a ","take an ","loot ","collect ","pocket ","purchase ","buy the ","buy a ","buy an ","gather ","retrieve ","acquire "];
+var UBIS_PLAYER_REM=["you drop ","you dropped ","you discard ","you discarded ","you throw away ","you threw away ","you toss away ","you abandon ","you abandoned ","you use up ","you used up ","you consume ","you consumed ","you eat the ","you ate the ","you eat your ","you ate your ","you drink the ","you drank the ","you drink your ","you drank your ","you burn your ","you burned your ","you sell ","you sold ","you give away ","you gave away ","you hand over ","you handed over ","you sacrifice ","you surrender ","you trade away ","you traded away ","you destroy your ","you destroy the ","you destroy a ","you destroy an ","you destroyed your ","you destroyed the ","you destroyed a ","you destroyed an ","you break your ","you broke your ","you smash your ","you smash the ","you smash a ","you smash an ","you smashed your ","you smashed the ","you smashed a ","you smashed an ","i drop ","i dropped ","i discard ","i discarded ","i throw away ","i threw away ","i toss away ","i abandon ","i abandoned ","i use up ","i used up ","i consume ","i consumed ","i eat the ","i ate the ","i eat my ","i ate my ","i drink the ","i drank the ","i drink my ","i drank my ","i burn my ","i burned my ","i sell ","i sold ","i give away ","i gave away ","i hand over ","i handed over ","i sacrifice ","i surrender ","i trade away ","i traded away ","i destroy my ","i destroy the ","i destroy a ","i destroy an ","i destroyed my ","i destroyed the ","i destroyed a ","i destroyed an ","i break my ","i broke my ","i smash my ","i smash the ","i smash a ","i smash an ","i smashed my ","i smashed the ","i smashed a ","i smashed an "];
+var UBIS_TIME_PHRASES=[{r:/\ban hour (?:pass(?:es|ed)?|later|has passed)\b/i,hours:1},{r:/\ba few hours? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:3},{r:/\bseveral hours? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:5},{r:/\b(\d+) hours? (?:later|pass(?:es|ed)?|have passed)\b/i,mult:1},{r:/\b(?:a|one) day (?:has passed|later|pass(?:es|ed)?)\b/i,hours:24},{r:/\bthe (?:next|following) day\b/i,hours:24},{r:/\bnext morning\b/i,hours:12},{r:/\bovernight\b/i,hours:8},{r:/\b(\d+) days? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:24},{r:/\b(?:a|one) week (?:has passed|later|pass(?:es|ed)?)\b/i,hours:168},{r:/\b(?:the )?next week\b/i,hours:168},{r:/\b(\d+) weeks? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:168},{r:/\b(?:a|one) month (?:has passed|later|pass(?:es|ed)?)\b/i,hours:720},{r:/\b(?:the )?next month\b/i,hours:720},{r:/\b(\d+) months? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:720},{r:/\b(?:a|one) year (?:has passed|later|pass(?:es|ed)?)\b/i,hours:8760},{r:/\b(\d+) years? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:8760},{r:/\ba minute (?:pass(?:es|ed)?|later|has passed)\b/i,hours:1/60},{r:/\ba moment (?:pass(?:es|ed)?|later|has passed)\b/i,hours:1/60},{r:/\b(\d+) minutes? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:1/60},{r:/\ba few minutes? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:3/60},{r:/\bseveral minutes? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:5/60}];
+
+// ------------------------------------------------------------
+// SECTION 3 — UTILITY FUNCTIONS
+// ------------------------------------------------------------
+function ubisResolvePreset(){var U=state.ubis;var p=(U&&U.settings&&U.settings.preset)?U.settings.preset:UBIS_CONFIG.preset;return(p||"fantasy").toLowerCase();}
+function ubisGetCurrencyLabel(){if(UBIS_CONFIG.currencyLabel)return UBIS_CONFIG.currencyLabel;var m=ubisResolvePreset();return m==="modern"?"Wallet":m==="sci-fi"?"Account":"Purse";}
+function ubisGetInventoryLabel(){if(UBIS_CONFIG.inventoryLabel)return UBIS_CONFIG.inventoryLabel;return ubisResolvePreset()==="sci-fi"?"Loadout":"Inventory";}
+function ubisGetDefaultBills(){if(UBIS_CONFIG.startingBills!==null)return UBIS_CONFIG.startingBills;var m=ubisResolvePreset();if(m==="modern")return[{name:"Rent",amount:1200,intervalDays:30,enabled:true,items:[]}];if(m==="sci-fi")return[{name:"Berth Fee",amount:300,intervalDays:30,enabled:true,items:[]}];return[{name:"Inn Stay",amount:20,intervalDays:1,enabled:true,items:[]}];}
+function ubisGetDefaultIncome(){if(UBIS_CONFIG.startingIncome!==null)return UBIS_CONFIG.startingIncome;var m=ubisResolvePreset();if(m==="modern")return[{name:"Job Salary",amount:600,intervalDays:7,enabled:false}];if(m==="sci-fi")return[{name:"Crew Stipend",amount:250,intervalDays:7,enabled:false}];return[{name:"Merchant Salary",amount:100,intervalDays:30,enabled:false}];}
+function ubisGetDefaultInventory(){if(UBIS_CONFIG.startingInventory!==null)return UBIS_CONFIG.startingInventory;var m=ubisResolvePreset();if(m==="modern")return{"Wallet":1,"Phone":1,"Keys":1,"Backpack":1,"Protein Bar":2};if(m==="sci-fi")return{"Comms Unit":1,"Rations Pack":3,"Sidearm":1,"Credit Chip":1};return{"Traveler's Pack":1,"Torch":3,"Rations":5,"Dagger":1};}
+function ubisGetDefaultBalance(){
+  if(UBIS_CONFIG.startingBalance!==null)return UBIS_CONFIG.startingBalance;
+  var m=ubisResolvePreset();
+  if(m==="modern")return 500;
+  if(m==="sci-fi")return 500;
+  return 500;
+}
+function ubisGetDefaultHolidays(){var m=ubisResolvePreset();
+if(m==="modern")return[
+  {name:"New Year's Day",month:1,day:1,type:"holiday",enabled:true,description:"The new year begins. People celebrate with fireworks, parties, and resolutions."},
+  {name:"Valentine's Day",month:2,day:14,type:"holiday",enabled:true,description:"A day for romance and affection. Flowers, cards, and gifts are exchanged between loved ones."},
+  {name:"Independence Day",month:7,day:4,type:"holiday",enabled:true,description:"National celebration with fireworks, barbecues, and patriotic gatherings across the country."},
+  {name:"Halloween",month:10,day:31,type:"holiday",enabled:true,description:"Costumes, candy, and spooky decorations. Children trick-or-treat through the neighborhood."},
+  {name:"Thanksgiving",month:11,day:28,type:"holiday",enabled:true,description:"Families gather for a large meal and give thanks. Travel peaks as people return home."},
+  {name:"Christmas",month:12,day:25,type:"holiday",enabled:true,description:"A major holiday of gift-giving and family gatherings. Cities are decorated with lights and festive displays."},
+  {name:"New Year's Eve",month:12,day:31,type:"holiday",enabled:true,description:"The final night of the year. Countdowns, fireworks, and celebrations mark the transition to midnight."},
+  {name:"Player Birthday",month:6,day:10,type:"birthday",enabled:false,description:"Today is the player character's birthday."}
+];
+if(m==="sci-fi")return[
+  {name:"Founding Day",month:1,day:1,type:"holiday",enabled:true,description:"The anniversary of the colony's founding. Commemorated across all stations with broadcasts and ceremonies."},
+  {name:"First Contact Day",month:4,day:5,type:"holiday",enabled:true,description:"Marking humanity's first verified contact with extraterrestrial intelligence. Observed with mixed reverence."},
+  {name:"Remembrance Vigil",month:9,day:3,type:"seasonal",enabled:true,description:"A somber annual vigil for those lost in the Void. Lights are dimmed across stations for one hour at dusk."},
+  {name:"Player Birthday",month:6,day:10,type:"birthday",enabled:false,description:"Today is the player character's birthday."}
+];
+return[
+  {name:"New Year's Feast",month:1,day:1,type:"holiday",enabled:true,description:"The kingdom rings in the new year with feasting, fireworks, and royal proclamations."},
+  {name:"Founder's Day",month:3,day:15,type:"holiday",enabled:true,description:"A civic holiday celebrating the founding of the realm. Parades and speeches fill the streets."},
+  {name:"Harvest Festival",month:9,day:21,type:"seasonal",enabled:true,description:"A week-long harvest celebration. Markets overflow with produce, ale, and festive competition."},
+  {name:"Winter Solstice",month:12,day:21,type:"seasonal",enabled:true,description:"The longest night of the year. Bonfires burn and gifts are exchanged among family and friends."},
+  {name:"Player Birthday",month:6,day:10,type:"birthday",enabled:false,description:"Today is the player character's birthday."},
+  {name:"Day of the Dead",month:10,day:31,type:"religious",enabled:true,description:"The veil between worlds is thin. Spirits walk freely and the faithful light candles for the departed."}
+];}
+function ubisGetDefaultPriceList(){var m=ubisResolvePreset();
+if(m==="modern")return[
+  {category:"Food & Drink",tiers:[{label:"Fast food",amount:8},{label:"Sit-down meal",amount:25},{label:"Fine dining",amount:80},{label:"Private event",amount:500}]},
+  {category:"Lodging",tiers:[{label:"Hostel/night",amount:40},{label:"Budget motel",amount:90},{label:"Hotel/night",amount:200},{label:"Luxury suite",amount:500}]},
+  {category:"Transportation",tiers:[{label:"Bus fare",amount:3},{label:"Cab ride",amount:20},{label:"Car rental/day",amount:60},{label:"Used car",amount:8000}]},
+  {category:"Electronics",tiers:[{label:"Basic phone",amount:200},{label:"Laptop",amount:800},{label:"High-end device",amount:2000},{label:"Custom rig",amount:8000}]},
+  {category:"Clothing",tiers:[{label:"Secondhand",amount:10},{label:"Off the rack",amount:60},{label:"Designer",amount:300},{label:"Custom tailored",amount:1500}]},
+  {category:"Medical",tiers:[{label:"Clinic visit",amount:150},{label:"ER visit",amount:1200},{label:"Surgery",amount:15000},{label:"Specialist",amount:400}]},
+  {category:"Services",tiers:[{label:"Unskilled/day",amount:80},{label:"Skilled contractor",amount:250},{label:"Lawyer/hr",amount:300},{label:"Consultant",amount:500}]},
+  {category:"Property",tiers:[{label:"Studio apt/mo",amount:1200},{label:"House/mo",amount:2500},{label:"Commercial/mo",amount:5000},{label:"Building purchase",amount:500000}]}
+];
+if(m==="sci-fi")return[
+  {category:"Rations & Supplies",tiers:[{label:"Field ration",amount:5},{label:"Standard meal",amount:20},{label:"Quality provisions",amount:80},{label:"Luxury supply",amount:300}]},
+  {category:"Lodging",tiers:[{label:"Crew bunk",amount:50},{label:"Private cabin",amount:150},{label:"Station suite",amount:500},{label:"Corporate quarters",amount:2000}]},
+  {category:"Equipment",tiers:[{label:"Basic kit",amount:100},{label:"Standard gear",amount:500},{label:"Military grade",amount:2000},{label:"Prototype",amount:10000}]},
+  {category:"Transport",tiers:[{label:"Shuttle fare",amount:30},{label:"Orbital hop",amount:200},{label:"System transit",amount:1000},{label:"Deep space charter",amount:10000}]},
+  {category:"Medical",tiers:[{label:"Stim pack",amount:50},{label:"Med bay treatment",amount:300},{label:"Cybernetic repair",amount:2000},{label:"Full augmentation",amount:15000}]},
+  {category:"Weapons",tiers:[{label:"Sidearm",amount:200},{label:"Combat rifle",amount:800},{label:"Heavy weapons",amount:3000},{label:"Military spec",amount:12000}]},
+  {category:"Services",tiers:[{label:"Unskilled labor/day",amount:50},{label:"Specialist/day",amount:200},{label:"Hacker/job",amount:500},{label:"Mercenary/day",amount:1000}]},
+  {category:"Property",tiers:[{label:"Berth lease/mo",amount:300},{label:"Habitat unit/mo",amount:800},{label:"Station module",amount:50000},{label:"Ship berth purchase",amount:200000}]}
+];
+return[
+  {category:"Meal & Drink",tiers:[{label:"Scraps",amount:1},{label:"Tavern meal",amount:5},{label:"Fine dining",amount:50},{label:"Lavish feast",amount:200}]},
+  {category:"Lodging",tiers:[{label:"Floor/barn",amount:2},{label:"Common room",amount:10},{label:"Private room",amount:30},{label:"Luxury suite",amount:500}]},
+  {category:"Weapons",tiers:[{label:"Crude",amount:10},{label:"Standard",amount:100},{label:"Quality",amount:500},{label:"Masterwork",amount:2000}]},
+  {category:"Armor",tiers:[{label:"Padded",amount:20},{label:"Leather",amount:150},{label:"Chain mail",amount:600},{label:"Plate armor",amount:3000}]},
+  {category:"Horse & Mount",tiers:[{label:"Rental/day",amount:30},{label:"Draft horse",amount:500},{label:"Riding horse",amount:1500},{label:"War horse",amount:5000}]},
+  {category:"Property",tiers:[{label:"Shack",amount:2000},{label:"Cottage",amount:10000},{label:"Townhouse",amount:50000},{label:"Estate",amount:200000}]},
+  {category:"Hirelings & Services",tiers:[{label:"Unskilled/day",amount:5},{label:"Skilled/day",amount:20},{label:"Guard/day",amount:50},{label:"Expert",amount:200}]},
+  {category:"Magic & Rare Goods",tiers:[{label:"Trinket",amount:100},{label:"Potion",amount:500},{label:"Enchanted",amount:5000},{label:"Artifact",amount:50000}]}
+];}
+
+// ------------------------------------------------------------
+// SECTION 4 — DEFAULT DATA BUILDERS
+// ------------------------------------------------------------
+function ubisGetDefaultSeasons(){var m=ubisResolvePreset();
+if(m==="modern")return[
+  {month:1,seasonName:"Winter",mood:"Bitter cold, heavy snowfall likely, icy roads",weather:[{c:"Blizzard",pct:15},{c:"Heavy Snow",pct:25},{c:"Light Snow",pct:20},{c:"Overcast",pct:25},{c:"Clear",pct:15}]},
+  {month:2,seasonName:"Winter",mood:"Freezing, frequent snow, grey skies",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]},
+  {month:3,seasonName:"Early Spring",mood:"Cold and unpredictable, rain mixing with late snow",weather:[{c:"Heavy Rain",pct:15},{c:"Light Rain",pct:30},{c:"Overcast",pct:25},{c:"Partly Cloudy",pct:20},{c:"Clear",pct:10}]},
+  {month:4,seasonName:"Spring",mood:"Mild and showery, flowers emerging",weather:[{c:"Thunderstorm",pct:10},{c:"Heavy Rain",pct:15},{c:"Light Rain",pct:30},{c:"Partly Cloudy",pct:30},{c:"Clear",pct:15}]},
+  {month:5,seasonName:"Late Spring",mood:"Warm and pleasant, occasional showers",weather:[{c:"Thunderstorm",pct:5},{c:"Light Rain",pct:20},{c:"Partly Cloudy",pct:35},{c:"Clear",pct:35},{c:"Heatwave",pct:5}]},
+  {month:6,seasonName:"Summer",mood:"Hot and sunny, humidity rising",weather:[{c:"Thunderstorm",pct:10},{c:"Light Rain",pct:10},{c:"Partly Cloudy",pct:25},{c:"Clear",pct:45},{c:"Heatwave",pct:10}]},
+  {month:7,seasonName:"Summer",mood:"Peak heat, occasional violent storms",weather:[{c:"Thunderstorm",pct:15},{c:"Tornado Watch",pct:2},{c:"Partly Cloudy",pct:18},{c:"Clear",pct:50},{c:"Heatwave",pct:15}]},
+  {month:8,seasonName:"Late Summer",mood:"Still hot, storms becoming more frequent",weather:[{c:"Thunderstorm",pct:15},{c:"Tornado Watch",pct:2},{c:"Heavy Rain",pct:10},{c:"Partly Cloudy",pct:28},{c:"Clear",pct:40},{c:"Heatwave",pct:5}]},
+  {month:9,seasonName:"Autumn",mood:"Cooling down, crisp air, leaves beginning to turn",weather:[{c:"Thunderstorm",pct:5},{c:"Heavy Rain",pct:15},{c:"Light Rain",pct:25},{c:"Partly Cloudy",pct:35},{c:"Clear",pct:20}]},
+  {month:10,seasonName:"Autumn",mood:"Cool and blustery, colourful foliage, frequent rain",weather:[{c:"Heavy Rain",pct:20},{c:"Light Rain",pct:30},{c:"Overcast",pct:25},{c:"Partly Cloudy",pct:20},{c:"Clear",pct:5}]},
+  {month:11,seasonName:"Late Autumn",mood:"Cold and grey, first frosts, heavy rain",weather:[{c:"Heavy Rain",pct:25},{c:"Light Rain",pct:25},{c:"Overcast",pct:30},{c:"Light Snow",pct:10},{c:"Clear",pct:10}]},
+  {month:12,seasonName:"Winter",mood:"Cold and dark, snow likely, festive atmosphere",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]}
+];
+if(m==="sci-fi")return[
+  {month:1,seasonName:"Cryo Season",mood:"Atmospheric temperatures plunge, radiation spikes expected",weather:[{c:"Radiation Storm",pct:20},{c:"Ion Surge",pct:15},{c:"Dust Storm",pct:20},{c:"Clear",pct:40},{c:"Atmospheric Anomaly",pct:5}]},
+  {month:2,seasonName:"Cryo Season",mood:"Hull icing risk, reduced visibility across sectors",weather:[{c:"Radiation Storm",pct:15},{c:"Ion Surge",pct:20},{c:"Dust Storm",pct:15},{c:"Clear",pct:45},{c:"Atmospheric Anomaly",pct:5}]},
+  {month:3,seasonName:"Flux Season",mood:"Unstable atmospheric pressure, readings unreliable",weather:[{c:"Ion Surge",pct:25},{c:"Acid Rain",pct:15},{c:"Dust Storm",pct:20},{c:"Clear",pct:35},{c:"Atmospheric Anomaly",pct:5}]},
+  {month:4,seasonName:"Flux Season",mood:"Electromagnetic interference frequent, shields recommended",weather:[{c:"Ion Surge",pct:20},{c:"Acid Rain",pct:20},{c:"Dust Storm",pct:15},{c:"Clear",pct:40},{c:"Atmospheric Anomaly",pct:5}]},
+  {month:5,seasonName:"Clear Season",mood:"Conditions stable, optimal travel window",weather:[{c:"Clear",pct:55},{c:"Dust Storm",pct:15},{c:"Acid Rain",pct:15},{c:"Ion Surge",pct:10},{c:"Atmospheric Anomaly",pct:5}]},
+  {month:6,seasonName:"Clear Season",mood:"Peak visibility, low interference, trade routes busy",weather:[{c:"Clear",pct:65},{c:"Dust Storm",pct:10},{c:"Acid Rain",pct:10},{c:"Ion Surge",pct:10},{c:"Atmospheric Anomaly",pct:5}]},
+  {month:7,seasonName:"Surge Season",mood:"Solar flare activity increases, power fluctuations common",weather:[{c:"Radiation Storm",pct:25},{c:"Ion Surge",pct:30},{c:"Clear",pct:30},{c:"Atmospheric Anomaly",pct:10},{c:"Dust Storm",pct:5}]},
+  {month:8,seasonName:"Surge Season",mood:"High energy output, navigation systems stressed",weather:[{c:"Radiation Storm",pct:25},{c:"Ion Surge",pct:30},{c:"Clear",pct:25},{c:"Atmospheric Anomaly",pct:15},{c:"Acid Rain",pct:5}]},
+  {month:9,seasonName:"Drift Season",mood:"Particle drift increasing, sensor ghosting reported",weather:[{c:"Dust Storm",pct:30},{c:"Atmospheric Anomaly",pct:20},{c:"Clear",pct:30},{c:"Ion Surge",pct:15},{c:"Acid Rain",pct:5}]},
+  {month:10,seasonName:"Drift Season",mood:"Debris field season, hull impacts more frequent",weather:[{c:"Dust Storm",pct:35},{c:"Atmospheric Anomaly",pct:20},{c:"Radiation Storm",pct:15},{c:"Clear",pct:25},{c:"Ion Surge",pct:5}]},
+  {month:11,seasonName:"Dark Season",mood:"Stellar shadow period, reduced solar power, longer nights",weather:[{c:"Radiation Storm",pct:15},{c:"Ion Surge",pct:15},{c:"Atmospheric Anomaly",pct:20},{c:"Dust Storm",pct:20},{c:"Clear",pct:30}]},
+  {month:12,seasonName:"Dark Season",mood:"Peak shadow period, minimal solar energy, heightened risks",weather:[{c:"Radiation Storm",pct:20},{c:"Ion Surge",pct:20},{c:"Atmospheric Anomaly",pct:20},{c:"Dust Storm",pct:20},{c:"Clear",pct:20}]}
+];
+return[
+  {month:1,seasonName:"Deep Winter",mood:"Bitter cold, heavy snowfall, roads treacherous",weather:[{c:"Blizzard",pct:15},{c:"Heavy Snow",pct:30},{c:"Light Snow",pct:20},{c:"Overcast",pct:25},{c:"Clear",pct:10}]},
+  {month:2,seasonName:"Winter",mood:"Cold and grey, snow frequent, winds bite deep",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]},
+  {month:3,seasonName:"Early Spring",mood:"Cold and muddy, snow giving way to rain and sleet",weather:[{c:"Sleet",pct:15},{c:"Drizzle",pct:30},{c:"Overcast",pct:25},{c:"Clear",pct:20},{c:"Light Snow",pct:10}]},
+  {month:4,seasonName:"Spring",mood:"Mild and showery, wildflowers emerging along the roads",weather:[{c:"Thunderstorm",pct:10},{c:"Rain",pct:25},{c:"Drizzle",pct:25},{c:"Overcast",pct:20},{c:"Clear",pct:20}]},
+  {month:5,seasonName:"Late Spring",mood:"Warm and green, pleasant breezes, occasional showers",weather:[{c:"Thunderstorm",pct:5},{c:"Rain",pct:15},{c:"Drizzle",pct:15},{c:"Overcast",pct:25},{c:"Clear",pct:40}]},
+  {month:6,seasonName:"Summer",mood:"Warm and bright, long days, markets and travel at peak",weather:[{c:"Thunderstorm",pct:5},{c:"Rain",pct:10},{c:"Overcast",pct:15},{c:"Clear",pct:60},{c:"Fog",pct:10}]},
+  {month:7,seasonName:"High Summer",mood:"Hot and dry, dust on roads, rivers running low",weather:[{c:"Thunderstorm",pct:5},{c:"Overcast",pct:10},{c:"Clear",pct:70},{c:"Hail",pct:5},{c:"Fog",pct:10}]},
+  {month:8,seasonName:"Late Summer",mood:"Still warm, storms building toward harvest time",weather:[{c:"Thunderstorm",pct:10},{c:"Rain",pct:15},{c:"Overcast",pct:15},{c:"Clear",pct:55},{c:"Hail",pct:5}]},
+  {month:9,seasonName:"Harvest",mood:"Cool and crisp, leaves turning gold, harvest celebrations",weather:[{c:"Rain",pct:20},{c:"Drizzle",pct:20},{c:"Overcast",pct:25},{c:"Clear",pct:30},{c:"Fog",pct:5}]},
+  {month:10,seasonName:"Autumn",mood:"Cold and blustery, heavy rain, nights drawing in fast",weather:[{c:"Thunderstorm",pct:5},{c:"Rain",pct:30},{c:"Drizzle",pct:20},{c:"Overcast",pct:30},{c:"Clear",pct:10},{c:"Fog",pct:5}]},
+  {month:11,seasonName:"Late Autumn",mood:"Cold and grey, first frosts, roads becoming difficult",weather:[{c:"Rain",pct:25},{c:"Drizzle",pct:20},{c:"Overcast",pct:30},{c:"Light Snow",pct:10},{c:"Clear",pct:10},{c:"Fog",pct:5}]},
+  {month:12,seasonName:"Early Winter",mood:"Cold and dark, snow arriving, fires burning in every hearth",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]}
+];}
+function ubisGetDefaultGamblingGames(){if(UBIS_CONFIG.gamblingGames!==null)return UBIS_CONFIG.gamblingGames;return [
+  {name:"Jackpot",flags:"ci",outcomes:[{label:"Bust",pct:55,payout:0},{label:"Small Win",pct:28,payout:1.5},{label:"Big Win",pct:13,payout:3},{label:"JACKPOT",pct:4,payout:10}],description:"Jackpot is a game of pure chance. Bets can bust entirely, win small, win big, or hit the rare JACKPOT for a massive payout."},
+  {name:"Coin Flip",flags:"ci",outcomes:[{label:"Win",pct:47,payout:2},{label:"Lose",pct:47,payout:0},{label:"Push",pct:6,payout:1}],description:"Coin Flip is a fast, near-even wager. Most bets are won or lost outright, with a small chance the bet is simply returned."},
+  {name:"Dice",flags:"ci",outcomes:[{label:"Snake Eyes",pct:20,payout:0},{label:"Low Roll",pct:35,payout:1},{label:"Mid Roll",pct:30,payout:1.5},{label:"High Roll",pct:12,payout:2.5},{label:"Boxcars",pct:3,payout:5}],description:"Dice rewards steadier play than Jackpot. Most rolls return or modestly grow the bet, with rare high rolls and a very rare Boxcars jackpot."},
+  {name:"High Stakes",flags:"n",outcomes:[{label:"WIN",pct:50,payout:0},{label:"LOSE",pct:50,payout:0}],description:"High Stakes involves no currency or items. Whatever the player has staked is on the line -- risk, danger, or something they value. A win means they come through. A loss means the stake is genuinely lost."}
+];}
+function ubisUpdateGambleStats(U,outcome){U.gambleStats=U.gambleStats||{wins:0,losses:0,pushes:0,currentStreak:0,streakType:null,longestWinStreak:0,longestLoseStreak:0};var gs=U.gambleStats;if(outcome==="win"){gs.wins++;if(gs.streakType==="win"){gs.currentStreak++;}else{gs.streakType="win";gs.currentStreak=1;}if(gs.currentStreak>gs.longestWinStreak)gs.longestWinStreak=gs.currentStreak;}else if(outcome==="lose"){gs.losses++;if(gs.streakType==="lose"){gs.currentStreak++;}else{gs.streakType="lose";gs.currentStreak=1;}if(gs.currentStreak>gs.longestLoseStreak)gs.longestLoseStreak=gs.currentStreak;}else{gs.pushes++;gs.streakType=null;gs.currentStreak=0;}}
+function ubisRollGamble(table){if(!table||!table.length)return null;var r=Math.random()*100,cum=0;for(var i=0;i<table.length;i++){cum+=table[i].pct;if(r<=cum)return table[i];}return table[table.length-1];}
+function ubisFindGame(U,name){if(!name)return null;var l=name.toLowerCase().trim().replace(/[\s-]+/g," ");var games=U.settings.gamblingGames||[];for(var i=0;i<games.length;i++){if(games[i].name.toLowerCase().replace(/[\s-]+/g," ")===l)return games[i];}return null;}
+function ubisGamePattern(U){var games=U.settings.gamblingGames||[];var names=[];for(var i=0;i<games.length;i++){var n=games[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&").replace(/[\s-]+/g,"[\\s-]+");names.push(n);if(games[i].name.toLowerCase()==="coin flip"){names.push("coinflip","heads or tails","coin toss");}}if(names.length===0)return null;return "("+names.join("|")+")";}
+function ubisResolveBet(U,gameName,stakeType,betBase,notif){
+var game=ubisFindGame(U,gameName);if(!game)return false;
+var flags=(game.flags||"c");
+if(flags.indexOf(stakeType)===-1){
+U.denied=U.denied||[];U.denied.push("[DECLINED] "+game.name+" does not accept currency bets.");
+return true;
+}
+var result=ubisRollGamble(game.outcomes);if(!result)return false;
+if(U.balance<betBase){if(!U.settings.debtOnGambleLoss){U.denied=U.denied||[];U.denied.push("[DECLINED] You do not have enough funds to gamble.");return true;}}
+var winnings=Math.round(betBase*result.payout);var net=winnings-betBase;
+U.balance+=net;
+ubisLedger(U,"gamble",game.name+" bet "+ubisFormatBalance(betBase)+" -> "+result.label,net);
+U.recentGambles=U.recentGambles||[];U.recentGambles.push({turn:U.turnCount,game:game.name,bet:betBase,outcome:result.label,net:net});if(U.recentGambles.length>20)U.recentGambles.shift();
+U.pendingGambleResult={game:game.name,outcome:result.label,bet:betBase,net:net,won:net>0,push:net===0,balance:U.balance};
+ubisUpdateGambleStats(U,net>0?"win":(net===0?"push":"lose"));
+notif.push("[GAMBLE] "+game.name+" -- Bet "+ubisFormatBalance(betBase)+" -> "+result.label+"  ("+(net>=0?"+":"-")+ubisFormatBalance(Math.abs(net))+")");
+notif.push("[BALANCE] "+ubisFormatBalance(U.balance));
+U.activeGamble=game.name;
+return true;
+}
+function ubisResolveNonCashBet(U,gameName,stakeDesc,notif){
+var game=ubisFindGame(U,gameName);if(!game)return false;
+var flags=(game.flags||"c");
+var hasIFlag=flags.indexOf("i")!==-1;
+var hasNFlag=flags.indexOf("n")!==-1;
+var stakeQty=stakeDesc?ubisExtractQty(stakeDesc):1;
+var cleanDesc=stakeDesc?ubisCleanItem(stakeDesc):"";
+var cleanLower=cleanDesc.toLowerCase();
+if(cleanLower==="again"||cleanLower==="more"||/^\d+$/.test(cleanDesc)||UBIS_WORD_NUMBERS.hasOwnProperty(cleanLower))cleanDesc="";
+if(hasIFlag&&!cleanDesc){notif.push("You did not bet anything.");return true;}
+var itemKey=(hasIFlag&&cleanDesc)?ubisFindInvKey(U,cleanDesc):null;
+if(itemKey){
+var haveQty=U.inventory[itemKey]||0;
+if(haveQty<stakeQty){U.denied=U.denied||[];U.denied.push("[DECLINED] You only have "+haveQty+"x \""+itemKey+"\" -- not enough to wager "+stakeQty+".");return true;}
+var result=ubisRollGamble(game.outcomes);if(!result)return false;
+var itemLost=result.payout===0;
+if(itemLost)ubisRemoveItem(U,itemKey,stakeQty,true);
+U.pendingGambleResult={game:game.name,outcome:result.label,itemBet:true,itemName:itemKey,itemQty:stakeQty,itemLost:itemLost};
+ubisUpdateGambleStats(U,itemLost?"lose":"win");
+notif.push("[ITEM BET] "+game.name+" -- "+itemKey+" x"+stakeQty+" -> "+result.label+" ("+(itemLost?"LOST":"KEPT")+")");
+U.activeGamble=game.name;
+return true;
+}
+if(hasIFlag&&cleanDesc&&!hasNFlag){
+U.denied=U.denied||[];U.denied.push("[DECLINED] You don't have "+cleanDesc+" to wager.");
+return true;
+}
+if(hasNFlag){
+var result2=ubisRollGamble(game.outcomes);if(!result2)return false;
+var won2=result2.label.toUpperCase()==="WIN";
+U.pendingGambleResult={game:game.name,outcome:result2.label,won:won2,highStakes:true};
+ubisUpdateGambleStats(U,won2?"win":"lose");
+notif.push("[HIGH STAKES] "+game.name+" -- "+result2.label);
+U.activeGamble=game.name;
+return true;
+}
+U.denied=U.denied||[];U.denied.push("[DECLINED] "+game.name+" only accepts currency bets.");
+return true;
+}
+function ubisDetectGamble(U,text,notif){if(!U.settings.gamblingEnabled)return;var lo=text.toLowerCase();var qp=ubisQtyPattern();var cp=ubisCoinPattern();var gp=ubisGamePattern(U);var verbs="(?:bet|gamble|wager|stake|risk|throw down|lay down|place a bet(?:\\s+for|\\s+of)?)";
+if(gp){var rxWith=new RegExp(verbs+"\\s+"+qp+"\\s+(?:more\\s+)?"+cp+"(?:\\s+coins?)?\\s+(?:on|at|for)\\s+(?:the\\s+)?"+gp,"i");var m=rxWith.exec(lo);
+if(m){var amt=ubisParseQtyStr(m[1]);var coin=m[2];var rawName=m[3];var base=amt*ubisCoiNameToBase(coin);
+if(base>0){var lookupName=(rawName==="coinflip"||rawName==="heads or tails"||rawName==="coin toss")?"Coin Flip":rawName;ubisResolveBet(U,lookupName,"c",base,notif);}
+return;}}
+if(gp){var rxNC=new RegExp(verbs+"\\s+(?:(.+?)\\s+)?on\\s+(?:the\\s+)?"+gp,"i");var mNC=rxNC.exec(lo);
+if(mNC){var stakeDesc=mNC[1];var rawName2=mNC[2];var lookupName2=(rawName2==="coinflip"||rawName2==="heads or tails"||rawName2==="coin toss")?"Coin Flip":rawName2;ubisResolveNonCashBet(U,lookupName2,stakeDesc,notif);return;}}
+if(U.activeGamble){
+var rxEnd=new RegExp("^\\s*(?:(?:you|i)\\s+)?(?:quit|stop|end|give\\s+up)(?:\\s+(?:my\\s+|this\\s+|the\\s+)?(?:gambling|gamble|playing|betting|game|session))?[\\s.!?]*$|^\\s*(?:i'm|i am|you're|you are)\\s+done(?:\\s+(?:with\\s+)?(?:my\\s+)?(?:gambling|gamble|playing|betting|session))?[\\s.!?]*$","i");
+if(rxEnd.test(lo)){notif.push("[Gambling Hall] "+U.activeGamble+" session ended.");U.activeGamble=null;return;}
+var rxNo=new RegExp(verbs+"\\s+"+qp+"\\s+(?:more\\s+)?"+cp+"(?:\\s+coins?)?(?!\\s+(?:on|at|for)\\s)","i");var m2=rxNo.exec(lo);
+if(m2){var amt2=ubisParseQtyStr(m2[1]);var coin2=m2[2];var base2=amt2*ubisCoiNameToBase(coin2);if(base2>0){ubisResolveBet(U,U.activeGamble,"c",base2,notif);return;}}
+var actGame=ubisFindGame(U,U.activeGamble);var actFlags=actGame?(actGame.flags||"c"):"";
+if(actFlags.indexOf("i")===-1&&actFlags.indexOf("n")!==-1){var rxNCont=new RegExp("^\\s*(?:you\\s+|i\\s+)?"+verbs+"\\b","i");
+if(rxNCont.test(lo)){ubisResolveNonCashBet(U,U.activeGamble,"",notif);return;}}
+if(actFlags.indexOf("i")!==-1){var rxICont=new RegExp("^\\s*(?:you\\s+|i\\s+)?"+verbs+"\\s+(.+?)[\\s.!?]*(?:more|again)?[\\s.!?]*$","i");
+var mI=rxICont.exec(lo);if(mI&&!/\s(?:on|at|for)\s/.test(" "+mI[1]+" ")){ubisResolveNonCashBet(U,U.activeGamble,mI[1],notif);return;}}}}
+
+function ubisRollWeather(U){var s=U.settings&&U.settings.seasons;if(!s||!s.length)return"Clear";var t=U.time;var tbl=s[t.month-1].weather;if(!tbl||!tbl.length)return"Clear";var r=Math.random()*100,cum=0;for(var i=0;i<tbl.length;i++){cum+=tbl[i].pct;if(r<=cum)return tbl[i].c;}return tbl[tbl.length-1].c;}
+function ubisNormalizeWeatherTable(table){if(!table||!table.length)return table;var tot=0;for(var i=0;i<table.length;i++)tot+=table[i].pct;if(tot===0||tot===100)return table;var f=100/tot,adj=table.map(function(r){return{c:r.c,pct:Math.round(r.pct*f)};});var at=0;for(var j=0;j<adj.length;j++)at+=adj[j].pct;if(at!==100){var d=100-at,mx=0;for(var k=1;k<adj.length;k++){if(adj[k].pct>adj[mx].pct)mx=k;}adj[mx].pct+=d;}return adj;}
+function ubisDOY(mo,dy){var d=0;for(var i=0;i<mo-1;i++)d+=UBIS_MONTHS[i].days;return d+dy;}
+function ubisAbsoluteDay(yr,mo,dy){return yr*365+ubisDOY(mo,dy);}
+function ubisEventSpansYear(e){var em=e.endMonth||e.startMonth,ed=e.endDay||e.startDay;return(em<e.startMonth)||(em===e.startMonth&&ed<e.startDay);}
+function ubisEventOccurrence(e,startYear){var spansYear=ubisEventSpansYear(e);var em=e.endMonth||e.startMonth,ed=e.endDay||e.startDay;var sa=ubisAbsoluteDay(startYear,e.startMonth,e.startDay);var ea=spansYear?ubisAbsoluteDay(startYear+1,em,ed):ubisAbsoluteDay(startYear,em,ed);return{sa:sa,ea:ea};}
+function ubisGetActiveEvents(U){var ev=(U.settings&&U.settings.events)||[];var t=U.time;var ta=ubisAbsoluteDay(t.year,t.month,t.day);var res=[];for(var i=0;i<ev.length;i++){var e=ev[i];if(!e.enabled)continue;var ld=e.leadDays||0;var years=[t.year-1,t.year];if(e.repeat==="yearly")years.push(t.year+1);var chosen=null;for(var ci=0;ci<years.length;ci++){var occ=ubisEventOccurrence(e,years[ci]);var ds=occ.sa-ta;if(ds<=ld&&(occ.ea-ta)>=0){if(!chosen||ds<(chosen.sa-ta))chosen=occ;}}if(chosen)res.push({event:e,daysAway:Math.max(0,chosen.sa-ta)});}res.sort(function(a,b){return a.daysAway-b.daysAway;});return res;}
+function ubisExpireEvents(U){var ev=U.settings&&U.settings.events;if(!ev)return;var t=U.time;var ta=ubisAbsoluteDay(t.year,t.month,t.day);U.settings.events=ev.filter(function(e){if(!e.enabled||e.repeat==="yearly")return true;var occThis=ubisEventOccurrence(e,t.year);var occPrev=ubisEventOccurrence(e,t.year-1);return ta<=occThis.ea||ta<=occPrev.ea;});}
+function ubisGetTodayHolidays(U){var h=(U.settings&&U.settings.holidays)||[];var t=U.time;return h.filter(function(x){return x.enabled&&x.month===t.month&&x.day===t.day;});}
+function ubisGetUpcomingHolidays(U,n){n=n||7;var h=(U.settings&&U.settings.holidays)||[];var t=U.time;var td=ubisDOY(t.month,t.day);var res=[];for(var i=0;i<h.length;i++){var x=h[i];if(!x.enabled)continue;var hd=ubisDOY(x.month,x.day);var diff=hd-td;if(diff>0&&diff<=n)res.push({holiday:x,daysAway:diff});else if(diff<0){var wd=365+diff;if(wd<=n)res.push({holiday:x,daysAway:wd});}}res.sort(function(a,b){return a.daysAway-b.daysAway;});return res;}
+function ubisGetTiers(){var m=ubisResolvePreset();var U=state.ubis;var s=U&&U.settings;if(m==="modern"){var cn=s&&s.modernCurrencyName||"Dollar";return[{name:cn,plural:cn+"s",valueInBase:1}];}if(m==="sci-fi"){var cn=s&&s.scifiCurrencyName||"Credit";return[{name:cn,plural:cn+"s",valueInBase:1}];}return(U&&U.settings&&U.settings.tiers&&U.settings.tiers.length)?U.settings.tiers:UBIS_TIERS;}
+function ubisFormatBalance(base){var raw=base||0;var neg=raw<0;var abs=Math.abs(raw);var m=ubisResolvePreset();if(m==="modern"){var U2=state.ubis;var sym=(U2&&U2.settings&&U2.settings.modernCurrencySymbol)||"$";return(neg?"-":"")+sym+abs;}if(m==="sci-fi"){var U2=state.ubis;var sym=(U2&&U2.settings&&U2.settings.scifiCurrencySymbol)||"cr";return(neg?"-":"")+abs+" "+sym;}var rem=abs;var parts=[];var t=ubisGetTiers();for(var i=0;i<t.length;i++){var cnt=Math.floor(rem/t[i].valueInBase);rem=rem%t[i].valueInBase;if(cnt>0)parts.push(cnt+" "+(cnt===1?t[i].name:t[i].plural));}var last=t[t.length-1];return parts.length>0?(neg?"-":"")+parts.join(", "):(neg?"-":"")+"0 "+last.plural;}
+function ubisCoiNameToBase(n){var l=(n||"").trim().toLowerCase();var t=ubisGetTiers();for(var i=0;i<t.length;i++){if(t[i].name.toLowerCase()===l||t[i].plural.toLowerCase()===l)return t[i].valueInBase;}if(l==="$"||l==="dollar"||l==="dollars")return 1;if(l==="cr"||l==="credit"||l==="credits")return 1;return 0;}
+function ubisExtractQty(raw){if(!raw)return 1;var l=raw.trim().toLowerCase();var keys=Object.keys(UBIS_WORD_NUMBERS).sort(function(a,b){return b.length-a.length;});for(var i=0;i<keys.length;i++){if(l.indexOf(keys[i])===0)return UBIS_WORD_NUMBERS[keys[i]];}var m=l.match(/^(\d+)/);if(m)return Math.max(1,parseInt(m[1],10));return 1;}
+function ubisParseQtyStr(s){return ubisExtractQty((s||"").trim());}
+function ubisQtyPattern(){var nw=["a hundred","one hundred","a dozen","half a dozen","a handful of","a couple of","a handful","a couple","a few","several","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety","nineteen","eighteen","seventeen","sixteen","fifteen","fourteen","thirteen","eleven","twelve","ten","nine","eight","seven","six","five","four","three","two","one","an","a"];return"(\\d+|"+nw.map(function(w){return w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}).join("|")+")";}
+function ubisCoinPattern(){var t=ubisGetTiers();var ns=[];for(var i=0;i<t.length;i++){var n=t[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var p=t[i].plural.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");if(ns.indexOf(n)===-1)ns.push(n);if(p!==n&&ns.indexOf(p)===-1)ns.push(p);}return"("+ns.join("|")+")";}
+function ubisFormatHour(h){h=((h%24)+24)%24;var hr=Math.floor(h);var mn=Math.round((h-hr)*60);if(mn===60){hr=(hr+1)%24;mn=0;}var ms=mn<10?"0"+mn:""+mn;if(hr===0)return"12:"+ms+" AM";if(hr<12)return hr+":"+ms+" AM";if(hr===12)return"12:"+ms+" PM";return(hr-12)+":"+ms+" PM";}
+function ubisFormatDuration(h){if(!h||h<=0)return"0m";var ts=Math.round(h*3600);var hh=Math.floor(ts/3600);var mm=Math.floor((ts%3600)/60);var ss=ts%60;var p=[];if(hh>0)p.push(hh+"h");if(mm>0)p.push(mm+"m");if(ss>0&&hh===0)p.push(ss+"s");return p.length>0?p.join(" "):"0m";}
+function ubisParseHPT(str){if(!str)return 0;var s=str.trim().toLowerCase().replace(/\s+/g,"");var tot=0;var found=false;var hm=s.match(/(\d+(?:\.\d+)?)h(?:r(?:s)?|our(?:s)?)?/);if(hm){tot+=parseFloat(hm[1]);found=true;}var mm=s.match(/(\d+(?:\.\d+)?)min(?:ute(?:s)?)?/);if(mm){tot+=parseFloat(mm[1])/60;found=true;}else{var mm2=s.match(/(\d+(?:\.\d+)?)m(?![a-z])/);if(mm2){tot+=parseFloat(mm2[1])/60;found=true;}}var sm=s.match(/(\d+(?:\.\d+)?)s(?:ec(?:ond(?:s)?)?)?(?![a-z])/);if(sm){tot+=parseFloat(sm[1])/3600;found=true;}if(!found){var n=parseFloat(s);if(!isNaN(n)&&n>0)tot=n;}return Math.round(tot*3600)/3600;}
+function ubisFormatDate(U){var t=U.time;return ubisFormatHour(t.hour)+"  "+UBIS_MONTHS[t.month-1].name+" "+t.day+", Year "+t.year;}
+function ubisTotalDays(t){return Math.floor((t.totalHours||0)/24);}
+function ubisAdvanceHours(U,h){if(!h||h<=0)return;U.time.totalHours=(U.time.totalHours||0)+h;U.time.hour=(U.time.hour||0)+h;while(U.time.hour>=24){U.time.hour-=24;U.time.day+=1;var dim=UBIS_MONTHS[U.time.month-1].days;if(U.time.day>dim){U.time.day=1;U.time.month+=1;if(U.time.month>12){U.time.month=1;U.time.year+=1;}}}}
+function ubisDetectTimeSkip(text){if(!text)return 0;var s=text.toLowerCase().replace(/["""][^"""]*["""]/g," ").replace(/'[^']*'/g," ").replace(/\b(?:if|maybe|perhaps|about|around|by|before|after|until|when|while|tomorrow|yesterday)\s+/g," ");var wk=Object.keys(UBIS_WORD_NUMBERS).filter(function(w){return w!=="a"&&w!=="an";}).sort(function(a,b){return b.length-a.length;});for(var wi=0;wi<wk.length;wi++){s=s.replace(new RegExp("\\b"+wk[wi].replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b","g"),String(UBIS_WORD_NUMBERS[wk[wi]]));}var tot=0;for(var i=0;i<UBIS_TIME_PHRASES.length;i++){var p=UBIS_TIME_PHRASES[i];var m=p.r.exec(s);if(!m)continue;var bef=s.slice(Math.max(0,m.index-20),m.index);if(/\b(?:if|maybe|perhaps|plan|wonder|ask|think|hope)\s*$/.test(bef))continue;if(p.hours)tot+=p.hours;else if(p.mult){var n=parseInt(m[1],10);if(!isNaN(n)&&n>0)tot+=n*p.mult;}}return tot;}
+function ubisLedger(U,type,desc,amount){U.ledger=U.ledger||[];U.ledger.push({turn:U.turnCount,type:type,description:desc,amount:amount});if(U.ledger.length>50)U.ledger.shift();}
+function ubisParseIntervalStr(str){if(!str)return 0;var s=str.trim().toLowerCase();var ym=s.match(/^(\d+)\s*y(?:r(?:s)?|ear(?:s)?)?$/);if(ym)return parseInt(ym[1],10)*365;var mm=s.match(/^(\d+)\s*mo(?:nth(?:s)?)?$/);if(mm)return parseInt(mm[1],10)*30;var wm=s.match(/^(\d+)\s*w(?:k(?:s)?|eek(?:s)?)?$/);if(wm)return parseInt(wm[1],10)*7;var dm=s.match(/^(\d+)\s*d(?:ay(?:s)?)?$/)||s.match(/^(\d+)$/);if(dm)return parseInt(dm[1],10);return 0;}
+function ubisFormatIntervalDays(d){if(d>=365&&d%365===0)return(d/365)+"y";if(d>=30&&d%30===0)return(d/30)+"m";if(d>=7&&d%7===0)return(d/7)+"w";return d+"d";}
+function ubisParseAmountStr(str){if(!str)return 0;var l=str.toLowerCase().trim().replace(/^[-+]/,"").trim();var dm=l.match(/^\$?([\d.]+)$/);if(dm&&ubisResolvePreset()==="modern")return Math.round(parseFloat(dm[1]));var sm2=l.match(/^([\d.]+)\s*cr(?:edits?)?$/);if(sm2&&ubisResolvePreset()==="sci-fi")return Math.round(parseFloat(sm2[1]));var t=ubisGetTiers();var total=0;var found=false;for(var i=0;i<t.length;i++){var tn=t[i].name.toLowerCase();var tp=t[i].plural.toLowerCase();var rx=new RegExp("(\\d+)\\s*(?:"+tn+"|"+tp+")");var mx=l.match(rx);if(mx){total+=parseInt(mx[1],10)*t[i].valueInBase;found=true;}}if(found)return total;var nm=l.match(/(\d+)/);if(!nm)return 0;var num=parseInt(nm[1],10);var sfx=l.replace(/^[\d\s]+/,"").trim();if(t.length>=1&&(sfx==="g"||sfx==="gp"))return num*t[0].valueInBase;if(t.length>=2&&sfx==="s")return num*t[1].valueInBase;if(t.length>=3&&(sfx==="c"||sfx==="cp"))return num*t[2].valueInBase;return num;}
+function ubisParseBalanceStr(str){if(!str)return -1;var l=str.toLowerCase().trim();var m=ubisResolvePreset();if(m==="modern"){var dm=l.match(/^\$?([\d.]+)$/);if(dm)return Math.round(parseFloat(dm[1]));}if(m==="sci-fi"){var sm=l.match(/^([\d.]+)\s*cr(?:edits?)?$/);if(sm)return Math.round(parseFloat(sm[1]));}var t=ubisGetTiers();var tot=0;var found=false;for(var i=0;i<t.length;i++){var tn=t[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var tp=t[i].plural.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var rx=new RegExp("(\\d+)\\s+(?:"+tn+"|"+tp+")(?:\\b|,|\\s|$)","gi");var x;while((x=rx.exec(l))!==null){tot+=parseInt(x[1],10)*t[i].valueInBase;found=true;}}if(!found){var pl=l.match(/^(\d+)$/);if(pl){tot=parseInt(pl[1],10);found=true;}}return found?tot:-1;}
+function ubisParseMonthStr(str){if(!str)return 0;var n=parseInt(str,10);if(!isNaN(n)&&n>=1&&n<=12)return n;var l=str.toLowerCase().trim();for(var i=0;i<UBIS_MONTHS.length;i++){if(UBIS_MONTHS[i].name.toLowerCase().indexOf(l)===0)return i+1;}return 0;}
+function ubisCleanItem(raw){if(!raw)return"";raw=raw.trim().replace(/[.!?,;:]+$/,"").trim().replace(/^(a hundred|one hundred|a handful of|a couple of|a couple|half a dozen|a dozen|a few|several|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|nineteen|eighteen|seventeen|sixteen|fifteen|fourteen|thirteen|eleven|twelve|ten|nine|eight|seven|six|five|four|three|two|one|\d+)\s+/i,"").replace(/^(a |an |the |my |your |his |her |their |its |our |another )/i,"").replace(/\s+(?:from|in|on|at)\s+the\s+.*$/i,"").replace(/\s+(from|the|a|an|and|with|in|on|at|to|of|into|onto|toward|your|his|her|their|its|my)$/i,"").trim();if(!raw)return"";return raw.charAt(0).toUpperCase()+raw.slice(1);}
+function ubisIsActionPhrase(n){if(!n)return false;var l=n.toLowerCase().trim();var ap=["a step","step forward","step back","step aside","a deep breath","a breath","a closer look","a look around","a look","a glance","a seat","a stand","a break","a run","a walk","a leap","a jump","a dash","a sprint","a turn","a swing","a swing at","hold of","hold on","a bite","a sip","a drink","a bow","a nod","a knee","a stance","a position","the pace","the lead","the initiative","the opportunity","the plunge","the bait","the hint","the cue","note of","notice of","stock of","stock","toll","a moment","a second","a minute","a chance","a risk","a shot","a stab","a guess","action","charge","cover","aim","a shot at","a stab at","it easy","it slow","it seriously","it personally","it in","it out","it up","it down","care","note","a beating","a hit","a punch","a kick","my leave","your leave","my time","your time","my chances","your chances"];for(var i=0;i<ap.length;i++){if(l===ap[i]||l.indexOf(ap[i])===0)return true;}if(/\b(?:forward|backward|backwards|sideways|aside|away|down|up|out|off|past|through|around|along|toward|towards|inside|outside|upstairs|downstairs|overhead|underfoot)$/.test(l))return true;if(/^(?:walking|running|moving|stepping|turning|jumping|leaping|lunging|ducking|dodging|swinging|looking|watching|waiting|standing|sitting|lying|crouching|kneeling|reaching|grabbing|pushing|pulling|holding|letting)\b/.test(l))return true;return false;}
+function ubisIsCoin(n){if(!n)return false;var l=n.toLowerCase().trim();for(var w=0;w<UBIS_COIN_WORDS.length;w++){if(new RegExp("\\b"+UBIS_COIN_WORDS[w].replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b").test(l))return true;}var t=ubisGetTiers();for(var i=0;i<t.length;i++){var tn=t[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var tp=t[i].plural.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");if(l===tn||l===tp||new RegExp("\\b"+tn+"\\b").test(l)||new RegExp("\\b"+tp+"\\b").test(l))return true;}return false;}
+function ubisLooksLikeItem(n){if(!n||n.length<2||n.length>50)return false;var w=n.trim().split(/\s+/);if(w.length>6)return false;if(/^\d+$/.test(n.trim()))return false;if(ubisIsCoin(n))return false;if(ubisIsActionPhrase(n))return false;var vs=["walk","run","jump","step","move","turn","look","watch","wait","stand","sit","lie","crouch","kneel","reach","grab","push","pull","hold","let","swing","duck","dodge","lunge","lean","bend","stretch","breathe","sigh","smile","frown","nod","shake","wave","point","think","feel","hear","see","notice","realize","remember","forget","try","attempt","manage","fail","succeed","decide","choose","plan","start","stop","continue","keep","begin","end","finish","complete","go","come","leave","enter","exit","arrive","depart","approach","attack","defend","flee","chase","follow","lead","guide","help","speak","say","shout","whisper","ask","answer","reply","call","draw","sheathe","aim","fire","throw","catch","drop","place","set"];if(vs.indexOf(w[0].toLowerCase())!==-1)return false;var bad=["is","was","were","are","be","been","have","has","had","do","did","does","can","could","will","would","shall","should","may","might","must","in","on","at","to","for","of","with","by","from","into","onto","and","or","but","if","then","so","yet","you","he","she","they","we","it","them","him","her","us","me","i","not","no","never","nothing","here","there","where","when","how","why","very","just","only","also","even","still","already","up","down","out","off","back","away","around","some","any","all","both","each","every","this","that","these","those","his","her","my","your","our","their","its","coin","coins","piece","pieces","penny","pennies","time","moment","second","chance","way","place","thing","part","point","fact","case","side","end","hand","eye","head","mind","heart","word","line","man","men","woman","women","person","people","control","aim","care","note","stock","charge","cover","action"];return bad.indexOf(w[0].toLowerCase())===-1;}
+function ubisInventoryString(U){var e=Object.entries(U.inventory||{});return e.length===0?"(empty)":e.map(function(x){return x[0]+" ("+x[1]+")";}).join(" | ");}
+function ubisFindInvKey(U,name){if(!name)return null;var l=name.toLowerCase();var keys=Object.keys(U.inventory||{});var partial=null;for(var i=0;i<keys.length;i++){var kl=keys[i].toLowerCase();if(kl===l)return keys[i];if(!partial&&(kl.indexOf(l)!==-1||l.indexOf(kl)!==-1))partial=keys[i];}return partial;}
+function ubisAddItem(U,n,q){q=q||1;if(!n||q<=0)return;var nL=n.toLowerCase();var exK=null;for(var k in U.inventory){if(k.toLowerCase()===nL){exK=k;break;}}if(exK)U.inventory[exK]+=q;else U.inventory[n]=q;ubisLedger(U,"inv_add",n+" x"+q,0);}
+function ubisRemoveItem(U,n,q,force){q=q||1;var key=ubisFindInvKey(U,n);if(!key){if(!force){U.denied=U.denied||[];U.denied.push("[BLOCKED] \""+n+"\" not in inventory.");}return false;}if(U.inventory[key]<q){if(!force){U.denied=U.denied||[];U.denied.push("[BLOCKED] Only "+U.inventory[key]+"x \""+key+"\" — need "+q+".");}return false;}U.inventory[key]-=q;if(U.inventory[key]<=0)delete U.inventory[key];ubisLedger(U,"inv_remove",key+" x"+q,0);return true;}
+function ubisDrainItem(U,n,qtyNeeded){var key=ubisFindInvKey(U,n);if(!key)return 0;var have=U.inventory[key]||0;var taken=Math.min(have,qtyNeeded);if(taken>0){U.inventory[key]-=taken;if(U.inventory[key]<=0)delete U.inventory[key];ubisLedger(U,"inv_remove",key+" x"+taken+" (drain)",0);}return taken;}
+function ubisEnsureCounters(U){var d=ubisTotalDays(U.time);for(var i=0;i<U.settings.bills.length;i++){if(U.billCounters[U.settings.bills[i].name]===undefined)U.billCounters[U.settings.bills[i].name]=d;}for(var j=0;j<U.settings.income.length;j++){if(U.incomeCounters[U.settings.income[j].name]===undefined)U.incomeCounters[U.settings.income[j].name]=d;}for(var k=0;k<U.settings.wells.length;k++){if(U.wellCounters[U.settings.wells[k].name]===undefined)U.wellCounters[U.settings.wells[k].name]=d;}for(var m=0;m<U.settings.drains.length;m++){if(U.drainCounters[U.settings.drains[m].name]===undefined)U.drainCounters[U.settings.drains[m].name]=d;}}
+function ubisResyncBillCounters(U){var d=ubisTotalDays(U.time);for(var i=0;i<U.settings.bills.length;i++){U.billCounters[U.settings.bills[i].name]=d;}for(var j=0;j<U.settings.income.length;j++){U.incomeCounters[U.settings.income[j].name]=d;}}
+
+function ubisCreateCards(){var U=state.ubis;var cc=U&&U.cardConfig;var names=["Inventory","Configure Realmheart","Configure Time Settings","Bills","Ledger","Prices & Goods","Bounty Board","Holidays","Events","Seasons","Gambling Hall"];var ccKeys=["Inventory","Configure Realmheart","Configure Time Settings","Bills","Ledger","Prices & Goods","Bounty Board","Holidays","Events","Seasons","Gambling Hall"];for(var i=0;i<names.length;i++){var enabled=!cc||(cc[ccKeys[i]]!==false);if(!enabled)continue;if(!ubisFindCard(names[i])){try{addStoryCard(names[i],"(loading...)","Realmheart",names[i],"{}");log("[Realmheart] Created: "+names[i]);}catch(e){log("[Realmheart] Card error: "+e);}}}}
+function ubisFindCard(title){if(!Array.isArray(storyCards))return null;for(var i=0;i<storyCards.length;i++){if(storyCards[i]&&storyCards[i].title===title)return storyCards[i];}return null;}
+function ubisWriteCard(title,entry){var card=ubisFindCard(title);if(!card){try{addStoryCard(title,entry,"Realmheart",title,"{}");}catch(e){}return;}card.entry=entry;try{card.description=JSON.stringify({_ubis:true,v:"2"});}catch(e){}}
+function ubisCardLines(t){var c=ubisFindCard(t);if(!c||!c.entry||c.entry==="(loading...)")return null;return c.entry.split("\n");}
+
+// ------------------------------------------------------------
+// SECTION 6 — CARD READER FUNCTIONS  (parses card edits)
+// ------------------------------------------------------------
+function ubisReadAllCards(){ubisReadInventoryCard();ubisReadBillsCard();ubisReadConfigCard();ubisReadTimeCard();ubisReadLedgerCard();ubisReadPricesGoodsCard();ubisReadBountyCard();ubisReadHolidaysCard();ubisReadEventsCard();ubisReadSeasonsCard();ubisReadGamblingCard();}
+function ubisRemoveCard(title){if(!Array.isArray(storyCards))return;for(var i=0;i<storyCards.length;i++){if(storyCards[i]&&storyCards[i].title===title){try{removeStoryCard(i);}catch(e){}return;}}}function ubisWriteAllCards(){var U=state.ubis;if(!U)return;var cc=U.cardConfig||{};if(!cc.masterEnabled)return;var allNames=["Inventory","Configure Realmheart","Configure Time Settings","Bills","Ledger","Prices & Goods","Bounty Board","Holidays","Events","Seasons","Gambling Hall"];for(var ri=0;ri<allNames.length;ri++){if(cc[allNames[ri]]===false){ubisRemoveCard(allNames[ri]);}}if(cc["Inventory"])ubisWriteCard("Inventory",ubisInventoryCardBody(U));if(cc["Configure Realmheart"])ubisWriteCard("Configure Realmheart",ubisConfigCardBody(U));if(cc["Configure Time Settings"])ubisWriteCard("Configure Time Settings",ubisTimeCardBody(U));if(cc["Bills"])ubisWriteCard("Bills",ubisBillsCardBody(U));if(cc["Ledger"])ubisWriteCard("Ledger",ubisLedgerCardBody(U));if(cc["Prices & Goods"])ubisWriteCard("Prices & Goods",ubisPricesGoodsCardBody(U));if(cc["Bounty Board"])ubisWriteCard("Bounty Board",ubisBountyCardBody(U));if(cc["Holidays"])ubisWriteCard("Holidays",ubisHolidaysCardBody(U));if(cc["Events"])ubisWriteCard("Events",ubisEventsCardBody(U));if(cc["Seasons"])ubisWriteCard("Seasons",ubisSeasonsCardBody(U));if(cc["Gambling Hall"])ubisWriteCard("Gambling Hall",ubisGamblingCardBody(U));}
+
+function ubisReadInventoryCard(){var lines=ubisCardLines("Inventory");if(!lines)return;var U=state.ubis;var inI=false,inW=false,newInv={},foundInv=false;var iL=ubisGetInventoryLabel().toUpperCase();var wL=ubisGetCurrencyLabel().toUpperCase();for(var i=0;i<lines.length;i++){var t=lines[i].trim();if(t.indexOf("== "+iL)===0||t.indexOf("== INVENTORY")===0||t.indexOf("== LOADOUT")===0){inI=true;inW=false;foundInv=true;continue;}if(t.indexOf("== "+wL)===0||t.indexOf("== WALLET")===0||t.indexOf("== PURSE")===0||t.indexOf("== ACCOUNT")===0){inI=false;inW=true;continue;}if(t.indexOf("==")===0){inI=false;inW=false;continue;}if(!t||t.charAt(0)==="["||t.charAt(0)==="/"||t.charAt(0)==="-"||t.indexOf("Total")===0||t.indexOf("(empty)")!==-1)continue;if(inI){var c=t.indexOf(":");if(c<1)continue;var iN=t.slice(0,c).trim();var qS=t.slice(c+1).trim();var qM=qS.match(/\(Qty:\s*(\d+)\)/i)||qS.match(/^(\d+)/);if(qM&&iN.length>0&&iN.length<60){var qty=parseInt(qM[1],10);if(qty>0){var iNL=iN.toLowerCase();var exK=null;for(var ek in newInv){if(ek.toLowerCase()===iNL){exK=ek;break;}}if(exK)newInv[exK]+=qty;else newInv[iN]=qty;}}}if(inW){var nb=ubisParseBalanceStr(t);if(nb>=0)U.balance=nb;}}if(foundInv)U.inventory=newInv;}
+
+function ubisReadConfigCard(){var lines=ubisCardLines("Configure Realmheart");if(!lines)return;
+var U=state.ubis;
+var ubOldPreset=U.settings?U.settings.preset:null;
+for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(!line||line.charAt(0)==="="||line.charAt(0)==="-"||line.charAt(0)==="/"||line.charAt(0)==="["||line.charAt(0)==="(")continue;var colon=line.indexOf(":");if(colon<1)continue;var rk=line.slice(0,colon).trim().toLowerCase().replace(/[\s\/\-&]+/g,"");var val=line.slice(colon+1).trim();
+// FIX: extract only the first word before any space or dash so inline descriptions
+// like "ON  -- AI writes NPCs only" correctly resolve to "on"
+var firstWord=val.toLowerCase().split(/[\s\u2014\-]+/)[0];
+var isOn=(firstWord==="on"||firstWord==="true"||firstWord==="yes");
+var isOff=(firstWord==="off"||firstWord==="false"||firstWord==="no");
+var nv=parseInt(val,10);
+switch(rk){
+  case "preset":var vp=["fantasy","modern","sci-fi"];var pv=val.split("(")[0].toLowerCase().trim();if(vp.indexOf(pv)!==-1&&pv!==U.settings.preset){U.settings.preset=pv;if(pv==="fantasy"&&(!U.settings.tiers||!U.settings.tiers.length))U.settings.tiers=UBIS_TIERS.map(function(t){return Object.assign({},t);});U.settings.priceList=JSON.parse(JSON.stringify(ubisGetDefaultPriceList()));U.settings.holidays=JSON.parse(JSON.stringify(ubisGetDefaultHolidays()));U.settings.seasons=ubisGetDefaultSeasons();if(pv==="modern")U.settings.bills=JSON.parse(JSON.stringify([{name:"Rent",amount:1200,intervalDays:30,enabled:true,items:[]}]));else if(pv==="sci-fi")U.settings.bills=JSON.parse(JSON.stringify([{name:"Berth Fee",amount:300,intervalDays:30,enabled:true,items:[]}]));else U.settings.bills=JSON.parse(JSON.stringify([{name:"Inn Stay",amount:20,intervalDays:1,enabled:true,items:[]}]));if(pv==="modern")U.settings.income=JSON.parse(JSON.stringify([{name:"Job Salary",amount:600,intervalDays:7,enabled:false}]));else if(pv==="sci-fi")U.settings.income=JSON.parse(JSON.stringify([{name:"Crew Stipend",amount:250,intervalDays:7,enabled:false}]));else U.settings.income=JSON.parse(JSON.stringify([{name:"Merchant Salary",amount:100,intervalDays:30,enabled:false}]));ubisEnsureCounters(U);}break;
+  case "script":if(isOn||isOff)U.settings.scriptEnabled=isOn;break;
+  case "inventoryauto":if(isOn||isOff)U.settings.inventoryEnabled=isOn;break;
+  case "currencyauto":if(isOn||isOff)U.settings.currencyEnabled=isOn;break;
+  case "timeauto":if(isOn||isOff)U.settings.timeEnabled=isOn;break;
+  case "billsauto":if(isOn||isOff){if(isOn&&!U.settings.billsEnabled)ubisResyncBillCounters(U);U.settings.billsEnabled=isOn;}break;
+  case "seasonsauto":if(isOn||isOff)U.settings.seasonsEnabled=isOn;break;
+  case "gamblingauto":if(isOn||isOff)U.settings.gamblingEnabled=isOn;break;
+  case "currencycontext":if(isOn||isOff)U.settings.currencyContextEnabled=isOn;break;
+  case "narratormode":case "narratorswitch":case "npconly":if(isOn||isOff)U.settings.narratorMode=isOn;break;
+  case "requireinventoryforsales":if(isOn||isOff)U.settings.requireInventoryForSales=isOn;break;
+  case "master":if(isOn||isOff)U.cardConfig.masterEnabled=isOn;break;
+  case "inventory":if(isOn||isOff)U.cardConfig["Inventory"]=isOn;break;
+  case "configubis":case "configurerealmheart":if(isOn||isOff)U.cardConfig["Configure Realmheart"]=isOn;break;
+  case "configtime":case "configuretime":if(isOn||isOff)U.cardConfig["Configure Time Settings"]=isOn;break;
+  case "bills":if(isOn||isOff)U.cardConfig["Bills"]=isOn;break;
+  case "ledger":if(isOn||isOff)U.cardConfig["Ledger"]=isOn;break;
+  case "pricesgoods":case "pricelist":case "goodsservices":if(isOn||isOff)U.cardConfig["Prices & Goods"]=isOn;break;
+  case "bountyboard":case "bountypayouts":case "jobpayouts":if(isOn||isOff)U.cardConfig["Bounty Board"]=isOn;break;case "currencyname":if(ubisResolvePreset()==="modern"&&val)U.settings.modernCurrencyName=val;else if(ubisResolvePreset()==="sci-fi"&&val)U.settings.scifiCurrencyName=val;break;case "currencysymbol":if(ubisResolvePreset()==="modern"&&val)U.settings.modernCurrencySymbol=val;else if(ubisResolvePreset()==="sci-fi"&&val)U.settings.scifiCurrencySymbol=val;break;
+  case "holidays":if(isOn||isOff)U.cardConfig["Holidays"]=isOn;break;
+  case "events":if(isOn||isOff)U.cardConfig["Events"]=isOn;break;
+  case "seasons":if(isOn||isOff)U.cardConfig["Seasons"]=isOn;break;
+  case "gamblinghall":if(isOn||isOff)U.cardConfig["Gambling Hall"]=isOn;break;
+  case "tier1value":case "goldvalue":if(!isNaN(nv)&&nv>0&&U.settings.tiers)U.settings.tiers[0].valueInBase=nv;break;
+  case "tier2value":case "silvervalue":if(!isNaN(nv)&&nv>0&&U.settings.tiers)U.settings.tiers[1].valueInBase=nv;break;
+  case "tier3value":case "coppervalue":if(!isNaN(nv)&&nv>0&&U.settings.tiers)U.settings.tiers[2].valueInBase=nv;break;
+  case "tier1name":case "goldname":if(val.length>0&&val.length<30&&U.settings.tiers){U.settings.tiers[0].name=val;U.settings.tiers[0].plural=val;}break;
+  case "tier2name":case "silvername":if(val.length>0&&val.length<30&&U.settings.tiers){U.settings.tiers[1].name=val;U.settings.tiers[1].plural=val;}break;
+  case "tier3name":case "coppername":if(val.length>0&&val.length<30&&U.settings.tiers){U.settings.tiers[2].name=val;U.settings.tiers[2].plural=val;}break;
+}}if(U.settings&&U.settings.preset!==ubOldPreset){if(U.settings.preset==="modern"){U.settings.modernCurrencyName=null;U.settings.modernCurrencySymbol=null;}if(U.settings.preset==="sci-fi"){U.settings.scifiCurrencyName=null;U.settings.scifiCurrencySymbol=null;}if(U.settings.preset==="fantasy"){U.settings.modernCurrencyName=null;U.settings.modernCurrencySymbol=null;U.settings.scifiCurrencyName=null;U.settings.scifiCurrencySymbol=null;}}}
+
+function ubisReadTimeCard(){var lines=ubisCardLines("Configure Time Settings");if(!lines)return;var U=state.ubis;var ubOldY=U.time.year,ubOldM=U.time.month,ubOldD=U.time.day;for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(!line||line.charAt(0)==="="||line.charAt(0)==="-"||line.charAt(0)==="["||line.charAt(0)==="(")continue;var colon=line.indexOf(":");if(colon<1)continue;var rk=line.slice(0,colon).trim().toLowerCase().replace(/[\s\/\-]+/g,"");var val=line.slice(colon+1).trim();var nv=parseInt(val,10);if(rk==="hrsturn"||rk==="hoursturn"||rk==="hperturn"){var h=ubisParseHPT(val);if(h>0)U.settings.hoursPerTurn=h;continue;}if(rk==="year"&&!isNaN(nv)&&nv>0){if(nv!==U.time.year)U.time.year=nv;continue;}if(rk==="month"&&!isNaN(nv)&&nv>=1&&nv<=12){if(nv!==U.time.month)U.time.month=nv;continue;}if(rk==="day"){var md=UBIS_MONTHS[U.time.month-1].days;if(!isNaN(nv)&&nv>=1&&nv<=md&&nv!==U.time.day)U.time.day=nv;continue;}if(rk==="hour"&&!isNaN(nv)&&nv>=0&&nv<=23&&nv!==Math.floor(U.time.hour)){U.time.hour=nv;U.time.totalHours=ubisTotalDays(U.time)*24+nv;continue;}if(rk==="adventureday"&&!isNaN(nv)&&nv>=0&&nv!==ubisTotalDays(U.time)){U.time.totalHours=(nv*24)+(U.time.hour||0);continue;}}if(U.time.year!==ubOldY||U.time.month!==ubOldM||U.time.day!==ubOldD){var ubDayDiff=ubisAbsoluteDay(U.time.year,U.time.month,U.time.day)-ubisAbsoluteDay(ubOldY,ubOldM,ubOldD);U.time.totalHours=(U.time.totalHours||0)+(ubDayDiff*24);}}
+
+function ubisReadBillsCard(){var lines=ubisCardLines("Bills");if(!lines)return;var U=state.ubis;var inB=false,inI=false,inW=false,inD=false;var currentEntry=null;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(lo.indexOf("hardmode consequences:")===0){var hmv=tr.slice(tr.indexOf(":")+1).trim().toLowerCase().split(/[\s\u2014-]+/)[0];if(hmv==="on")U.settings.hardmodeConsequences=true;else if(hmv==="off")U.settings.hardmodeConsequences=false;continue;}
+if(lo.indexOf("-- recurring bills")!==-1){inB=true;inI=false;inW=false;inD=false;currentEntry=null;continue;}if(lo.indexOf("-- recurring income")!==-1){inB=false;inI=true;inW=false;inD=false;continue;}if(lo.indexOf("-- resource wells")!==-1){inB=false;inI=false;inW=true;inD=false;continue;}if(lo.indexOf("-- resource drains")!==-1){inB=false;inI=false;inW=false;inD=true;currentEntry=null;continue;}
+if((inB||inD)&&currentEntry&&/^grace:/i.test(tr)){var gVal=parseInt(tr.slice(tr.indexOf(":")+1).trim(),10);if(!isNaN(gVal)&&gVal>=0)currentEntry.grace=gVal;continue;}
+if((inB||inD)&&currentEntry&&/^penalty:/i.test(tr)){var pVal=tr.slice(tr.indexOf(":")+1).trim();if(pVal&&pVal!=="(none set)")currentEntry.penalty=pVal;continue;}if(tr.indexOf("==")===0){inB=false;inI=false;inW=false;inD=false;continue;}if(!tr)continue;if(tr.charAt(0)!=="["){if(lo.indexOf("add bill:")===0){var ab=tr.slice(tr.indexOf(":")+1).trim().split("|");if(ab.length>=3){var bn=ab[0].trim(),ba=ubisParseAmountStr(ab[1].trim()),bd=ubisParseIntervalStr(ab[2].trim());if(bn&&ba>0&&bd>0){var be=false;for(var bx=0;bx<U.settings.bills.length;bx++){if(U.settings.bills[bx].name.toLowerCase()===bn.toLowerCase()){be=true;break;}}if(!be){var newBill={name:bn,amount:ba,intervalDays:bd,enabled:true,items:[]};if(ab.length>=5){var bg=parseInt(ab[3].trim(),10);if(!isNaN(bg)&&bg>=0)newBill.grace=bg;var bp=ab.slice(4).join("|").trim();if(bp)newBill.penalty=bp;}U.settings.bills.push(newBill);U.billCounters[bn]=ubisTotalDays(U.time);}}}continue;}if(lo.indexOf("add income:")===0){var ai=tr.slice(tr.indexOf(":")+1).trim().split("|");if(ai.length>=3){var in2=ai[0].trim(),ia=ubisParseAmountStr(ai[1].trim()),id2=ubisParseIntervalStr(ai[2].trim());if(in2&&ia>0&&id2>0){var ie=false;for(var ix=0;ix<U.settings.income.length;ix++){if(U.settings.income[ix].name.toLowerCase()===in2.toLowerCase()){ie=true;break;}}if(!ie){U.settings.income.push({name:in2,amount:ia,intervalDays:id2,enabled:true});U.incomeCounters[in2]=ubisTotalDays(U.time);}}}continue;}
+if(lo.indexOf("add well:")===0){var aw=tr.slice(tr.indexOf(":")+1).trim().split("|");if(aw.length>=4){var wn=aw[0].trim(),witem=ubisCleanItem(aw[1].trim()),wqty2=parseInt(aw[2].trim(),10),wd=ubisParseIntervalStr(aw[3].trim());if(wn&&witem&&wqty2>0&&wd>0){var we=false;for(var wx=0;wx<U.settings.wells.length;wx++){if(U.settings.wells[wx].name.toLowerCase()===wn.toLowerCase()){we=true;break;}}if(!we){U.settings.wells.push({name:wn,item:witem,qty:wqty2,intervalDays:wd,enabled:true});U.wellCounters[wn]=ubisTotalDays(U.time);}}}continue;}
+if(lo.indexOf("add drain:")===0){var ad=tr.slice(tr.indexOf(":")+1).trim().split("|");if(ad.length>=4){var dn2=ad[0].trim(),ditem=ubisCleanItem(ad[1].trim()),dqty2=parseInt(ad[2].trim(),10),dd=ubisParseIntervalStr(ad[3].trim());if(dn2&&ditem&&dqty2>0&&dd>0){var de=false;for(var dx=0;dx<U.settings.drains.length;dx++){if(U.settings.drains[dx].name.toLowerCase()===dn2.toLowerCase()){de=true;break;}}if(!de){var newDrain={name:dn2,item:ditem,qty:dqty2,intervalDays:dd,enabled:true};if(ad.length>=6){var dg=parseInt(ad[4].trim(),10);if(!isNaN(dg)&&dg>=0)newDrain.grace=dg;var dp=ad.slice(5).join("|").trim();if(dp)newDrain.penalty=dp;}U.settings.drains.push(newDrain);U.drainCounters[dn2]=ubisTotalDays(U.time);}}}continue;}
+if(lo.indexOf("del:")===0||lo.indexOf("del bill:")===0||lo.indexOf("del income:")===0||lo.indexOf("del well:")===0||lo.indexOf("del drain:")===0){var dc=tr.indexOf(":");var dn=tr.slice(dc+1).trim().toLowerCase();U.settings.bills=U.settings.bills.filter(function(b){return b.name.toLowerCase()!==dn;});U.settings.income=U.settings.income.filter(function(x){return x.name.toLowerCase()!==dn;});U.settings.wells=U.settings.wells.filter(function(x){return x.name.toLowerCase()!==dn;});U.settings.drains=U.settings.drains.filter(function(x){return x.name.toLowerCase()!==dn;});delete U.billCounters[dn];delete U.incomeCounters[dn];delete U.wellCounters[dn];delete U.drainCounters[dn];continue;}}if(!inB&&!inI&&!inW&&!inD)continue;var isOn=lo.indexOf("[on]")!==-1,isOff=lo.indexOf("[off]")!==-1;if(!isOn&&!isOff)continue;var at=tr.replace(/^\[(on|off)\]\s*/i,"");var ec=at.indexOf(":");if(ec<1)continue;var en=at.slice(0,ec).trim();var er=at.slice(ec+1).trim();var eap=er.split("/")[0].trim().replace(/^[-+]/,"").trim();var ea=eap.length>0?ubisParseAmountStr(eap):0;var edR=er.match(/\/\s*(.+)$/i);var ed=edR?ubisParseIntervalStr(edR[1].trim()):0;var j;if(inB)for(j=0;j<U.settings.bills.length;j++){if(U.settings.bills[j].name.toLowerCase()===en.toLowerCase()){U.settings.bills[j].enabled=isOn;if(ea>0)U.settings.bills[j].amount=ea;if(ed>0)U.settings.bills[j].intervalDays=ed;currentEntry=U.settings.bills[j];break;}}if(inI)for(j=0;j<U.settings.income.length;j++){if(U.settings.income[j].name.toLowerCase()===en.toLowerCase()){U.settings.income[j].enabled=isOn;if(ea>0)U.settings.income[j].amount=ea;if(ed>0)U.settings.income[j].intervalDays=ed;currentEntry=null;break;}}if(inW)for(j=0;j<U.settings.wells.length;j++){if(U.settings.wells[j].name.toLowerCase()===en.toLowerCase()){U.settings.wells[j].enabled=isOn;var wqp=er.match(/\+?\s*(\d+)\s+/);if(wqp)U.settings.wells[j].qty=parseInt(wqp[1],10);if(ed>0)U.settings.wells[j].intervalDays=ed;currentEntry=null;break;}}if(inD)for(j=0;j<U.settings.drains.length;j++){if(U.settings.drains[j].name.toLowerCase()===en.toLowerCase()){U.settings.drains[j].enabled=isOn;var dqp=er.match(/-?\s*(\d+)\s+/);if(dqp)U.settings.drains[j].qty=parseInt(dqp[1],10);if(ed>0)U.settings.drains[j].intervalDays=ed;currentEntry=U.settings.drains[j];break;}}
+}ubisEnsureCounters(U);}
+
+function ubisReadPricesGoodsCard(){
+  var lines=ubisCardLines("Prices & Goods");if(!lines)return;
+  var U=state.ubis;var pl=U.settings.priceList;if(!pl)return;
+  var inGoods=false;var currentCat="";
+  for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(!tr)continue;
+    if(lo.indexOf("-- goods")!==-1||lo.indexOf("-- currency")!==-1){inGoods=lo.indexOf("-- goods")!==-1;currentCat="";continue;}
+    if(tr.indexOf("==")===0){inGoods=false;currentCat="";continue;}
+    if(tr.charAt(0)==="["||tr.charAt(0)==="("||tr.charAt(0)==="-")continue;
+    if(inGoods&&tr.charAt(tr.length-1)===":"&&tr.indexOf("--")===-1){      currentCat=tr.slice(0,-1).trim();continue;}
+    if(inGoods&&currentCat&&tr.indexOf("--")!==-1){        var parts=tr.split("--");if(parts.length<2)continue;        var amtStr=parts[0].trim();var lbl=parts.slice(1).join("--").trim();        var amt=ubisParseAmountStr(amtStr);        if(!lbl||isNaN(amt)||amt<0)continue;        for(var ci=0;ci<pl.length;ci++){if(pl[ci].category.toLowerCase()===currentCat.toLowerCase()){for(var ti=0;ti<pl[ci].tiers.length;ti++){if(pl[ci].tiers[ti].label.toLowerCase()===lbl.toLowerCase()){pl[ci].tiers[ti].amount=amt;break;}}break;}}        continue;}
+    if(inGoods){
+      if(lo.indexOf("add item:")===0){var aS=tr.slice(9).trim().split("|");if(aS.length>=3){var ac=aS[0].trim(),al=aS[1].trim(),aa=ubisParseAmountStr(aS[2].trim());if(ac&&al&&!isNaN(aa)&&aa>=0){var cf=false;for(var ci2=0;ci2<pl.length;ci2++){if(pl[ci2].category.toLowerCase()===ac.toLowerCase()){cf=true;var tf=false;for(var ti2=0;ti2<pl[ci2].tiers.length;ti2++){if(pl[ci2].tiers[ti2].label.toLowerCase()===al.toLowerCase()){pl[ci2].tiers[ti2].amount=aa;tf=true;break;}}if(!tf)pl[ci2].tiers.push({label:al,amount:aa});break;}}if(!cf)pl.push({category:ac,tiers:[{label:al,amount:aa}]});}}continue;}
+      if(lo.indexOf("add category:")===0){var nc=tr.slice(13).trim();if(nc){var cx=false;for(var ci3=0;ci3<pl.length;ci3++){if(pl[ci3].category.toLowerCase()===nc.toLowerCase()){cx=true;break;}}if(!cx)pl.push({category:nc,tiers:[]});}continue;}
+      if(lo.indexOf("del item:")===0){var dS=tr.slice(9).trim().split("|");if(dS.length>=2){var dlc=dS[0].trim(),dll=dS[1].trim();for(var ci4=0;ci4<pl.length;ci4++){if(pl[ci4].category.toLowerCase()===dlc.toLowerCase()){pl[ci4].tiers=pl[ci4].tiers.filter(function(t){return t.label.toLowerCase()!==dll.toLowerCase();});break;}}};continue;}
+      if(lo.indexOf("del category:")===0){var dlcat=tr.slice(13).trim();if(dlcat){U.settings.priceList=pl.filter(function(c){return c.category.toLowerCase()!==dlcat.toLowerCase();});pl=U.settings.priceList;}continue;}
+      if(lo.indexOf("rename category:")===0){var rS=tr.slice(16).trim().split("|");if(rS.length>=2){var on2=rS[0].trim(),nn=rS[1].trim();for(var ci5=0;ci5<pl.length;ci5++){if(pl[ci5].category.toLowerCase()===on2.toLowerCase()){pl[ci5].category=nn;break;}}}continue;}
     }
-  };
-
-  // ------------------------------------------------------------
-  // SECTION 2 — CONSTANTS  (months, tiers, word lists)
-  // ------------------------------------------------------------
-  var UBIS_MONTHS=[{name:"January",days:31},{name:"February",days:28},{name:"March",days:31},{name:"April",days:30},{name:"May",days:31},{name:"June",days:30},{name:"July",days:31},{name:"August",days:31},{name:"September",days:30},{name:"October",days:31},{name:"November",days:30},{name:"December",days:31}];
-  var UBIS_TIERS=[{name:"Gold",plural:"Gold",valueInBase:100},{name:"Silver",plural:"Silver",valueInBase:10},{name:"Copper",plural:"Copper",valueInBase:1}];
-  var UBIS_WORD_NUMBERS={"a hundred":100,"one hundred":100,"a handful of":5,"a couple of":2,"half a dozen":6,"a dozen":12,"a handful":5,"a couple":2,"a few":3,"several":5,"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90,"nineteen":19,"eighteen":18,"seventeen":17,"sixteen":16,"fifteen":15,"fourteen":14,"thirteen":13,"eleven":11,"twelve":12,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,"a":1,"an":1};
-  var UBIS_COIN_WORDS=["coin","coins","piece","pieces","penny","pennies","bit","bits","crown","crowns","mark","marks","currency","money","funds","purse","payment"];
-  var UBIS_PLAYER_ADD=["you pick up ","you picked up ","you grab ","you grabbed ","you snatch ","you take the ","you take a ","you take an ","you took the ","you took a ","you took an ","you took ","you pocket ","you pocketed ","you loot ","you looted ","you collect ","you collected ","you steal ","you stole ","you gather ","you gathered ","you retrieve ","you retrieved ","you claim ","you receive ","you received ","you obtain ","you acquire ","you accept ","you accepted ","you purchase ","you purchased ","you buy ","you bought ","you trade for ","you barter for ","you find ","you found ","you pick ","i pick up ","i picked up ","i grab ","i grabbed ","i snatch ","i take ","i took ","i pocket ","i pocketed ","i loot ","i looted ","i collect ","i collected ","i steal ","i stole ","i gather ","i gathered ","i retrieve ","i retrieved ","i claim ","i receive ","i received ","i obtain ","i acquire ","i accept ","i accepted ","i purchase ","i purchased ","i buy ","i bought ","i trade for ","i barter for ","i find ","i found ","i obtain ","i obtained ","you obtain ","you obtained ","pick up ","grab ","take the ","take a ","take an ","loot ","collect ","pocket ","purchase ","buy the ","buy a ","buy an ","gather ","retrieve ","acquire "];
-  var UBIS_PLAYER_REM=["you drop ","you dropped ","you discard ","you discarded ","you throw away ","you threw away ","you toss away ","you abandon ","you abandoned ","you use up ","you used up ","you consume ","you consumed ","you eat the ","you ate the ","you eat your ","you ate your ","you drink the ","you drank the ","you drink your ","you drank your ","you burn your ","you burned your ","you sell ","you sold ","you give away ","you gave away ","you hand over ","you handed over ","you sacrifice ","you surrender ","you trade away ","you traded away ","you destroy your ","you break your ","you broke your ","you smash your ","i drop ","i dropped ","i discard ","i discarded ","i throw away ","i threw away ","i toss away ","i abandon ","i abandoned ","i use up ","i used up ","i consume ","i consumed ","i eat the ","i ate the ","i eat my ","i ate my ","i drink the ","i drank the ","i drink my ","i drank my ","i burn my ","i burned my ","i sell ","i sold ","i give away ","i gave away ","i hand over ","i handed over ","i sacrifice ","i surrender ","i trade away ","i traded away ","i destroy my ","i break my ","i broke my ","i smash my "];
-  var UBIS_TIME_PHRASES=[{r:/\ban hour (?:pass(?:es|ed)?|later|has passed)\b/i,hours:1},{r:/\ba few hours? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:3},{r:/\bseveral hours? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:5},{r:/\b(\d+) hours? (?:later|pass(?:es|ed)?|have passed)\b/i,mult:1},{r:/\b(?:a|one) day (?:has passed|later|pass(?:es|ed)?)\b/i,hours:24},{r:/\bthe (?:next|following) day\b/i,hours:24},{r:/\bnext morning\b/i,hours:12},{r:/\bovernight\b/i,hours:8},{r:/\b(\d+) days? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:24},{r:/\b(?:a|one) week (?:has passed|later|pass(?:es|ed)?)\b/i,hours:168},{r:/\b(?:the )?next week\b/i,hours:168},{r:/\b(\d+) weeks? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:168},{r:/\b(?:a|one) month (?:has passed|later|pass(?:es|ed)?)\b/i,hours:720},{r:/\b(?:the )?next month\b/i,hours:720},{r:/\bits? been a month\b/i,hours:720},{r:/\b(\d+) months? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:720},{r:/\b(?:a|one) year (?:has passed|later|pass(?:es|ed)?)\b/i,hours:8760},{r:/\bits? been a year\b/i,hours:8760},{r:/\b(\d+) years? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:8760},{r:/\ba minute (?:pass(?:es|ed)?|later|has passed)\b/i,hours:1/60},{r:/\ba moment (?:pass(?:es|ed)?|later|has passed)\b/i,hours:1/60},{r:/\b(\d+) minutes? (?:have passed|later|pass(?:es|ed)?)\b/i,mult:1/60},{r:/\ba few minutes? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:3/60},{r:/\bseveral minutes? (?:later|pass(?:es|ed)?|have passed)\b/i,hours:5/60}];
-
-  // ------------------------------------------------------------
-  // SECTION 3 — UTILITY FUNCTIONS
-  // ------------------------------------------------------------
-  function ubisResolvePreset(){var U=state.ubis;var p=(U&&U.settings&&U.settings.preset)?U.settings.preset:UBIS_CONFIG.preset;return(p||"fantasy").toLowerCase();}
-  function ubisGetCurrencyLabel(){if(UBIS_CONFIG.currencyLabel)return UBIS_CONFIG.currencyLabel;var m=ubisResolvePreset();return m==="modern"?"Wallet":m==="sci-fi"?"Account":"Purse";}
-  function ubisGetInventoryLabel(){if(UBIS_CONFIG.inventoryLabel)return UBIS_CONFIG.inventoryLabel;return ubisResolvePreset()==="sci-fi"?"Loadout":"Inventory";}
-  function ubisGetDefaultBills(){if(UBIS_CONFIG.startingBills!==null)return UBIS_CONFIG.startingBills;var m=ubisResolvePreset();if(m==="modern")return[{name:"Rent",amount:1200,intervalDays:30,enabled:true,items:[]}];if(m==="sci-fi")return[{name:"Berth Fee",amount:300,intervalDays:30,enabled:true,items:[]}];return[{name:"Inn Stay",amount:20,intervalDays:1,enabled:true,items:[]}];}
-  function ubisGetDefaultIncome(){if(UBIS_CONFIG.startingIncome!==null)return UBIS_CONFIG.startingIncome;var m=ubisResolvePreset();if(m==="modern")return[{name:"Job Salary",amount:600,intervalDays:7,enabled:false}];if(m==="sci-fi")return[{name:"Crew Stipend",amount:250,intervalDays:7,enabled:false}];return[{name:"Merchant Salary",amount:100,intervalDays:30,enabled:false}];}
-  function ubisGetDefaultInventory(){if(UBIS_CONFIG.startingInventory!==null)return UBIS_CONFIG.startingInventory;var m=ubisResolvePreset();if(m==="modern")return{"Wallet":1,"Phone":1,"Keys":1,"Backpack":1,"Protein Bar":2};if(m==="sci-fi")return{"Comms Unit":1,"Rations Pack":3,"Sidearm":1,"Credit Chip":1};return{"Traveler's Pack":1,"Torch":3,"Rations":5,"Dagger":1};}
-  function ubisGetDefaultBalance(){
-    if(UBIS_CONFIG.startingBalance!==null)return UBIS_CONFIG.startingBalance;
-    var m=ubisResolvePreset();
-    if(m==="modern")return 500;
-    if(m==="sci-fi")return 500;
-    return 500;
   }
-  function ubisGetDefaultHolidays(){var m=ubisResolvePreset();
-  if(m==="modern")return[
-    {name:"New Year's Day",month:1,day:1,type:"holiday",enabled:true,description:"The new year begins. People celebrate with fireworks, parties, and resolutions."},
-    {name:"Valentine's Day",month:2,day:14,type:"holiday",enabled:true,description:"A day for romance and affection. Flowers, cards, and gifts are exchanged between loved ones."},
-    {name:"Independence Day",month:7,day:4,type:"holiday",enabled:true,description:"National celebration with fireworks, barbecues, and patriotic gatherings across the country."},
-    {name:"Halloween",month:10,day:31,type:"holiday",enabled:true,description:"Costumes, candy, and spooky decorations. Children trick-or-treat through the neighborhood."},
-    {name:"Thanksgiving",month:11,day:28,type:"holiday",enabled:true,description:"Families gather for a large meal and give thanks. Travel peaks as people return home."},
-    {name:"Christmas",month:12,day:25,type:"holiday",enabled:true,description:"A major holiday of gift-giving and family gatherings. Cities are decorated with lights and festive displays."},
-    {name:"New Year's Eve",month:12,day:31,type:"holiday",enabled:true,description:"The final night of the year. Countdowns, fireworks, and celebrations mark the transition to midnight."},
-    {name:"Player Birthday",month:6,day:10,type:"birthday",enabled:false,description:"Today is the player character's birthday."}
-  ];
-  if(m==="sci-fi")return[
-    {name:"Founding Day",month:1,day:1,type:"holiday",enabled:true,description:"The anniversary of the colony's founding. Commemorated across all stations with broadcasts and ceremonies."},
-    {name:"First Contact Day",month:4,day:5,type:"holiday",enabled:true,description:"Marking humanity's first verified contact with extraterrestrial intelligence. Observed with mixed reverence."},
-    {name:"Remembrance Vigil",month:9,day:3,type:"seasonal",enabled:true,description:"A somber annual vigil for those lost in the Void. Lights are dimmed across stations for one hour at dusk."},
-    {name:"Player Birthday",month:6,day:10,type:"birthday",enabled:false,description:"Today is the player character's birthday."}
-  ];
-  return[
-    {name:"New Year's Feast",month:1,day:1,type:"holiday",enabled:true,description:"The kingdom rings in the new year with feasting, fireworks, and royal proclamations."},
-    {name:"Founder's Day",month:3,day:15,type:"holiday",enabled:true,description:"A civic holiday celebrating the founding of the realm. Parades and speeches fill the streets."},
-    {name:"Harvest Festival",month:9,day:21,type:"seasonal",enabled:true,description:"A week-long harvest celebration. Markets overflow with produce, ale, and festive competition."},
-    {name:"Winter Solstice",month:12,day:21,type:"seasonal",enabled:true,description:"The longest night of the year. Bonfires burn and gifts are exchanged among family and friends."},
-    {name:"Player Birthday",month:6,day:10,type:"birthday",enabled:false,description:"Today is the player character's birthday."},
-    {name:"Day of the Dead",month:10,day:31,type:"religious",enabled:true,description:"The veil between worlds is thin. Spirits walk freely and the faithful light candles for the departed."}
-  ];}
-  function ubisGetDefaultPriceList(){var m=ubisResolvePreset();
-  if(m==="modern")return[
-    {category:"Food & Drink",tiers:[{label:"Fast food",amount:8},{label:"Sit-down meal",amount:25},{label:"Fine dining",amount:80},{label:"Private event",amount:500}]},
-    {category:"Lodging",tiers:[{label:"Hostel/night",amount:40},{label:"Budget motel",amount:90},{label:"Hotel/night",amount:200},{label:"Luxury suite",amount:500}]},
-    {category:"Transportation",tiers:[{label:"Bus fare",amount:3},{label:"Cab ride",amount:20},{label:"Car rental/day",amount:60},{label:"Used car",amount:8000}]},
-    {category:"Electronics",tiers:[{label:"Basic phone",amount:200},{label:"Laptop",amount:800},{label:"High-end device",amount:2000},{label:"Custom rig",amount:8000}]},
-    {category:"Clothing",tiers:[{label:"Secondhand",amount:10},{label:"Off the rack",amount:60},{label:"Designer",amount:300},{label:"Custom tailored",amount:1500}]},
-    {category:"Medical",tiers:[{label:"Clinic visit",amount:150},{label:"ER visit",amount:1200},{label:"Surgery",amount:15000},{label:"Specialist",amount:400}]},
-    {category:"Services",tiers:[{label:"Unskilled/day",amount:80},{label:"Skilled contractor",amount:250},{label:"Lawyer/hr",amount:300},{label:"Consultant",amount:500}]},
-    {category:"Property",tiers:[{label:"Studio apt/mo",amount:1200},{label:"House/mo",amount:2500},{label:"Commercial/mo",amount:5000},{label:"Building purchase",amount:500000}]}
-  ];
-  if(m==="sci-fi")return[
-    {category:"Rations & Supplies",tiers:[{label:"Field ration",amount:5},{label:"Standard meal",amount:20},{label:"Quality provisions",amount:80},{label:"Luxury supply",amount:300}]},
-    {category:"Lodging",tiers:[{label:"Crew bunk",amount:50},{label:"Private cabin",amount:150},{label:"Station suite",amount:500},{label:"Corporate quarters",amount:2000}]},
-    {category:"Equipment",tiers:[{label:"Basic kit",amount:100},{label:"Standard gear",amount:500},{label:"Military grade",amount:2000},{label:"Prototype",amount:10000}]},
-    {category:"Transport",tiers:[{label:"Shuttle fare",amount:30},{label:"Orbital hop",amount:200},{label:"System transit",amount:1000},{label:"Deep space charter",amount:10000}]},
-    {category:"Medical",tiers:[{label:"Stim pack",amount:50},{label:"Med bay treatment",amount:300},{label:"Cybernetic repair",amount:2000},{label:"Full augmentation",amount:15000}]},
-    {category:"Weapons",tiers:[{label:"Sidearm",amount:200},{label:"Combat rifle",amount:800},{label:"Heavy weapons",amount:3000},{label:"Military spec",amount:12000}]},
-    {category:"Services",tiers:[{label:"Unskilled labor/day",amount:50},{label:"Specialist/day",amount:200},{label:"Hacker/job",amount:500},{label:"Mercenary/day",amount:1000}]},
-    {category:"Property",tiers:[{label:"Berth lease/mo",amount:300},{label:"Habitat unit/mo",amount:800},{label:"Station module",amount:50000},{label:"Ship berth purchase",amount:200000}]}
-  ];
-  return[
-    {category:"Meal & Drink",tiers:[{label:"Scraps",amount:1},{label:"Tavern meal",amount:5},{label:"Fine dining",amount:50},{label:"Lavish feast",amount:200}]},
-    {category:"Lodging",tiers:[{label:"Floor/barn",amount:2},{label:"Common room",amount:10},{label:"Private room",amount:30},{label:"Luxury suite",amount:500}]},
-    {category:"Weapons",tiers:[{label:"Crude",amount:10},{label:"Standard",amount:100},{label:"Quality",amount:500},{label:"Masterwork",amount:2000}]},
-    {category:"Armor",tiers:[{label:"Padded",amount:20},{label:"Leather",amount:150},{label:"Chain mail",amount:600},{label:"Plate armor",amount:3000}]},
-    {category:"Horse & Mount",tiers:[{label:"Rental/day",amount:30},{label:"Draft horse",amount:500},{label:"Riding horse",amount:1500},{label:"War horse",amount:5000}]},
-    {category:"Property",tiers:[{label:"Shack",amount:2000},{label:"Cottage",amount:10000},{label:"Townhouse",amount:50000},{label:"Estate",amount:200000}]},
-    {category:"Hirelings & Services",tiers:[{label:"Unskilled/day",amount:5},{label:"Skilled/day",amount:20},{label:"Guard/day",amount:50},{label:"Expert",amount:200}]},
-    {category:"Magic & Rare Goods",tiers:[{label:"Trinket",amount:100},{label:"Potion",amount:500},{label:"Enchanted",amount:5000},{label:"Artifact",amount:50000}]}
-  ];}
+}
+function ubisReadBountyCard(){var lines=ubisCardLines("Bounty Board");if(!lines)return;var U=state.ubis;var pk=ubisResolvePreset().replace("-","");var jp=U.settings.jobPayouts&&U.settings.jobPayouts[pk];if(!jp)return;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(!tr||tr.charAt(0)==="="||tr.charAt(0)==="-"||tr.charAt(0)==="["||tr.charAt(0)==="(")continue;if(lo.indexOf("add:")===0){var aS=tr.slice(4).trim().split("|");if(aS.length>=3){var lb=aS[0].trim(),mn=ubisParseAmountStr(aS[1].trim()),mx=ubisParseAmountStr(aS[2].trim()),dc=aS.length>=4?aS[3].trim():"Custom tier";if(lb&&(mn>0||mx>0)){var ex=false;for(var xi=0;xi<jp.length;xi++){if(jp[xi].label.toLowerCase()===lb.toLowerCase()){ex=true;break;}}if(!ex)jp.push({label:lb,minPay:mn,maxPay:mx,desc:dc});}}continue;}if(lo.indexOf("del:")===0){var dn=tr.slice(4).trim().toLowerCase();U.settings.jobPayouts[pk]=jp.filter(function(j){return j.label.toLowerCase()!==dn;});jp=U.settings.jobPayouts[pk];continue;}var pp=tr.split("|");if(pp.length<3)continue;var lb2=pp[0].trim(),mn2=ubisParseAmountStr(pp[1].trim()),mx2=ubisParseAmountStr(pp[2].trim());if(!lb2||isNaN(mn2)||isNaN(mx2)||(mn2===0&&mx2===0))continue;for(var ji=0;ji<jp.length;ji++){if(jp[ji].label.toLowerCase()===lb2.toLowerCase()&&(mn2!==jp[ji].minPay||mx2!==jp[ji].maxPay)){jp[ji].minPay=mn2;jp[ji].maxPay=mx2;break;}}}}
+function ubisReadLedgerCard(){}
+function ubisReadHolidaysCard(){var lines=ubisCardLines("Holidays");if(!lines)return;var U=state.ubis;var hols=U.settings.holidays;if(!hols)return;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();tr=tr.replace(/^edit:\s*/i,"");var lo=tr.toLowerCase();if(!tr||tr.charAt(0)==="="||tr.charAt(0)==="-"||tr.charAt(0)==="("||lo.indexOf("today")===0||lo.indexOf("in ")===0||lo.indexOf("date:")===0)continue;if(tr.charAt(0)==="["&&lo.indexOf("[on]")!==0&&lo.indexOf("[off]")!==0)continue;if(lo.indexOf("add:")===0){var aS=tr.slice(4).trim().split("|");if(aS.length>=5){var hn=aS[0].trim(),hm=parseInt(aS[1].trim(),10),hd=parseInt(aS[2].trim(),10),ht=(aS[3].trim()||"custom").toLowerCase(),hdc=aS.slice(4).join("|").trim();if(hn&&!isNaN(hm)&&hm>=1&&hm<=12&&!isNaN(hd)&&hd>=1&&hd<=31){var ex=false;for(var hx=0;hx<hols.length;hx++){if(hols[hx].name.toLowerCase()===hn.toLowerCase()){ex=true;break;}}if(!ex)hols.push({name:hn,month:hm,day:hd,type:ht,enabled:true,description:hdc});}}continue;}if(lo.indexOf("del:")===0){var dn=tr.slice(4).trim().toLowerCase();U.settings.holidays=hols.filter(function(h){return h.name.toLowerCase()!==dn;});hols=U.settings.holidays;continue;}var isOn=lo.indexOf("[on]")!==-1,isOff=lo.indexOf("[off]")!==-1;if(!isOn&&!isOff)continue;var rest=tr.replace(/^\[(on|off)\]\s*/i,"").trim();var parts=rest.split("|");var hname=parts[0].trim().toLowerCase();if(!hname)continue;for(var hi=0;hi<hols.length;hi++){if(hols[hi].name.toLowerCase()!==hname)continue;hols[hi].enabled=isOn;if(parts.length>=2){var nm=parseInt(parts[1].trim(),10);if(!isNaN(nm)&&nm>=1&&nm<=12)hols[hi].month=nm;}if(parts.length>=3){var nd=parseInt(parts[2].trim(),10);var md=UBIS_MONTHS[hols[hi].month-1].days;if(!isNaN(nd)&&nd>=1&&nd<=md)hols[hi].day=nd;}if(parts.length>=4){var nt=parts[3].trim().toLowerCase();var vt=["holiday","birthday","seasonal","religious","custom"];if(nt&&vt.indexOf(nt)!==-1)hols[hi].type=nt;}break;}}}
 
-  // ------------------------------------------------------------
-  // SECTION 4 — DEFAULT DATA BUILDERS
-  // ------------------------------------------------------------
-  function ubisGetDefaultSeasons(){var m=ubisResolvePreset();
-  if(m==="modern")return[
-    {month:1,seasonName:"Winter",mood:"Bitter cold, heavy snowfall likely, icy roads",weather:[{c:"Blizzard",pct:15},{c:"Heavy Snow",pct:25},{c:"Light Snow",pct:20},{c:"Overcast",pct:25},{c:"Clear",pct:15}]},
-    {month:2,seasonName:"Winter",mood:"Freezing, frequent snow, grey skies",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]},
-    {month:3,seasonName:"Early Spring",mood:"Cold and unpredictable, rain mixing with late snow",weather:[{c:"Heavy Rain",pct:15},{c:"Light Rain",pct:30},{c:"Overcast",pct:25},{c:"Partly Cloudy",pct:20},{c:"Clear",pct:10}]},
-    {month:4,seasonName:"Spring",mood:"Mild and showery, flowers emerging",weather:[{c:"Thunderstorm",pct:10},{c:"Heavy Rain",pct:15},{c:"Light Rain",pct:30},{c:"Partly Cloudy",pct:30},{c:"Clear",pct:15}]},
-    {month:5,seasonName:"Late Spring",mood:"Warm and pleasant, occasional showers",weather:[{c:"Thunderstorm",pct:5},{c:"Light Rain",pct:20},{c:"Partly Cloudy",pct:35},{c:"Clear",pct:35},{c:"Heatwave",pct:5}]},
-    {month:6,seasonName:"Summer",mood:"Hot and sunny, humidity rising",weather:[{c:"Thunderstorm",pct:10},{c:"Light Rain",pct:10},{c:"Partly Cloudy",pct:25},{c:"Clear",pct:45},{c:"Heatwave",pct:10}]},
-    {month:7,seasonName:"Summer",mood:"Peak heat, occasional violent storms",weather:[{c:"Thunderstorm",pct:15},{c:"Tornado Watch",pct:2},{c:"Partly Cloudy",pct:18},{c:"Clear",pct:50},{c:"Heatwave",pct:15}]},
-    {month:8,seasonName:"Late Summer",mood:"Still hot, storms becoming more frequent",weather:[{c:"Thunderstorm",pct:15},{c:"Tornado Watch",pct:2},{c:"Heavy Rain",pct:10},{c:"Partly Cloudy",pct:28},{c:"Clear",pct:40},{c:"Heatwave",pct:5}]},
-    {month:9,seasonName:"Autumn",mood:"Cooling down, crisp air, leaves beginning to turn",weather:[{c:"Thunderstorm",pct:5},{c:"Heavy Rain",pct:15},{c:"Light Rain",pct:25},{c:"Partly Cloudy",pct:35},{c:"Clear",pct:20}]},
-    {month:10,seasonName:"Autumn",mood:"Cool and blustery, colourful foliage, frequent rain",weather:[{c:"Heavy Rain",pct:20},{c:"Light Rain",pct:30},{c:"Overcast",pct:25},{c:"Partly Cloudy",pct:20},{c:"Clear",pct:5}]},
-    {month:11,seasonName:"Late Autumn",mood:"Cold and grey, first frosts, heavy rain",weather:[{c:"Heavy Rain",pct:25},{c:"Light Rain",pct:25},{c:"Overcast",pct:30},{c:"Light Snow",pct:10},{c:"Clear",pct:10}]},
-    {month:12,seasonName:"Winter",mood:"Cold and dark, snow likely, festive atmosphere",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]}
-  ];
-  if(m==="sci-fi")return[
-    {month:1,seasonName:"Cryo Season",mood:"Atmospheric temperatures plunge, radiation spikes expected",weather:[{c:"Radiation Storm",pct:20},{c:"Ion Surge",pct:15},{c:"Dust Storm",pct:20},{c:"Clear",pct:40},{c:"Atmospheric Anomaly",pct:5}]},
-    {month:2,seasonName:"Cryo Season",mood:"Hull icing risk, reduced visibility across sectors",weather:[{c:"Radiation Storm",pct:15},{c:"Ion Surge",pct:20},{c:"Dust Storm",pct:15},{c:"Clear",pct:45},{c:"Atmospheric Anomaly",pct:5}]},
-    {month:3,seasonName:"Flux Season",mood:"Unstable atmospheric pressure, readings unreliable",weather:[{c:"Ion Surge",pct:25},{c:"Acid Rain",pct:15},{c:"Dust Storm",pct:20},{c:"Clear",pct:35},{c:"Atmospheric Anomaly",pct:5}]},
-    {month:4,seasonName:"Flux Season",mood:"Electromagnetic interference frequent, shields recommended",weather:[{c:"Ion Surge",pct:20},{c:"Acid Rain",pct:20},{c:"Dust Storm",pct:15},{c:"Clear",pct:40},{c:"Atmospheric Anomaly",pct:5}]},
-    {month:5,seasonName:"Clear Season",mood:"Conditions stable, optimal travel window",weather:[{c:"Clear",pct:55},{c:"Dust Storm",pct:15},{c:"Acid Rain",pct:15},{c:"Ion Surge",pct:10},{c:"Atmospheric Anomaly",pct:5}]},
-    {month:6,seasonName:"Clear Season",mood:"Peak visibility, low interference, trade routes busy",weather:[{c:"Clear",pct:65},{c:"Dust Storm",pct:10},{c:"Acid Rain",pct:10},{c:"Ion Surge",pct:10},{c:"Atmospheric Anomaly",pct:5}]},
-    {month:7,seasonName:"Surge Season",mood:"Solar flare activity increases, power fluctuations common",weather:[{c:"Radiation Storm",pct:25},{c:"Ion Surge",pct:30},{c:"Clear",pct:30},{c:"Atmospheric Anomaly",pct:10},{c:"Dust Storm",pct:5}]},
-    {month:8,seasonName:"Surge Season",mood:"High energy output, navigation systems stressed",weather:[{c:"Radiation Storm",pct:25},{c:"Ion Surge",pct:30},{c:"Clear",pct:25},{c:"Atmospheric Anomaly",pct:15},{c:"Acid Rain",pct:5}]},
-    {month:9,seasonName:"Drift Season",mood:"Particle drift increasing, sensor ghosting reported",weather:[{c:"Dust Storm",pct:30},{c:"Atmospheric Anomaly",pct:20},{c:"Clear",pct:30},{c:"Ion Surge",pct:15},{c:"Acid Rain",pct:5}]},
-    {month:10,seasonName:"Drift Season",mood:"Debris field season, hull impacts more frequent",weather:[{c:"Dust Storm",pct:35},{c:"Atmospheric Anomaly",pct:20},{c:"Radiation Storm",pct:15},{c:"Clear",pct:25},{c:"Ion Surge",pct:5}]},
-    {month:11,seasonName:"Dark Season",mood:"Stellar shadow period, reduced solar power, longer nights",weather:[{c:"Radiation Storm",pct:15},{c:"Ion Surge",pct:15},{c:"Atmospheric Anomaly",pct:20},{c:"Dust Storm",pct:20},{c:"Clear",pct:30}]},
-    {month:12,seasonName:"Dark Season",mood:"Peak shadow period, minimal solar energy, heightened risks",weather:[{c:"Radiation Storm",pct:20},{c:"Ion Surge",pct:20},{c:"Atmospheric Anomaly",pct:20},{c:"Dust Storm",pct:20},{c:"Clear",pct:20}]}
-  ];
-  return[
-    {month:1,seasonName:"Deep Winter",mood:"Bitter cold, heavy snowfall, roads treacherous",weather:[{c:"Blizzard",pct:15},{c:"Heavy Snow",pct:30},{c:"Light Snow",pct:20},{c:"Overcast",pct:25},{c:"Clear",pct:10}]},
-    {month:2,seasonName:"Winter",mood:"Cold and grey, snow frequent, winds bite deep",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]},
-    {month:3,seasonName:"Early Spring",mood:"Cold and muddy, snow giving way to rain and sleet",weather:[{c:"Sleet",pct:15},{c:"Drizzle",pct:30},{c:"Overcast",pct:25},{c:"Clear",pct:20},{c:"Light Snow",pct:10}]},
-    {month:4,seasonName:"Spring",mood:"Mild and showery, wildflowers emerging along the roads",weather:[{c:"Thunderstorm",pct:10},{c:"Rain",pct:25},{c:"Drizzle",pct:25},{c:"Overcast",pct:20},{c:"Clear",pct:20}]},
-    {month:5,seasonName:"Late Spring",mood:"Warm and green, pleasant breezes, occasional showers",weather:[{c:"Thunderstorm",pct:5},{c:"Rain",pct:15},{c:"Drizzle",pct:15},{c:"Overcast",pct:25},{c:"Clear",pct:40}]},
-    {month:6,seasonName:"Summer",mood:"Warm and bright, long days, markets and travel at peak",weather:[{c:"Thunderstorm",pct:5},{c:"Rain",pct:10},{c:"Overcast",pct:15},{c:"Clear",pct:60},{c:"Fog",pct:10}]},
-    {month:7,seasonName:"High Summer",mood:"Hot and dry, dust on roads, rivers running low",weather:[{c:"Thunderstorm",pct:5},{c:"Overcast",pct:10},{c:"Clear",pct:70},{c:"Hail",pct:5},{c:"Fog",pct:10}]},
-    {month:8,seasonName:"Late Summer",mood:"Still warm, storms building toward harvest time",weather:[{c:"Thunderstorm",pct:10},{c:"Rain",pct:15},{c:"Overcast",pct:15},{c:"Clear",pct:55},{c:"Hail",pct:5}]},
-    {month:9,seasonName:"Harvest",mood:"Cool and crisp, leaves turning gold, harvest celebrations",weather:[{c:"Rain",pct:20},{c:"Drizzle",pct:20},{c:"Overcast",pct:25},{c:"Clear",pct:30},{c:"Fog",pct:5}]},
-    {month:10,seasonName:"Autumn",mood:"Cold and blustery, heavy rain, nights drawing in fast",weather:[{c:"Thunderstorm",pct:5},{c:"Rain",pct:30},{c:"Drizzle",pct:20},{c:"Overcast",pct:30},{c:"Clear",pct:10},{c:"Fog",pct:5}]},
-    {month:11,seasonName:"Late Autumn",mood:"Cold and grey, first frosts, roads becoming difficult",weather:[{c:"Rain",pct:25},{c:"Drizzle",pct:20},{c:"Overcast",pct:30},{c:"Light Snow",pct:10},{c:"Clear",pct:10},{c:"Fog",pct:5}]},
-    {month:12,seasonName:"Early Winter",mood:"Cold and dark, snow arriving, fires burning in every hearth",weather:[{c:"Blizzard",pct:10},{c:"Heavy Snow",pct:20},{c:"Light Snow",pct:25},{c:"Overcast",pct:30},{c:"Clear",pct:15}]}
-  ];}
-  function ubisRollWeather(U){var s=U.settings&&U.settings.seasons;if(!s||!s.length)return"Clear";var t=U.time;var tbl=s[t.month-1].weather;if(!tbl||!tbl.length)return"Clear";var r=Math.random()*100,cum=0;for(var i=0;i<tbl.length;i++){cum+=tbl[i].pct;if(r<=cum)return tbl[i].c;}return tbl[tbl.length-1].c;}
-  function ubisNormalizeWeatherTable(table){if(!table||!table.length)return table;var tot=0;for(var i=0;i<table.length;i++)tot+=table[i].pct;if(tot===0||tot===100)return table;var f=100/tot,adj=table.map(function(r){return{c:r.c,pct:Math.round(r.pct*f)};});var at=0;for(var j=0;j<adj.length;j++)at+=adj[j].pct;if(at!==100){var d=100-at,mx=0;for(var k=1;k<adj.length;k++){if(adj[k].pct>adj[mx].pct)mx=k;}adj[mx].pct+=d;}return adj;}
-  function ubisDOY(mo,dy){var d=0;for(var i=0;i<mo-1;i++)d+=UBIS_MONTHS[i].days;return d+dy;}
-  function ubisAbsoluteDay(yr,mo,dy){return yr*365+ubisDOY(mo,dy);}
-  function ubisGetActiveEvents(U){var ev=(U.settings&&U.settings.events)||[];var t=U.time;var ta=ubisAbsoluteDay(t.year,t.month,t.day);var res=[];for(var i=0;i<ev.length;i++){var e=ev[i];if(!e.enabled)continue;var ld=e.leadDays||0;var em=e.endMonth||e.startMonth;var ed=e.endDay||e.startDay;var sa=ubisAbsoluteDay(t.year,e.startMonth,e.startDay);var ea=ubisAbsoluteDay(t.year,em,ed);if(e.repeat==="yearly"&&ta>ea){sa=ubisAbsoluteDay(t.year+1,e.startMonth,e.startDay);ea=ubisAbsoluteDay(t.year+1,em,ed);}var ds=sa-ta;if(ds<=ld&&(ea-ta)>=0)res.push({event:e,daysAway:Math.max(0,ds)});}res.sort(function(a,b){return a.daysAway-b.daysAway;});return res;}
-  function ubisExpireEvents(U){var ev=U.settings&&U.settings.events;if(!ev)return;var t=U.time;var ta=ubisAbsoluteDay(t.year,t.month,t.day);U.settings.events=ev.filter(function(e){if(!e.enabled||e.repeat==="yearly")return true;var em=e.endMonth||e.startMonth;var ed=e.endDay||e.startDay;return ta<=ubisAbsoluteDay(t.year,em,ed);});}
-  function ubisGetTodayHolidays(U){var h=(U.settings&&U.settings.holidays)||[];var t=U.time;return h.filter(function(x){return x.enabled&&x.month===t.month&&x.day===t.day;});}
-  function ubisGetUpcomingHolidays(U,n){n=n||7;var h=(U.settings&&U.settings.holidays)||[];var t=U.time;var td=ubisDOY(t.month,t.day);var res=[];for(var i=0;i<h.length;i++){var x=h[i];if(!x.enabled)continue;var hd=ubisDOY(x.month,x.day);var diff=hd-td;if(diff>0&&diff<=n)res.push({holiday:x,daysAway:diff});else if(diff<0){var wd=365+diff;if(wd<=n)res.push({holiday:x,daysAway:wd});}}res.sort(function(a,b){return a.daysAway-b.daysAway;});return res;}
-  function ubisGetTiers(){var m=ubisResolvePreset();var U=state.ubis;var s=U&&U.settings;if(m==="modern"){var cn=s&&s.modernCurrencyName||"Dollar";return[{name:cn,plural:cn+"s",valueInBase:1}];}if(m==="sci-fi"){var cn=s&&s.scifiCurrencyName||"Credit";return[{name:cn,plural:cn+"s",valueInBase:1}];}return(U&&U.settings&&U.settings.tiers&&U.settings.tiers.length)?U.settings.tiers:UBIS_TIERS;}
-  function ubisFormatBalance(base){var raw=base||0;var neg=raw<0;var abs=Math.abs(raw);var m=ubisResolvePreset();if(m==="modern"){var U2=state.ubis;var sym=(U2&&U2.settings&&U2.settings.modernCurrencySymbol)||"$";return(neg?"-":"")+sym+abs;}if(m==="sci-fi"){var U2=state.ubis;var sym=(U2&&U2.settings&&U2.settings.scifiCurrencySymbol)||"cr";return(neg?"-":"")+abs+" "+sym;}var rem=abs;var parts=[];var t=ubisGetTiers();for(var i=0;i<t.length;i++){var cnt=Math.floor(rem/t[i].valueInBase);rem=rem%t[i].valueInBase;if(cnt>0)parts.push(cnt+" "+(cnt===1?t[i].name:t[i].plural));}var last=t[t.length-1];return parts.length>0?(neg?"-":"")+parts.join(", "):(neg?"-":"")+"0 "+last.plural;}
-  function ubisCoiNameToBase(n){var l=(n||"").trim().toLowerCase();var t=ubisGetTiers();for(var i=0;i<t.length;i++){if(t[i].name.toLowerCase()===l||t[i].plural.toLowerCase()===l)return t[i].valueInBase;}if(l==="$"||l==="dollar"||l==="dollars")return 1;if(l==="cr"||l==="credit"||l==="credits")return 1;return 0;}
-  function ubisExtractQty(raw){if(!raw)return 1;var l=raw.trim().toLowerCase();var keys=Object.keys(UBIS_WORD_NUMBERS).sort(function(a,b){return b.length-a.length;});for(var i=0;i<keys.length;i++){if(l.indexOf(keys[i])===0)return UBIS_WORD_NUMBERS[keys[i]];}var m=l.match(/^(\d+)/);if(m)return Math.max(1,parseInt(m[1],10));return 1;}
-  function ubisParseQtyStr(s){return ubisExtractQty((s||"").trim());}
-  function ubisQtyPattern(){var nw=["a hundred","one hundred","a dozen","half a dozen","a handful of","a couple of","a handful","a couple","a few","several","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety","nineteen","eighteen","seventeen","sixteen","fifteen","fourteen","thirteen","eleven","twelve","ten","nine","eight","seven","six","five","four","three","two","one","an","a"];return"(\\d+|"+nw.map(function(w){return w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}).join("|")+")";}
-  function ubisCoinPattern(){var t=ubisGetTiers();var ns=[];for(var i=0;i<t.length;i++){var n=t[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var p=t[i].plural.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");if(ns.indexOf(n)===-1)ns.push(n);if(p!==n&&ns.indexOf(p)===-1)ns.push(p);}return"("+ns.join("|")+")";}
-  function ubisFormatHour(h){h=((h%24)+24)%24;var hr=Math.floor(h);var mn=Math.round((h-hr)*60);if(mn===60){hr=(hr+1)%24;mn=0;}var ms=mn<10?"0"+mn:""+mn;if(hr===0)return"12:"+ms+" AM";if(hr<12)return hr+":"+ms+" AM";if(hr===12)return"12:"+ms+" PM";return(hr-12)+":"+ms+" PM";}
-  function ubisFormatDuration(h){if(!h||h<=0)return"0m";var ts=Math.round(h*3600);var hh=Math.floor(ts/3600);var mm=Math.floor((ts%3600)/60);var ss=ts%60;var p=[];if(hh>0)p.push(hh+"h");if(mm>0)p.push(mm+"m");if(ss>0&&hh===0)p.push(ss+"s");return p.length>0?p.join(" "):"0m";}
-  function ubisParseHPT(str){if(!str)return 0;var s=str.trim().toLowerCase().replace(/\s+/g,"");var tot=0;var found=false;var hm=s.match(/(\d+(?:\.\d+)?)h(?:r(?:s)?|our(?:s)?)?/);if(hm){tot+=parseFloat(hm[1]);found=true;}var mm=s.match(/(\d+(?:\.\d+)?)min(?:ute(?:s)?)?/);if(mm){tot+=parseFloat(mm[1])/60;found=true;}else{var mm2=s.match(/(\d+(?:\.\d+)?)m(?![a-z])/);if(mm2){tot+=parseFloat(mm2[1])/60;found=true;}}var sm=s.match(/(\d+(?:\.\d+)?)s(?:ec(?:ond(?:s)?)?)?(?![a-z])/);if(sm){tot+=parseFloat(sm[1])/3600;found=true;}if(!found){var n=parseFloat(s);if(!isNaN(n)&&n>0)tot=n;}return Math.round(tot*3600)/3600;}
-  function ubisFormatDate(U){var t=U.time;return ubisFormatHour(t.hour)+"  "+UBIS_MONTHS[t.month-1].name+" "+t.day+", Year "+t.year;}
-  function ubisTotalDays(t){return Math.floor((t.totalHours||0)/24);}
-  function ubisAdvanceHours(U,h){if(!h||h<=0)return;U.time.totalHours=(U.time.totalHours||0)+h;U.time.hour=(U.time.hour||0)+h;while(U.time.hour>=24){U.time.hour-=24;U.time.day+=1;var dim=UBIS_MONTHS[U.time.month-1].days;if(U.time.day>dim){U.time.day=1;U.time.month+=1;if(U.time.month>12){U.time.month=1;U.time.year+=1;}}}}
-  function ubisDetectTimeSkip(text){if(!text)return 0;var s=text.toLowerCase().replace(/["""][^"""]*["""]/g," ").replace(/'[^']*'/g," ").replace(/\b(?:if|maybe|perhaps|about|around|by|before|after|until|when|while|tomorrow|yesterday)\s+/g," ");var wk=Object.keys(UBIS_WORD_NUMBERS).sort(function(a,b){return b.length-a.length;});for(var wi=0;wi<wk.length;wi++){s=s.replace(new RegExp("\\b"+wk[wi].replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b","g"),String(UBIS_WORD_NUMBERS[wk[wi]]));}var tot=0;for(var i=0;i<UBIS_TIME_PHRASES.length;i++){var p=UBIS_TIME_PHRASES[i];var m=p.r.exec(s);if(!m)continue;var bef=s.slice(Math.max(0,m.index-20),m.index);if(/\b(?:if|maybe|perhaps|plan|wonder|ask|think|hope)\s*$/.test(bef))continue;if(p.hours)tot+=p.hours;else if(p.mult){var n=parseInt(m[1],10);if(!isNaN(n)&&n>0)tot+=n*p.mult;}}return tot;}
-  function ubisLedger(U,type,desc,amount){U.ledger=U.ledger||[];U.ledger.push({turn:U.turnCount,type:type,description:desc,amount:amount});if(U.ledger.length>50)U.ledger.shift();}
-  function ubisParseIntervalStr(str){if(!str)return 0;var s=str.trim().toLowerCase();var ym=s.match(/^(\d+)\s*y(?:r(?:s)?|ear(?:s)?)?$/);if(ym)return parseInt(ym[1],10)*365;var mm=s.match(/^(\d+)\s*mo(?:nth(?:s)?)?$/);if(mm)return parseInt(mm[1],10)*30;var wm=s.match(/^(\d+)\s*w(?:k(?:s)?|eek(?:s)?)?$/);if(wm)return parseInt(wm[1],10)*7;var dm=s.match(/^(\d+)\s*d(?:ay(?:s)?)?$/)||s.match(/^(\d+)$/);if(dm)return parseInt(dm[1],10);return 0;}
-  function ubisFormatIntervalDays(d){if(d>=365&&d%365===0)return(d/365)+"y";if(d>=30&&d%30===0)return(d/30)+"m";if(d>=7&&d%7===0)return(d/7)+"w";return d+"d";}
-  function ubisParseAmountStr(str){if(!str)return 0;var l=str.toLowerCase().trim().replace(/^[-+]/,"").trim();var dm=l.match(/^\$?([\d.]+)$/);if(dm&&ubisResolvePreset()==="modern")return Math.round(parseFloat(dm[1]));var sm2=l.match(/^([\d.]+)\s*cr(?:edits?)?$/);if(sm2&&ubisResolvePreset()==="sci-fi")return Math.round(parseFloat(sm2[1]));var t=ubisGetTiers();var total=0;var found=false;for(var i=0;i<t.length;i++){var tn=t[i].name.toLowerCase();var tp=t[i].plural.toLowerCase();var rx=new RegExp("(\\d+)\\s*(?:"+tn+"|"+tp+")");var mx=l.match(rx);if(mx){total+=parseInt(mx[1],10)*t[i].valueInBase;found=true;}}if(found)return total;var nm=l.match(/(\d+)/);if(!nm)return 0;var num=parseInt(nm[1],10);var sfx=l.replace(/^[\d\s]+/,"").trim();if(t.length>=1&&(sfx==="g"||sfx==="gp"))return num*t[0].valueInBase;if(t.length>=2&&sfx==="s")return num*t[1].valueInBase;if(t.length>=3&&(sfx==="c"||sfx==="cp"))return num*t[2].valueInBase;return num;}
-  function ubisParseBalanceStr(str){if(!str)return -1;var l=str.toLowerCase().trim();var m=ubisResolvePreset();if(m==="modern"){var dm=l.match(/^\$?([\d.]+)$/);if(dm)return Math.round(parseFloat(dm[1]));}if(m==="sci-fi"){var sm=l.match(/^([\d.]+)\s*cr(?:edits?)?$/);if(sm)return Math.round(parseFloat(sm[1]));}var t=ubisGetTiers();var tot=0;var found=false;for(var i=0;i<t.length;i++){var tn=t[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var tp=t[i].plural.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var rx=new RegExp("(\\d+)\\s+(?:"+tn+"|"+tp+")(?:\\b|,|\\s|$)","gi");var x;while((x=rx.exec(l))!==null){tot+=parseInt(x[1],10)*t[i].valueInBase;found=true;}}if(!found){var pl=l.match(/^(\d+)$/);if(pl){tot=parseInt(pl[1],10);found=true;}}return found?tot:-1;}
-  function ubisParseMonthStr(str){if(!str)return 0;var n=parseInt(str,10);if(!isNaN(n)&&n>=1&&n<=12)return n;var l=str.toLowerCase().trim();for(var i=0;i<UBIS_MONTHS.length;i++){if(UBIS_MONTHS[i].name.toLowerCase().indexOf(l)===0)return i+1;}return 0;}
-  function ubisCleanItem(raw){if(!raw)return"";raw=raw.trim().replace(/^(a hundred|one hundred|a handful of|a couple of|a couple|half a dozen|a dozen|a few|several|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|nineteen|eighteen|seventeen|sixteen|fifteen|fourteen|thirteen|eleven|twelve|ten|nine|eight|seven|six|five|four|three|two|one|\d+)\s+/i,"").replace(/^(a |an |the )/i,"").replace(/\s+(from|the|a|an|and|with|in|on|at|to|of|into|onto|toward|your|his|her|their|its|my)$/i,"").trim();if(!raw)return"";return raw.charAt(0).toUpperCase()+raw.slice(1);}
-  function ubisIsActionPhrase(n){if(!n)return false;var l=n.toLowerCase().trim();var ap=["a step","step forward","step back","step aside","a deep breath","a breath","a closer look","a look around","a look","a glance","a seat","a stand","a break","a run","a walk","a leap","a jump","a dash","a sprint","a turn","a swing","a swing at","hold of","hold on","a bite","a sip","a drink","a bow","a nod","a knee","a stance","a position","the pace","the lead","the initiative","the opportunity","the plunge","the bait","the hint","the cue","note of","notice of","stock of","stock","toll","a moment","a second","a minute","a chance","a risk","a shot","a stab","a guess","action","charge","cover","aim","a shot at","a stab at","it easy","it slow","it seriously","it personally","it in","it out","it up","it down","care","note","a beating","a hit","a punch","a kick","my leave","your leave","my time","your time","my chances","your chances"];for(var i=0;i<ap.length;i++){if(l===ap[i]||l.indexOf(ap[i])===0)return true;}if(/\b(?:forward|backward|backwards|sideways|aside|away|down|up|out|off|past|through|around|along|toward|towards|inside|outside|upstairs|downstairs|overhead|underfoot)$/.test(l))return true;if(/^(?:walking|running|moving|stepping|turning|jumping|leaping|lunging|ducking|dodging|swinging|looking|watching|waiting|standing|sitting|lying|crouching|kneeling|reaching|grabbing|pushing|pulling|holding|letting)\b/.test(l))return true;return false;}
-  function ubisIsCoin(n){if(!n)return false;var l=n.toLowerCase().trim();for(var w=0;w<UBIS_COIN_WORDS.length;w++){if(new RegExp("\\b"+UBIS_COIN_WORDS[w].replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b").test(l))return true;}var t=ubisGetTiers();for(var i=0;i<t.length;i++){var tn=t[i].name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");var tp=t[i].plural.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,"\\$&");if(l===tn||l===tp||new RegExp("\\b"+tn+"\\b").test(l)||new RegExp("\\b"+tp+"\\b").test(l))return true;}return false;}
-  function ubisLooksLikeItem(n){if(!n||n.length<2||n.length>50)return false;var w=n.trim().split(/\s+/);if(w.length>6)return false;if(/^\d+$/.test(n.trim()))return false;if(ubisIsCoin(n))return false;if(ubisIsActionPhrase(n))return false;var vs=["walk","run","jump","step","move","turn","look","watch","wait","stand","sit","lie","crouch","kneel","reach","grab","push","pull","hold","let","swing","duck","dodge","lunge","lean","bend","stretch","breathe","sigh","smile","frown","nod","shake","wave","point","think","feel","hear","see","notice","realize","remember","forget","try","attempt","manage","fail","succeed","decide","choose","plan","start","stop","continue","keep","begin","end","finish","complete","go","come","leave","enter","exit","arrive","depart","approach","attack","defend","flee","chase","follow","lead","guide","help","speak","say","shout","whisper","ask","answer","reply","call","draw","sheathe","aim","fire","throw","catch","drop","place","set"];if(vs.indexOf(w[0].toLowerCase())!==-1)return false;var bad=["is","was","were","are","be","been","have","has","had","do","did","does","can","could","will","would","shall","should","may","might","must","in","on","at","to","for","of","with","by","from","into","onto","and","or","but","if","then","so","yet","you","he","she","they","we","it","them","him","her","us","me","i","not","no","never","nothing","here","there","where","when","how","why","very","just","only","also","even","still","already","up","down","out","off","back","away","around","some","any","all","both","each","every","this","that","these","those","his","her","my","your","our","their","its","coin","coins","piece","pieces","penny","pennies","time","moment","second","chance","way","place","thing","part","point","fact","case","side","end","hand","eye","head","mind","heart","word","line","man","men","woman","women","person","people","control","aim","care","note","stock","charge","cover","action"];return bad.indexOf(w[0].toLowerCase())===-1;}
-  function ubisInventoryString(U){var e=Object.entries(U.inventory||{});return e.length===0?"(empty)":e.map(function(x){return x[0]+" ("+x[1]+")";}).join(" | ");}
-  function ubisFindInvKey(U,name){if(!name)return null;var l=name.toLowerCase();var keys=Object.keys(U.inventory||{});var partial=null;for(var i=0;i<keys.length;i++){var kl=keys[i].toLowerCase();if(kl===l)return keys[i];if(!partial&&(kl.indexOf(l)!==-1||l.indexOf(kl)!==-1))partial=keys[i];}return partial;}
-  function ubisAddItem(U,n,q){q=q||1;if(!n||q<=0)return;U.inventory[n]=(U.inventory[n]||0)+q;ubisLedger(U,"inv_add",n+" x"+q,0);}
-  function ubisRemoveItem(U,n,q,force){q=q||1;var key=ubisFindInvKey(U,n);if(!key){if(!force){U.denied=U.denied||[];U.denied.push("[BLOCKED] \""+n+"\" not in inventory.");}return false;}if(U.inventory[key]<q){if(!force){U.denied=U.denied||[];U.denied.push("[BLOCKED] Only "+U.inventory[key]+"x \""+key+"\" — need "+q+".");}return false;}U.inventory[key]-=q;if(U.inventory[key]<=0)delete U.inventory[key];ubisLedger(U,"inv_remove",key+" x"+q,0);return true;}
-  function ubisEnsureCounters(U){var d=ubisTotalDays(U.time);for(var i=0;i<U.settings.bills.length;i++){if(U.billCounters[U.settings.bills[i].name]===undefined)U.billCounters[U.settings.bills[i].name]=d;}for(var j=0;j<U.settings.income.length;j++){if(U.incomeCounters[U.settings.income[j].name]===undefined)U.incomeCounters[U.settings.income[j].name]=d;}}
+function ubisReadEventsCard(){var lines=ubisCardLines("Events");if(!lines)return;var U=state.ubis;if(!U.settings.events)U.settings.events=[];var ev=U.settings.events;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(!tr)continue;if(tr.charAt(0)==="="||tr.charAt(0)==="-"||tr.charAt(0)==="(")continue;if(lo.indexOf("today:")===0||lo.indexOf("date:")===0||lo.indexOf("in ")===0||lo.indexOf("repeat:")===0||lo.indexOf("lead")===0)continue;if(tr.charAt(0)==="["&&lo.indexOf("[on]")!==0&&lo.indexOf("[off]")!==0)continue;if(lo.indexOf("add:")===0){var aS=tr.slice(4).trim().split("|");if(aS.length>=8){var en=aS[0].trim(),esm=parseInt(aS[1].trim(),10),esd=parseInt(aS[2].trim(),10);var emr=aS[3].trim(),edr=aS[4].trim();var eem=(emr==="-"||emr==="")?null:parseInt(emr,10);var eed=(edr==="-"||edr==="")?null:parseInt(edr,10);var eld=Math.max(0,parseInt(aS[5].trim(),10)||0);var erp=aS[6].trim().toLowerCase()==="yearly"?"yearly":null;var edc=aS.slice(7).join("|").trim();if(en&&!isNaN(esm)&&esm>=1&&esm<=12&&!isNaN(esd)&&esd>=1&&esd<=31){var eex=false;for(var ex2=0;ex2<ev.length;ex2++){if(ev[ex2].name.toLowerCase()===en.toLowerCase()){eex=true;break;}}if(!eex)ev.push({name:en,startMonth:esm,startDay:esd,endMonth:eem,endDay:eed,leadDays:eld,description:edc,repeat:erp,priority:true,enabled:true});}}continue;}if(lo.indexOf("del:")===0){var dn=tr.slice(4).trim().toLowerCase();U.settings.events=ev.filter(function(e){return e.name.toLowerCase()!==dn;});ev=U.settings.events;continue;}var isOnE=lo.indexOf("[on]")!==-1,isOffE=lo.indexOf("[off]")!==-1;if(!isOnE&&!isOffE)continue;var en2=tr.replace(/^\[(on|off)\]\s*/i,"").split("|")[0].trim().toLowerCase();if(!en2)continue;for(var ei=0;ei<ev.length;ei++){if(ev[ei].name.toLowerCase()===en2){ev[ei].enabled=isOnE;break;}}}}
 
-  function ubisCreateCards(){var U=state.ubis;var cc=U&&U.cardConfig;var names=["Inventory","Configure Realmheart","Configure Time Settings","Bills","Ledger","Prices & Goods","Bounty Board","Holidays","Events","Seasons"];var ccKeys=["Inventory","Configure Realmheart","Configure Time Settings","Bills","Ledger","Prices & Goods","Bounty Board","Holidays","Events","Seasons"];for(var i=0;i<names.length;i++){var enabled=!cc||(cc[ccKeys[i]]!==false);if(!enabled)continue;if(!ubisFindCard(names[i])){try{addStoryCard(names[i],"(loading...)","Realmheart",names[i],"{}");log("[Realmheart] Created: "+names[i]);}catch(e){log("[Realmheart] Card error: "+e);}}}}
-  function ubisFindCard(title){if(!Array.isArray(storyCards))return null;for(var i=0;i<storyCards.length;i++){if(storyCards[i]&&storyCards[i].title===title)return storyCards[i];}return null;}
-  function ubisWriteCard(title,entry){var card=ubisFindCard(title);if(!card){try{addStoryCard(title,entry,"Realmheart",title,"{}");}catch(e){}return;}card.entry=entry;try{card.description=JSON.stringify({_ubis:true,v:"2"});}catch(e){}}
-  function ubisCardLines(t){var c=ubisFindCard(t);if(!c||!c.entry||c.entry==="(loading...)")return null;return c.entry.split("\n");}
+function ubisReadSeasonsCard(){}
 
-  // ------------------------------------------------------------
-  // SECTION 6 — CARD READER FUNCTIONS  (parses card edits)
-  // ------------------------------------------------------------
-  function ubisReadAllCards(){ubisReadInventoryCard();ubisReadBillsCard();ubisReadConfigCard();ubisReadTimeCard();ubisReadLedgerCard();ubisReadPricesGoodsCard();ubisReadBountyCard();ubisReadHolidaysCard();ubisReadEventsCard();ubisReadSeasonsCard();}
-  function ubisRemoveCard(title){var card=ubisFindCard(title);if(!card)return;try{removeStoryCard(card.id);}catch(e){}}function ubisWriteAllCards(){var U=state.ubis;if(!U)return;var cc=U.cardConfig||{};if(!cc.masterEnabled)return;var allNames=["Inventory","Configure Realmheart","Configure Time Settings","Bills","Ledger","Prices & Goods","Bounty Board","Holidays","Events","Seasons"];for(var ri=0;ri<allNames.length;ri++){if(cc[allNames[ri]]===false){ubisRemoveCard(allNames[ri]);}}if(cc["Inventory"])ubisWriteCard("Inventory",ubisInventoryCardBody(U));if(cc["Configure Realmheart"])ubisWriteCard("Configure Realmheart",ubisConfigCardBody(U));if(cc["Configure Time Settings"])ubisWriteCard("Configure Time Settings",ubisTimeCardBody(U));if(cc["Bills"])ubisWriteCard("Bills",ubisBillsCardBody(U));if(cc["Ledger"])ubisWriteCard("Ledger",ubisLedgerCardBody(U));if(cc["Prices & Goods"])ubisWriteCard("Prices & Goods",ubisPricesGoodsCardBody(U));if(cc["Bounty Board"])ubisWriteCard("Bounty Board",ubisBountyCardBody(U));if(cc["Holidays"])ubisWriteCard("Holidays",ubisHolidaysCardBody(U));if(cc["Events"])ubisWriteCard("Events",ubisEventsCardBody(U));if(cc["Seasons"])ubisWriteCard("Seasons",ubisSeasonsCardBody(U));}
 
-  function ubisReadInventoryCard(){var lines=ubisCardLines("Inventory");if(!lines)return;var U=state.ubis;var inI=false,inW=false,newInv={},foundInv=false;var iL=ubisGetInventoryLabel().toUpperCase();var wL=ubisGetCurrencyLabel().toUpperCase();for(var i=0;i<lines.length;i++){var t=lines[i].trim();if(t.indexOf("== "+iL)===0||t.indexOf("== INVENTORY")===0||t.indexOf("== LOADOUT")===0){inI=true;inW=false;foundInv=true;continue;}if(t.indexOf("== "+wL)===0||t.indexOf("== WALLET")===0||t.indexOf("== PURSE")===0||t.indexOf("== ACCOUNT")===0){inI=false;inW=true;continue;}if(t.indexOf("==")===0){inI=false;inW=false;continue;}if(!t||t.charAt(0)==="["||t.charAt(0)==="/"||t.charAt(0)==="-"||t.indexOf("Total")===0||t.indexOf("(empty)")!==-1)continue;if(inI){var c=t.indexOf(":");if(c<1)continue;var iN=t.slice(0,c).trim();var qS=t.slice(c+1).trim();var qM=qS.match(/\(Qty:\s*(\d+)\)/i)||qS.match(/^(\d+)/);if(qM&&iN.length>0&&iN.length<60){var qty=parseInt(qM[1],10);if(qty>0)newInv[iN]=qty;}}if(inW){var nb=ubisParseBalanceStr(t);if(nb>=0)U.balance=nb;}}if(foundInv)U.inventory=newInv;}
+// ------------------------------------------------------------
+// SECTION 7 — DETECTION FUNCTIONS  (currency / inventory / time)
+// ------------------------------------------------------------
+function ubisDetectPlayerConsume(U,text){var removed=[];var seen={};var patterns=[/\b(?:you|i)\s+(?:eat|ate|consume|consumed|drink|drank|use up|used up)\s+(?:the|a|an|some|my|your)?\s*([^.!?,;\n]+)/gi,/\b(?:you|i)\s+(?:have|had|take|took)\s+(?:a|an)\s+(?:drink|sip|swig|gulp|bite)\s+of\s+([^.!?,;\n]+)/gi,/\b(?:you|i)\s+(?:sip|sipped|gulp|gulped|swig|swigged)\s+(?:the|a|an|some|my|your)?\s*([^.!?,;\n]+)/gi];for(var p=0;p<patterns.length;p++){var rx=patterns[p];var m;while((m=rx.exec(text))!==null){var raw=(m[m.length-1]||"").split(/\s+(?:and|then|but|also|while)\s+/i)[0];var words=raw.trim().split(/\s+/).slice(0,6).join(" ");var qty=ubisExtractQty(words);var name=ubisCleanItem(words.replace(/^(?:of\s+)/i,""));if(!name||!ubisLooksLikeItem(name))continue;var key=ubisFindInvKey(U,name);if(!key||seen[key.toLowerCase()])continue;seen[key.toLowerCase()]=true;ubisRemoveItem(U,key,qty,false);removed.push(key+" x"+qty);}}return removed;}
+function ubisDetectPlayerAdd(U,text){var added=[];var seen={};var lo=text.toLowerCase();for(var i=0;i<UBIS_PLAYER_ADD.length;i++){var trig=UBIS_PLAYER_ADD[i];var idx=lo.indexOf(trig);if(idx===-1)continue;var seg=text.slice(idx+trig.length).split(/[.!?,;\n]/)[0];seg=seg.split(/\s+(?:and|then|but|also|plus|as well as)\s+/i)[0];var words=seg.trim().split(/\s+/).slice(0,6).join(" ");if(ubisIsCoin(words))continue;var qty=ubisExtractQty(words);var name=ubisCleanItem(words);if(name&&ubisLooksLikeItem(name)&&!seen[name.toLowerCase()]){seen[name.toLowerCase()]=true;ubisAddItem(U,name,qty);added.push(name+" x"+qty);}}return added;}
+function ubisDetectPlayerRemove(U,text){var removed=[];var seen={};var lo=text.toLowerCase();for(var i=0;i<UBIS_PLAYER_REM.length;i++){var trig=UBIS_PLAYER_REM[i];var idx=lo.indexOf(trig);if(idx===-1)continue;var seg=text.slice(idx+trig.length).split(/[.!?,;\n]/)[0];seg=seg.split(/\s+(?:and|then|but|also)\s+/i)[0];var words=seg.trim().split(/\s+/).slice(0,5).join(" ");if(ubisIsCoin(words))continue;var qty=ubisExtractQty(words);var name=ubisCleanItem(words);if(name&&ubisLooksLikeItem(name)&&!seen[name.toLowerCase()]){var key=ubisFindInvKey(U,name);if(key){seen[name.toLowerCase()]=true;ubisRemoveItem(U,key,qty,false);removed.push(key+" x"+qty);}}}return removed;}
+function ubisDetectPlayerCurrencyGain(U,text){var gained=0;var lo=text.toLowerCase();var qp=ubisQtyPattern();var cp=ubisCoinPattern();var gP=["(?:you|i) (?:receive[ds]?|earn(?:ed)?|found|find|gain(?:ed)?|got|loot(?:ed)?|are paid|were paid|pick(?:ed)? up|took|take|steal|stole|obtain(?:ed)?|collect(?:ed)?)\\s+(?:a handful of |a few |several |)"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?",qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)\\s+(?:given|handed|awarded|paid)\\s+to\\s+(?:you|me)"];var seen={};for(var i=0;i<gP.length;i++){var rx=new RegExp(gP[i],"gi");var m;while((m=rx.exec(lo))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){U.balance+=base;gained+=base;ubisLedger(U,"income","Gained "+amt+" "+cn,base);}}}return gained;}
+function ubisDetectPlayerCurrencyLoss(U,text){var lost=0;var lo=text.toLowerCase();var qp=ubisQtyPattern();var cp=ubisCoinPattern();var lP=["(?:you|i) (?:pay|paid|spend|spent|give|gave|hand(?:ed)? over|part(?:ed)? with|lose|lost)\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?","(?:you|i) (?:purchased?|bought?|traded?)\\s+.{0,40}?\\s+for\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?","(?:costs?|cost|costing)\\s+(?:(?:you|me)\\s+)?"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?","(?:in exchange for|for the price of|for a price of|for the sum of)\\s+"+qp+"\\s+"+cp];var seen={};for(var i=0;i<lP.length;i++){var rx=new RegExp(lP[i],"gi");var m;while((m=rx.exec(lo))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){if(U.balance<base){U.denied=U.denied||[];U.denied.push("[BLOCKED] Cannot spend "+ubisFormatBalance(base)+" — only have "+ubisFormatBalance(U.balance));}else{U.balance-=base;lost+=base;ubisLedger(U,"expense","Spent "+amt+" "+cn,-base);}}}}return lost;}
+function ubisTryCurrencyGain(U,text){var gained=0;var qp=ubisQtyPattern();var cp=ubisCoinPattern();var gP=["you (?:receive[ds]?|earn(?:ed)?|find|found|gain(?:ed)?|loot(?:ed)?|are paid|were paid|got|get|steal|stole|obtain(?:ed)?|pick(?:ed)? up|take|took|collect(?:ed)?) (?:a handful of |a few |several |)"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?",qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)\\s+(?:given|handed|awarded|paid) to you","[\\w']+\\s+(?:hands?|gives?|gave|handed) you\\s+"+qp+"\\s+"+cp,"(?:puts?|put|places?|placed|presses?|pressed|slips?|slipped|slides?|slid|drops?|dropped)\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:in(?:to)?|on(?:to)?)\\s+(?:your|you)","(?:tosses?|tossed|throws?|threw|passes?|passed)\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:to|at|toward)\\s+you",qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)?\\s*(?:pressed?|placed?|dropped?|put|slipped?)\\s+into?\\s+your","[\\w']+\\s+(?:offers?|offered|extends?|extended)\\s+(?:you\\s+)?"+qp+"\\s+"+cp];var seen={};for(var i=0;i<gP.length;i++){var rx=new RegExp(gP[i],"gi");var m;while((m=rx.exec(text))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){U.balance+=base;gained+=base;ubisLedger(U,"income","Gained "+amt+" "+cn,base);}}}return gained;}
+function ubisTryCurrencyLoss(U,text){var lost=0;var qp=ubisQtyPattern();var cp=ubisCoinPattern();var lP=["you (?:pay[ds]?|paid|spend[s]?|spent|give[s]?|gave|hand[s]? over|handed over|part[s]? with|parted with)\\s+"+qp+"\\s+"+cp,"(?:costs?|cost|costing)\\s+(?:you\\s+)?"+qp+"\\s+"+cp,qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)\\s+taken","you (?:lose[s]?|lost)\\s+"+qp+"\\s+"+cp,"(?:in exchange for|for the price of|for the sum of)\\s+"+qp+"\\s+"+cp,"you (?:purchase[ds]?|buy|bought|paid)\\s+(?:[\\w\\s']+?)\\s+for\\s+"+qp+"\\s+"+cp,"(?:paying|spending)\\s+"+qp+"\\s+"+cp];var seen={};for(var i=0;i<lP.length;i++){var rx=new RegExp(lP[i],"gi");var m;while((m=rx.exec(text))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){if(U.balance<base){U.denied=U.denied||[];U.denied.push("[BLOCKED] Cannot spend "+ubisFormatBalance(base)+" — only have "+ubisFormatBalance(U.balance));}else{U.balance-=base;lost+=base;ubisLedger(U,"expense","Spent "+amt+" "+cn,-base);}}}}return lost;}
 
-  function ubisReadConfigCard(){var lines=ubisCardLines("Configure Realmheart");if(!lines)return;
-  var U=state.ubis;
-  var ubOldPreset=U.settings?U.settings.preset:null;
-  for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(!line||line.charAt(0)==="="||line.charAt(0)==="-"||line.charAt(0)==="/"||line.charAt(0)==="["||line.charAt(0)==="(")continue;var colon=line.indexOf(":");if(colon<1)continue;var rk=line.slice(0,colon).trim().toLowerCase().replace(/[\s\/\-&]+/g,"");var val=line.slice(colon+1).trim();
-  // FIX: extract only the first word before any space or dash so inline descriptions
-  // like "ON  -- AI writes NPCs only" correctly resolve to "on"
-  var firstWord=val.toLowerCase().split(/[\s\u2014\-]+/)[0];
-  var isOn=(firstWord==="on"||firstWord==="true"||firstWord==="yes");
-  var isOff=(firstWord==="off"||firstWord==="false"||firstWord==="no");
-  var nv=parseInt(val,10);
-  switch(rk){
-    case "preset":var vp=["fantasy","modern","sci-fi"];var pv=val.split("(")[0].toLowerCase().trim();if(vp.indexOf(pv)!==-1&&pv!==U.settings.preset){U.settings.preset=pv;if(pv==="fantasy"&&(!U.settings.tiers||!U.settings.tiers.length))U.settings.tiers=UBIS_TIERS.map(function(t){return Object.assign({},t);});U.settings.priceList=JSON.parse(JSON.stringify(ubisGetDefaultPriceList()));U.settings.holidays=JSON.parse(JSON.stringify(ubisGetDefaultHolidays()));if(pv==="modern")U.settings.bills=JSON.parse(JSON.stringify([{name:"Rent",amount:1200,intervalDays:30,enabled:true,items:[]}]));else if(pv==="sci-fi")U.settings.bills=JSON.parse(JSON.stringify([{name:"Berth Fee",amount:300,intervalDays:30,enabled:true,items:[]}]));else U.settings.bills=JSON.parse(JSON.stringify([{name:"Inn Stay",amount:20,intervalDays:1,enabled:true,items:[]}]));if(pv==="modern")U.settings.income=JSON.parse(JSON.stringify([{name:"Job Salary",amount:600,intervalDays:7,enabled:false}]));else if(pv==="sci-fi")U.settings.income=JSON.parse(JSON.stringify([{name:"Crew Stipend",amount:250,intervalDays:7,enabled:false}]));else U.settings.income=JSON.parse(JSON.stringify([{name:"Merchant Salary",amount:100,intervalDays:30,enabled:false}]));ubisEnsureCounters(U);}break;
-    case "script":if(isOn||isOff)U.settings.scriptEnabled=isOn;break;
-    case "inventoryauto":if(isOn||isOff)U.settings.inventoryEnabled=isOn;break;
-    case "currencyauto":if(isOn||isOff)U.settings.currencyEnabled=isOn;break;
-    case "timeauto":if(isOn||isOff)U.settings.timeEnabled=isOn;break;
-    case "billsauto":if(isOn||isOff)U.settings.billsEnabled=isOn;break;
-    case "currencycontext":if(isOn||isOff)U.settings.currencyContextEnabled=isOn;break;
-    case "narratormode":case "narratorswitch":case "npconly":if(isOn||isOff)U.settings.narratorMode=isOn;break;
-    case "master":if(isOn||isOff)U.cardConfig.masterEnabled=isOn;break;
-    case "inventory":if(isOn||isOff)U.cardConfig["Inventory"]=isOn;break;
-    case "configubis":case "configurerealmheart":if(isOn||isOff)U.cardConfig["Configure Realmheart"]=isOn;break;
-    case "configtime":case "configuretime":if(isOn||isOff)U.cardConfig["Configure Time Settings"]=isOn;break;
-    case "bills":if(isOn||isOff)U.cardConfig["Bills"]=isOn;break;
-    case "ledger":if(isOn||isOff)U.cardConfig["Ledger"]=isOn;break;
-    case "pricesgoods":case "pricelist":case "goodsservices":if(isOn||isOff)U.cardConfig["Prices & Goods"]=isOn;break;
-    case "bountyboard":case "bountypayouts":case "jobpayouts":if(isOn||isOff)U.cardConfig["Bounty Board"]=isOn;break;case "currencyname":if(ubisResolvePreset()==="modern"&&val)U.settings.modernCurrencyName=val;else if(ubisResolvePreset()==="sci-fi"&&val)U.settings.scifiCurrencyName=val;break;case "currencysymbol":if(ubisResolvePreset()==="modern"&&val)U.settings.modernCurrencySymbol=val;else if(ubisResolvePreset()==="sci-fi"&&val)U.settings.scifiCurrencySymbol=val;break;
-    case "holidays":if(isOn||isOff)U.cardConfig["Holidays"]=isOn;break;
-    case "events":if(isOn||isOff)U.cardConfig["Events"]=isOn;break;
-    case "seasons":if(isOn||isOff)U.cardConfig["Seasons"]=isOn;break;
-    case "tier1value":case "goldvalue":if(!isNaN(nv)&&nv>0&&U.settings.tiers)U.settings.tiers[0].valueInBase=nv;break;
-    case "tier2value":case "silvervalue":if(!isNaN(nv)&&nv>0&&U.settings.tiers)U.settings.tiers[1].valueInBase=nv;break;
-    case "tier3value":case "coppervalue":if(!isNaN(nv)&&nv>0&&U.settings.tiers)U.settings.tiers[2].valueInBase=nv;break;
-    case "tier1name":case "goldname":if(val.length>0&&val.length<30&&U.settings.tiers){U.settings.tiers[0].name=val;U.settings.tiers[0].plural=val;}break;
-    case "tier2name":case "silvername":if(val.length>0&&val.length<30&&U.settings.tiers){U.settings.tiers[1].name=val;U.settings.tiers[1].plural=val;}break;
-    case "tier3name":case "coppername":if(val.length>0&&val.length<30&&U.settings.tiers){U.settings.tiers[2].name=val;U.settings.tiers[2].plural=val;}break;
-  }}if(U.settings&&U.settings.preset!==ubOldPreset){if(U.settings.preset==="modern"){U.settings.modernCurrencyName=null;U.settings.modernCurrencySymbol=null;}if(U.settings.preset==="sci-fi"){U.settings.scifiCurrencyName=null;U.settings.scifiCurrencySymbol=null;}if(U.settings.preset==="fantasy"){U.settings.modernCurrencyName=null;U.settings.modernCurrencySymbol=null;U.settings.scifiCurrencyName=null;U.settings.scifiCurrencySymbol=null;}}}
-
-  function ubisReadTimeCard(){var lines=ubisCardLines("Configure Time Settings");if(!lines)return;var U=state.ubis;var ubOldY=U.time.year,ubOldM=U.time.month,ubOldD=U.time.day;for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(!line||line.charAt(0)==="="||line.charAt(0)==="-"||line.charAt(0)==="["||line.charAt(0)==="(")continue;var colon=line.indexOf(":");if(colon<1)continue;var rk=line.slice(0,colon).trim().toLowerCase().replace(/[\s\/\-]+/g,"");var val=line.slice(colon+1).trim();var nv=parseInt(val,10);if(rk==="hrsturn"||rk==="hoursturn"||rk==="hperturn"){var h=ubisParseHPT(val);if(h>0)U.settings.hoursPerTurn=h;continue;}if(rk==="year"&&!isNaN(nv)&&nv>0){if(nv!==U.time.year)U.time.year=nv;continue;}if(rk==="month"&&!isNaN(nv)&&nv>=1&&nv<=12){if(nv!==U.time.month)U.time.month=nv;continue;}if(rk==="day"){var md=UBIS_MONTHS[U.time.month-1].days;if(!isNaN(nv)&&nv>=1&&nv<=md&&nv!==U.time.day)U.time.day=nv;continue;}if(rk==="hour"&&!isNaN(nv)&&nv>=0&&nv<=23&&nv!==Math.floor(U.time.hour)){U.time.hour=nv;U.time.totalHours=ubisTotalDays(U.time)*24+nv;continue;}}if(U.time.year!==ubOldY||U.time.month!==ubOldM||U.time.day!==ubOldD){var ubDayDiff=ubisAbsoluteDay(U.time.year,U.time.month,U.time.day)-ubisAbsoluteDay(ubOldY,ubOldM,ubOldD);U.time.totalHours=(U.time.totalHours||0)+(ubDayDiff*24);}}
-
-  function ubisReadBillsCard(){var lines=ubisCardLines("Bills");if(!lines)return;var U=state.ubis;var inB=false,inI=false;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(lo.indexOf("-- recurring bills")!==-1){inB=true;inI=false;continue;}if(lo.indexOf("-- recurring income")!==-1){inB=false;inI=true;continue;}if(tr.indexOf("==")===0){inB=false;inI=false;continue;}if(!tr)continue;if(tr.charAt(0)!=="["){if(lo.indexOf("add bill:")===0){var ab=tr.slice(tr.indexOf(":")+1).trim().split("|");if(ab.length>=3){var bn=ab[0].trim(),ba=ubisParseAmountStr(ab[1].trim()),bd=ubisParseIntervalStr(ab[2].trim());if(bn&&ba>0&&bd>0){var be=false;for(var bx=0;bx<U.settings.bills.length;bx++){if(U.settings.bills[bx].name.toLowerCase()===bn.toLowerCase()){be=true;break;}}if(!be){U.settings.bills.push({name:bn,amount:ba,intervalDays:bd,enabled:true,items:[]});U.billCounters[bn]=ubisTotalDays(U.time);}}}continue;}if(lo.indexOf("add income:")===0){var ai=tr.slice(tr.indexOf(":")+1).trim().split("|");if(ai.length>=3){var in2=ai[0].trim(),ia=ubisParseAmountStr(ai[1].trim()),id2=ubisParseIntervalStr(ai[2].trim());if(in2&&ia>0&&id2>0){var ie=false;for(var ix=0;ix<U.settings.income.length;ix++){if(U.settings.income[ix].name.toLowerCase()===in2.toLowerCase()){ie=true;break;}}if(!ie){U.settings.income.push({name:in2,amount:ia,intervalDays:id2,enabled:true});U.incomeCounters[in2]=ubisTotalDays(U.time);}}}continue;}if(lo.indexOf("del:")===0||lo.indexOf("del bill:")===0||lo.indexOf("del income:")===0){var dc=tr.indexOf(":");var dn=tr.slice(dc+1).trim().toLowerCase();U.settings.bills=U.settings.bills.filter(function(b){return b.name.toLowerCase()!==dn;});U.settings.income=U.settings.income.filter(function(x){return x.name.toLowerCase()!==dn;});delete U.billCounters[dn];delete U.incomeCounters[dn];continue;}}if(!inB&&!inI)continue;var isOn=lo.indexOf("[on]")!==-1,isOff=lo.indexOf("[off]")!==-1;if(!isOn&&!isOff)continue;var at=tr.replace(/^\[(on|off)\]\s*/i,"");var ec=at.indexOf(":");if(ec<1)continue;var en=at.slice(0,ec).trim();var er=at.slice(ec+1).trim();var eap=er.split("/")[0].trim().replace(/^[-+]/,"").trim();var ea=eap.length>0?ubisParseAmountStr(eap):0;var edR=er.match(/\/\s*(.+)$/i);var ed=edR?ubisParseIntervalStr(edR[1].trim()):0;var j;if(inB)for(j=0;j<U.settings.bills.length;j++){if(U.settings.bills[j].name.toLowerCase()===en.toLowerCase()){U.settings.bills[j].enabled=isOn;if(ea>0)U.settings.bills[j].amount=ea;if(ed>0)U.settings.bills[j].intervalDays=ed;break;}}if(inI)for(j=0;j<U.settings.income.length;j++){if(U.settings.income[j].name.toLowerCase()===en.toLowerCase()){U.settings.income[j].enabled=isOn;if(ea>0)U.settings.income[j].amount=ea;if(ed>0)U.settings.income[j].intervalDays=ed;break;}}}ubisEnsureCounters(U);}
-
-  function ubisReadPricesGoodsCard(){
-    var lines=ubisCardLines("Prices & Goods");if(!lines)return;
-    var U=state.ubis;var pl=U.settings.priceList;if(!pl)return;
-    var inGoods=false;var currentCat="";
-    for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(!tr)continue;
-      if(lo.indexOf("-- goods")!==-1||lo.indexOf("-- currency")!==-1){inGoods=lo.indexOf("-- goods")!==-1;currentCat="";continue;}
-      if(tr.indexOf("==")===0){inGoods=false;currentCat="";continue;}
-      if(tr.charAt(0)==="["||tr.charAt(0)==="("||tr.charAt(0)==="-")continue;
-      if(inGoods&&tr.charAt(tr.length-1)===":"&&tr.indexOf("--")===-1){      currentCat=tr.slice(0,-1).trim();continue;}
-      if(inGoods&&currentCat&&tr.indexOf("--")!==-1){        var parts=tr.split("--");if(parts.length<2)continue;        var amtStr=parts[0].trim();var lbl=parts.slice(1).join("--").trim();        var amt=ubisParseAmountStr(amtStr);        if(!lbl||isNaN(amt)||amt<0)continue;        for(var ci=0;ci<pl.length;ci++){if(pl[ci].category.toLowerCase()===currentCat.toLowerCase()){for(var ti=0;ti<pl[ci].tiers.length;ti++){if(pl[ci].tiers[ti].label.toLowerCase()===lbl.toLowerCase()){pl[ci].tiers[ti].amount=amt;break;}}break;}}        continue;}
-      if(inGoods){
-        if(lo.indexOf("add item:")===0){var aS=tr.slice(9).trim().split("|");if(aS.length>=3){var ac=aS[0].trim(),al=aS[1].trim(),aa=ubisParseAmountStr(aS[2].trim());if(ac&&al&&!isNaN(aa)&&aa>=0){var cf=false;for(var ci2=0;ci2<pl.length;ci2++){if(pl[ci2].category.toLowerCase()===ac.toLowerCase()){cf=true;var tf=false;for(var ti2=0;ti2<pl[ci2].tiers.length;ti2++){if(pl[ci2].tiers[ti2].label.toLowerCase()===al.toLowerCase()){pl[ci2].tiers[ti2].amount=aa;tf=true;break;}}if(!tf)pl[ci2].tiers.push({label:al,amount:aa});break;}}if(!cf)pl.push({category:ac,tiers:[{label:al,amount:aa}]});}}continue;}
-        if(lo.indexOf("add category:")===0){var nc=tr.slice(13).trim();if(nc){var cx=false;for(var ci3=0;ci3<pl.length;ci3++){if(pl[ci3].category.toLowerCase()===nc.toLowerCase()){cx=true;break;}}if(!cx)pl.push({category:nc,tiers:[]});}continue;}
-        if(lo.indexOf("del item:")===0){var dS=tr.slice(9).trim().split("|");if(dS.length>=2){var dlc=dS[0].trim(),dll=dS[1].trim();for(var ci4=0;ci4<pl.length;ci4++){if(pl[ci4].category.toLowerCase()===dlc.toLowerCase()){pl[ci4].tiers=pl[ci4].tiers.filter(function(t){return t.label.toLowerCase()!==dll.toLowerCase();});break;}}};continue;}
-        if(lo.indexOf("del category:")===0){var dlcat=tr.slice(13).trim();if(dlcat){U.settings.priceList=pl.filter(function(c){return c.category.toLowerCase()!==dlcat.toLowerCase();});pl=U.settings.priceList;}continue;}
-        if(lo.indexOf("rename category:")===0){var rS=tr.slice(16).trim().split("|");if(rS.length>=2){var on2=rS[0].trim(),nn=rS[1].trim();for(var ci5=0;ci5<pl.length;ci5++){if(pl[ci5].category.toLowerCase()===on2.toLowerCase()){pl[ci5].category=nn;break;}}}continue;}
-      }
-    }
+// ------------------------------------------------------------
+// SECTION 8 — BILLS & INCOME PROCESSING
+// ------------------------------------------------------------
+function ubisProcessBills(U){
+var notices=[];var cd=ubisTotalDays(U.time);
+var i,bill,src,ld,per,charge;
+for(i=0;i<U.settings.income.length;i++){
+  src=U.settings.income[i];if(!src.enabled)continue;
+  ld=U.incomeCounters[src.name]||0;
+  per=Math.floor((cd-ld)/(src.intervalDays||1));if(per<=0)continue;
+  var pay=src.amount*per;U.balance+=pay;
+  U.incomeCounters[src.name]=ld+(per*src.intervalDays);
+  ubisLedger(U,"income",src.name+(per>1?" x"+per:""),pay);
+  notices.push("[INCOME] "+src.name+(per>1?" x"+per:"")+":  +"+ubisFormatBalance(pay));
+}
+for(i=0;i<U.settings.wells.length;i++){
+  var well=U.settings.wells[i];if(!well.enabled)continue;
+  var wld=U.wellCounters[well.name]||0;
+  var wper=Math.floor((cd-wld)/(well.intervalDays||1));if(wper<=0)continue;
+  var wqty=well.qty*wper;
+  ubisAddItem(U,well.item,wqty);
+  U.wellCounters[well.name]=wld+(wper*well.intervalDays);
+  notices.push("[WELL] "+well.name+(wper>1?" x"+wper:"")+":  +"+wqty+" "+well.item);
+}
+for(i=0;i<U.settings.drains.length;i++){
+  var drain=U.settings.drains[i];if(!drain.enabled)continue;
+  var dld=U.drainCounters[drain.name]||0;
+  var dper=Math.floor((cd-dld)/(drain.intervalDays||1));if(dper<=0)continue;
+  var dneed=drain.qty*dper;
+  var dtaken=ubisDrainItem(U,drain.item,dneed);
+  U.drainCounters[drain.name]=dld+(dper*drain.intervalDays);
+  var dshort=dneed-dtaken;
+  if(U.settings.hardmodeConsequences){
+    drain.missed=dshort>0?(drain.missed||0)+1:0;
+    if(drain.missed>(drain.grace||0)&&drain.penalty){U.pendingPenalties.push({name:drain.name,type:"drain",missed:drain.missed,penalty:drain.penalty});}
   }
-  function ubisReadBountyCard(){var lines=ubisCardLines("Bounty Board");if(!lines)return;var U=state.ubis;var pk=ubisResolvePreset().replace("-","");var jp=U.settings.jobPayouts&&U.settings.jobPayouts[pk];if(!jp)return;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(!tr||tr.charAt(0)==="="||tr.charAt(0)==="-"||tr.charAt(0)==="["||tr.charAt(0)==="(")continue;if(lo.indexOf("add:")===0){var aS=tr.slice(4).trim().split("|");if(aS.length>=3){var lb=aS[0].trim(),mn=ubisParseAmountStr(aS[1].trim()),mx=ubisParseAmountStr(aS[2].trim()),dc=aS.length>=4?aS[3].trim():"Custom tier";if(lb&&(mn>0||mx>0)){var ex=false;for(var xi=0;xi<jp.length;xi++){if(jp[xi].label.toLowerCase()===lb.toLowerCase()){ex=true;break;}}if(!ex)jp.push({label:lb,minPay:mn,maxPay:mx,desc:dc});}}continue;}if(lo.indexOf("del:")===0){var dn=tr.slice(4).trim().toLowerCase();U.settings.jobPayouts[pk]=jp.filter(function(j){return j.label.toLowerCase()!==dn;});jp=U.settings.jobPayouts[pk];continue;}var pp=tr.split("|");if(pp.length<3)continue;var lb2=pp[0].trim(),mn2=ubisParseAmountStr(pp[1].trim()),mx2=ubisParseAmountStr(pp[2].trim());if(!lb2||isNaN(mn2)||isNaN(mx2)||(mn2===0&&mx2===0))continue;for(var ji=0;ji<jp.length;ji++){if(jp[ji].label.toLowerCase()===lb2.toLowerCase()&&(mn2!==jp[ji].minPay||mx2!==jp[ji].maxPay)){jp[ji].minPay=mn2;jp[ji].maxPay=mx2;break;}}}}
-  function ubisReadLedgerCard(){}
-  function ubisReadHolidaysCard(){var lines=ubisCardLines("Holidays");if(!lines)return;var U=state.ubis;var hols=U.settings.holidays;if(!hols)return;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();tr=tr.replace(/^edit:\s*/i,"");var lo=tr.toLowerCase();if(!tr||tr.charAt(0)==="="||tr.charAt(0)==="-"||tr.charAt(0)==="("||lo.indexOf("today")===0||lo.indexOf("in ")===0||lo.indexOf("date:")===0)continue;if(tr.charAt(0)==="["&&lo.indexOf("[on]")!==0&&lo.indexOf("[off]")!==0)continue;if(lo.indexOf("add:")===0){var aS=tr.slice(4).trim().split("|");if(aS.length>=5){var hn=aS[0].trim(),hm=parseInt(aS[1].trim(),10),hd=parseInt(aS[2].trim(),10),ht=(aS[3].trim()||"custom").toLowerCase(),hdc=aS.slice(4).join("|").trim();if(hn&&!isNaN(hm)&&hm>=1&&hm<=12&&!isNaN(hd)&&hd>=1&&hd<=31){var ex=false;for(var hx=0;hx<hols.length;hx++){if(hols[hx].name.toLowerCase()===hn.toLowerCase()){ex=true;break;}}if(!ex)hols.push({name:hn,month:hm,day:hd,type:ht,enabled:true,description:hdc});}}continue;}if(lo.indexOf("del:")===0){var dn=tr.slice(4).trim().toLowerCase();U.settings.holidays=hols.filter(function(h){return h.name.toLowerCase()!==dn;});hols=U.settings.holidays;continue;}var isOn=lo.indexOf("[on]")!==-1,isOff=lo.indexOf("[off]")!==-1;if(!isOn&&!isOff)continue;var rest=tr.replace(/^\[(on|off)\]\s*/i,"").trim();var parts=rest.split("|");var hname=parts[0].trim().toLowerCase();if(!hname)continue;for(var hi=0;hi<hols.length;hi++){if(hols[hi].name.toLowerCase()!==hname)continue;hols[hi].enabled=isOn;if(parts.length>=2){var nm=parseInt(parts[1].trim(),10);if(!isNaN(nm)&&nm>=1&&nm<=12)hols[hi].month=nm;}if(parts.length>=3){var nd=parseInt(parts[2].trim(),10);var md=UBIS_MONTHS[hols[hi].month-1].days;if(!isNaN(nd)&&nd>=1&&nd<=md)hols[hi].day=nd;}if(parts.length>=4){var nt=parts[3].trim().toLowerCase();var vt=["holiday","birthday","seasonal","religious","custom"];if(nt&&vt.indexOf(nt)!==-1)hols[hi].type=nt;}break;}}}
-
-  function ubisReadEventsCard(){var lines=ubisCardLines("Events");if(!lines)return;var U=state.ubis;if(!U.settings.events)U.settings.events=[];var ev=U.settings.events;for(var i=0;i<lines.length;i++){var tr=lines[i].trim();var lo=tr.toLowerCase();if(!tr)continue;if(tr.charAt(0)==="="||tr.charAt(0)==="-"||tr.charAt(0)==="(")continue;if(lo.indexOf("today:")===0||lo.indexOf("date:")===0||lo.indexOf("in ")===0||lo.indexOf("repeat:")===0||lo.indexOf("lead")===0)continue;if(tr.charAt(0)==="["&&lo.indexOf("[on]")!==0&&lo.indexOf("[off]")!==0)continue;if(lo.indexOf("add:")===0){var aS=tr.slice(4).trim().split("|");if(aS.length>=8){var en=aS[0].trim(),esm=parseInt(aS[1].trim(),10),esd=parseInt(aS[2].trim(),10);var emr=aS[3].trim(),edr=aS[4].trim();var eem=(emr==="-"||emr==="")?null:parseInt(emr,10);var eed=(edr==="-"||edr==="")?null:parseInt(edr,10);var eld=Math.max(0,parseInt(aS[5].trim(),10)||0);var erp=aS[6].trim().toLowerCase()==="yearly"?"yearly":null;var edc=aS.slice(7).join("|").trim();if(en&&!isNaN(esm)&&esm>=1&&esm<=12&&!isNaN(esd)&&esd>=1&&esd<=31){var eex=false;for(var ex2=0;ex2<ev.length;ex2++){if(ev[ex2].name.toLowerCase()===en.toLowerCase()){eex=true;break;}}if(!eex)ev.push({name:en,startMonth:esm,startDay:esd,endMonth:eem,endDay:eed,leadDays:eld,description:edc,repeat:erp,priority:true,enabled:true});}}continue;}if(lo.indexOf("del:")===0){var dn=tr.slice(4).trim().toLowerCase();U.settings.events=ev.filter(function(e){return e.name.toLowerCase()!==dn;});ev=U.settings.events;continue;}var isOnE=lo.indexOf("[on]")!==-1,isOffE=lo.indexOf("[off]")!==-1;if(!isOnE&&!isOffE)continue;var en2=tr.replace(/^\[(on|off)\]\s*/i,"").split("|")[0].trim().toLowerCase();if(!en2)continue;for(var ei=0;ei<ev.length;ei++){if(ev[ei].name.toLowerCase()===en2){ev[ei].enabled=isOnE;break;}}}}
-
-  function ubisReadSeasonsCard(){}
-
-
-  // ------------------------------------------------------------
-  // SECTION 7 — DETECTION FUNCTIONS  (currency / inventory / time)
-  // ------------------------------------------------------------
-  function ubisDetectPlayerConsume(U,text){var removed=[];var seen={};var patterns=[/\b(?:you|i)\s+(?:eat|ate|consume|consumed|drink|drank|use up|used up)\s+(?:the|a|an|some|my|your)?\s*([^.!?,;\n]+)/gi,/\b(?:you|i)\s+(?:have|had|take|took)\s+(?:a|an)\s+(?:drink|sip|swig|gulp|bite)\s+of\s+([^.!?,;\n]+)/gi,/\b(?:you|i)\s+(?:sip|sipped|gulp|gulped|swig|swigged)\s+(?:the|a|an|some|my|your)?\s*([^.!?,;\n]+)/gi];for(var p=0;p<patterns.length;p++){var rx=patterns[p];var m;while((m=rx.exec(text))!==null){var raw=(m[m.length-1]||"").split(/\s+(?:and|then|but|also|while)\s+/i)[0];var words=raw.trim().split(/\s+/).slice(0,6).join(" ");var qty=ubisExtractQty(words);var name=ubisCleanItem(words.replace(/^(?:of\s+)/i,""));if(!name||!ubisLooksLikeItem(name))continue;var key=ubisFindInvKey(U,name);if(!key||seen[key.toLowerCase()])continue;seen[key.toLowerCase()]=true;ubisRemoveItem(U,key,qty,false);removed.push(key+" x"+qty);}}return removed;}
-  function ubisDetectPlayerAdd(U,text){var added=[];var seen={};var lo=text.toLowerCase();for(var i=0;i<UBIS_PLAYER_ADD.length;i++){var trig=UBIS_PLAYER_ADD[i];var idx=lo.indexOf(trig);if(idx===-1)continue;var seg=text.slice(idx+trig.length).split(/[.!?,;\n]/)[0];seg=seg.split(/\s+(?:and|then|but|also|plus|as well as)\s+/i)[0];var words=seg.trim().split(/\s+/).slice(0,6).join(" ");if(ubisIsCoin(words))continue;var qty=ubisExtractQty(words);var name=ubisCleanItem(words);if(name&&ubisLooksLikeItem(name)&&!seen[name.toLowerCase()]){seen[name.toLowerCase()]=true;ubisAddItem(U,name,qty);added.push(name+" x"+qty);}}return added;}
-  function ubisDetectPlayerRemove(U,text){var removed=[];var seen={};var lo=text.toLowerCase();for(var i=0;i<UBIS_PLAYER_REM.length;i++){var trig=UBIS_PLAYER_REM[i];var idx=lo.indexOf(trig);if(idx===-1)continue;var seg=text.slice(idx+trig.length).split(/[.!?,;\n]/)[0];seg=seg.split(/\s+(?:and|then|but|also)\s+/i)[0];var words=seg.trim().split(/\s+/).slice(0,5).join(" ");if(ubisIsCoin(words))continue;var qty=ubisExtractQty(words);var name=ubisCleanItem(words);if(name&&ubisLooksLikeItem(name)&&!seen[name.toLowerCase()]){var key=ubisFindInvKey(U,name);if(key){seen[name.toLowerCase()]=true;ubisRemoveItem(U,key,qty,false);removed.push(key+" x"+qty);}}}return removed;}
-  function ubisDetectPlayerCurrencyGain(U,text){var gained=0;var lo=text.toLowerCase();var qp=ubisQtyPattern();var cp=ubisCoinPattern();var gP=["(?:you|i) (?:received?|earned?|found?|gained?|got|looted?|are paid|were paid|pick(?:ed)? up|took|take|stole?|obtained?|collected?)\\s+(?:a handful of |a few |several |)"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?",qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)\\s+(?:given|handed|awarded|paid)\\s+to\\s+(?:you|me)"];var seen={};for(var i=0;i<gP.length;i++){var rx=new RegExp(gP[i],"gi");var m;while((m=rx.exec(lo))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){U.balance+=base;gained+=base;ubisLedger(U,"income","Gained "+amt+" "+cn,base);}}}return gained;}
-  function ubisDetectPlayerCurrencyLoss(U,text){var lost=0;var lo=text.toLowerCase();var qp=ubisQtyPattern();var cp=ubisCoinPattern();var lP=["(?:you|i) (?:paid?|spent?|gave?|handed? over|parted? with|lost?)\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?","(?:you|i) (?:purchased?|bought?|traded?)\\s+.{0,40}?\\s+for\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?","(?:costs?|cost|costing)\\s+(?:(?:you|me)\\s+)?"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?","(?:in exchange for|for the price of|for a price of|for the sum of)\\s+"+qp+"\\s+"+cp];var seen={};for(var i=0;i<lP.length;i++){var rx=new RegExp(lP[i],"gi");var m;while((m=rx.exec(lo))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){if(U.balance<base){U.denied=U.denied||[];U.denied.push("[BLOCKED] Cannot spend "+ubisFormatBalance(base)+" — only have "+ubisFormatBalance(U.balance));}else{U.balance-=base;lost+=base;ubisLedger(U,"expense","Spent "+amt+" "+cn,-base);}}}}return lost;}
-  function ubisTryCurrencyGain(U,text){var gained=0;var qp=ubisQtyPattern();var cp=ubisCoinPattern();var gP=["you (?:receive[ds]?|earn[eds]?|find|found|gain[eds]?|loot[eds]?|are paid|were paid|got|get) (?:a handful of |a few |several |)"+qp+"\\s+"+cp+"(?:\\s+coins?|\\s+pieces?)?",qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)\\s+(?:given|handed|awarded|paid) to you","[\\w']+\\s+(?:hands?|gives?|gave|handed) you\\s+"+qp+"\\s+"+cp,"(?:puts?|put|places?|placed|presses?|pressed|slips?|slipped|slides?|slid|drops?|dropped)\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:in(?:to)?|on(?:to)?)\\s+(?:your|you)","(?:tosses?|tossed|throws?|threw|passes?|passed)\\s+"+qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:to|at|toward)\\s+you",qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)?\\s*(?:pressed?|placed?|dropped?|put|slipped?)\\s+into?\\s+your","[\\w']+\\s+(?:offers?|offered|extends?|extended)\\s+(?:you\\s+)?"+qp+"\\s+"+cp];var seen={};for(var i=0;i<gP.length;i++){var rx=new RegExp(gP[i],"gi");var m;while((m=rx.exec(text))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){U.balance+=base;gained+=base;ubisLedger(U,"income","Gained "+amt+" "+cn,base);}}}return gained;}
-  function ubisTryCurrencyLoss(U,text){var lost=0;var qp=ubisQtyPattern();var cp=ubisCoinPattern();var lP=["you (?:pay[ds]?|paid|spend[s]?|spent|give[s]?|gave|hand[s]? over|handed over|part[s]? with|parted with)\\s+"+qp+"\\s+"+cp,"(?:costs?|cost|costing)\\s+(?:you\\s+)?"+qp+"\\s+"+cp,qp+"\\s+"+cp+"(?:\\s+coins?)?\\s+(?:is|are|was|were)\\s+taken","you (?:lose[s]?|lost)\\s+"+qp+"\\s+"+cp,"(?:in exchange for|for the price of|for the sum of)\\s+"+qp+"\\s+"+cp,"you (?:purchase[ds]?|buy|bought|paid)\\s+(?:[\\w\\s']+?)\\s+for\\s+"+qp+"\\s+"+cp,"(?:paying|spending)\\s+"+qp+"\\s+"+cp];var seen={};for(var i=0;i<lP.length;i++){var rx=new RegExp(lP[i],"gi");var m;while((m=rx.exec(text))!==null){var cn=(m[m.length-1]||"").trim();var amt=ubisParseQtyStr(m[m.length-2]||"1");var key=amt+"|"+cn+"|"+m.index;if(!cn||seen[key])continue;seen[key]=true;var base=amt*ubisCoiNameToBase(cn);if(base>0){if(U.balance<base){U.denied=U.denied||[];U.denied.push("[BLOCKED] Cannot spend "+ubisFormatBalance(base)+" — only have "+ubisFormatBalance(U.balance));}else{U.balance-=base;lost+=base;ubisLedger(U,"expense","Spent "+amt+" "+cn,-base);}}}}return lost;}
-
-  // ------------------------------------------------------------
-  // SECTION 8 — BILLS & INCOME PROCESSING
-  // ------------------------------------------------------------
-  function ubisProcessBills(U){
-  var notices=[];var cd=ubisTotalDays(U.time);
-  var i,bill,src,ld,per,charge;
-  for(i=0;i<U.settings.income.length;i++){
-    src=U.settings.income[i];if(!src.enabled)continue;
-    ld=U.incomeCounters[src.name]||0;
-    per=Math.floor((cd-ld)/(src.intervalDays||1));if(per<=0)continue;
-    var pay=src.amount*per;U.balance+=pay;
-    U.incomeCounters[src.name]=ld+(per*src.intervalDays);
-    ubisLedger(U,"income",src.name+(per>1?" x"+per:""),pay);
-    notices.push("[INCOME] "+src.name+(per>1?" x"+per:"")+":  +"+ubisFormatBalance(pay));
-  }
-  for(i=0;i<U.settings.bills.length;i++){
-    bill=U.settings.bills[i];if(!bill.enabled)continue;
-    ld=U.billCounters[bill.name]||0;
-    per=Math.floor((cd-ld)/(bill.intervalDays||1));if(per<=0)continue;
-    U.billCounters[bill.name]=ld+(per*bill.intervalDays);
-    charge=bill.amount*per;
+  notices.push("[DRAIN] "+drain.name+(dper>1?" x"+dper:"")+":  -"+dtaken+" "+drain.item+(dshort>0?"  (short "+dshort+")":""));
+}
+for(i=0;i<U.settings.bills.length;i++){
+  bill=U.settings.bills[i];if(!bill.enabled)continue;
+  ld=U.billCounters[bill.name]||0;
+  per=Math.floor((cd-ld)/(bill.intervalDays||1));if(per<=0)continue;
+  U.billCounters[bill.name]=ld+(per*bill.intervalDays);
+  charge=bill.amount*per;
+  if(U.settings.hardmodeConsequences){
+    var actualCharge=Math.min(charge,Math.max(0,U.balance));
+    var billShort=charge-actualCharge;
+    U.balance-=actualCharge;
+    bill.missed=billShort>0?(bill.missed||0)+1:0;
+    if(bill.missed>(bill.grace||0)&&bill.penalty){U.pendingPenalties.push({name:bill.name,type:"bill",missed:bill.missed,penalty:bill.penalty});}
+    ubisLedger(U,"bill",bill.name+(per>1?" x"+per:""),-actualCharge);
+    notices.push("[BILL] "+bill.name+(per>1?" x"+per:"")+":  -"+ubisFormatBalance(actualCharge)+(billShort>0?"  [SHORT "+ubisFormatBalance(billShort)+"]":""));
+  }else{
     U.balance-=charge;
     ubisLedger(U,"bill",bill.name+(per>1?" x"+per:""),-charge);
     notices.push("[BILL] "+bill.name+(per>1?" x"+per:"")+":  -"+ubisFormatBalance(charge)+(U.balance<0?" [BALANCE NEGATIVE]":""));
-    if(bill.items&&bill.items.length>0){
-      var iN=[];
-      for(var j=0;j<bill.items.length;j++){
-        var item=bill.items[j];var tq=(item.qty||1)*per;
-        var key=ubisFindInvKey(U,item.name);
-        if(key&&U.inventory[key]>=tq){U.inventory[key]-=tq;if(U.inventory[key]<=0)delete U.inventory[key];ubisLedger(U,"bill_item",key+" x"+tq,0);iN.push(item.name+" x"+tq);}
-        else iN.push(item.name+" x"+tq+" (MISSING)");
-      }
-      if(iN.length>0)notices[notices.length-1]+="  Items: "+iN.join(", ");
+  }
+  if(bill.items&&bill.items.length>0){
+    var iN=[];
+    for(var j=0;j<bill.items.length;j++){
+      var item=bill.items[j];var tq=(item.qty||1)*per;
+      var key=ubisFindInvKey(U,item.name);
+      if(key&&U.inventory[key]>=tq){U.inventory[key]-=tq;if(U.inventory[key]<=0)delete U.inventory[key];ubisLedger(U,"bill_item",key+" x"+tq,0);iN.push(item.name+" x"+tq);}
+      else iN.push(item.name+" x"+tq+" (MISSING)");
     }
+    if(iN.length>0)notices[notices.length-1]+="  Items: "+iN.join(", ");
   }
-  return notices;
-  }
+}
+return notices;
+}
 
-  // ------------------------------------------------------------
-  // SECTION 9 — CARD BODY FUNCTIONS  (what each card displays)
-  // ------------------------------------------------------------
-  function ubisInventoryCardBody(U){var iL=ubisGetInventoryLabel();var wL=ubisGetCurrencyLabel();var en=Object.entries(U.inventory||{});var tot=0;var lines=["== "+iL.toUpperCase()+" ==","[Edit Qty to change. Delete line to remove. Add 'Name: N' to add.]",""];if(en.length===0){lines.push("  (empty)");}else{en.sort(function(a,b){return a[0].localeCompare(b[0]);});for(var i=0;i<en.length;i++){tot+=en[i][1];lines.push("  "+en[i][0]+": (Qty: "+en[i][1]+")");}}lines.push("","  Total types: "+en.length+" | Total items: "+tot,"","== "+wL.toUpperCase()+" ==","[Edit the line below to set funds. e.g: 5 Gold, 2 Silver  or  500]","  "+ubisFormatBalance(U.balance),"","== COMMANDS ==","  /additem [name] [qty]    /removeitem [name] [qty]","  /earn [amount] [coin]    /pay [amount] [coin]");return lines.join("\n");}
+// ------------------------------------------------------------
+// SECTION 9 — CARD BODY FUNCTIONS  (what each card displays)
+// ------------------------------------------------------------
+function ubisInventoryCardBody(U){var iL=ubisGetInventoryLabel();var wL=ubisGetCurrencyLabel();var en=Object.entries(U.inventory||{});var tot=0;var lines=["== "+iL.toUpperCase()+" ==","[Edit Qty to change. Delete line to remove. Add 'Name: N' to add.]",""];if(en.length===0){lines.push("  (empty)");}else{en.sort(function(a,b){return a[0].localeCompare(b[0]);});for(var i=0;i<en.length;i++){tot+=en[i][1];lines.push("  "+en[i][0]+": (Qty: "+en[i][1]+")");}}lines.push("","  Total types: "+en.length+" | Total items: "+tot,"","== "+wL.toUpperCase()+" ==","[Edit the line below to set funds. e.g: 5 Gold, 2 Silver  or  500]","  "+ubisFormatBalance(U.balance),"","== COMMANDS ==","  /additem [name] [qty]    /removeitem [name] [qty]","  /earn [amount] [coin]    /pay [amount] [coin]");return lines.join("\n");}
 
-  function ubisConfigCardBody(U){var s=U.settings;var cc=U.cardConfig;var t=ubisGetTiers();var lines=["== CONFIGURE REALMHEART ==","[Changes apply on the next turn.]",""];lines.push("-- SYSTEM --");lines.push("Preset:           "+ubisResolvePreset()+"  (fantasy | modern | sci-fi)");lines.push("[Switching preset resets Prices & Goods, Holidays, Bills, and Income to that preset's defaults.]");lines.push("Script:           "+(s.scriptEnabled?"ON":"OFF"));lines.push("Inventory auto:   "+(s.inventoryEnabled?"ON":"OFF"));lines.push("Currency auto:    "+(s.currencyEnabled?"ON":"OFF"));lines.push("Time auto:        "+(s.timeEnabled?"ON":"OFF"));lines.push("Bills auto:       "+(s.billsEnabled?"ON":"OFF"));lines.push("Currency context: "+(s.currencyContextEnabled?"ON":"OFF"));lines.push("Narrator mode:    "+(s.narratorMode?"ON":"OFF"));lines.push("");lines.push("-- STORY CARDS --");lines.push("Master:           "+(cc.masterEnabled?"ON":"OFF"));lines.push("Inventory:        "+(cc["Inventory"]?"ON":"OFF"));lines.push("Configure Realmheart: "+(cc["Configure Realmheart"]?"ON":"OFF"));lines.push("Configure Time:   "+(cc["Configure Time Settings"]?"ON":"OFF"));lines.push("Bills:            "+(cc["Bills"]?"ON":"OFF"));lines.push("Ledger:           "+(cc["Ledger"]?"ON":"OFF"));lines.push("Prices & Goods:   "+(cc["Prices & Goods"]?"ON":"OFF"));lines.push("Bounty Board:     "+(cc["Bounty Board"]?"ON":"OFF"));lines.push("Holidays:         "+(cc["Holidays"]?"ON":"OFF"));lines.push("Events:           "+(cc["Events"]?"ON":"OFF"));lines.push("Seasons:          "+(cc["Seasons"]?"ON":"OFF"));lines.push("");if(ubisResolvePreset()==="fantasy"&&s.tiers){lines.push("-- CURRENCY TIERS --");lines.push("[Edit: Tier N name: NewName   or   Tier N value: 100]");for(var i=0;i<t.length;i++){lines.push("Tier "+(i+1)+" name:  "+t[i].name);lines.push("Tier "+(i+1)+" value: "+t[i].valueInBase);lines.push("");}lines.push("[Note: tiers are also viewable in Prices & Goods card]","");}if(ubisResolvePreset()==="modern"){lines.push("-- CURRENCY --");lines.push("  Currency name:   "+(s.modernCurrencyName||"Dollar"));lines.push("  Currency symbol: "+(s.modernCurrencySymbol||"$"));lines.push("  (Edit directly. Changes apply next turn.)","");}if(ubisResolvePreset()==="sci-fi"){lines.push("-- CURRENCY --");lines.push("  Currency name:   "+(s.scifiCurrencyName||"Credit"));lines.push("  Currency symbol: "+(s.scifiCurrencySymbol||"cr"));lines.push("  (Edit directly. Changes apply next turn.)","");}lines.push("-- NARRATOR MODE --");lines.push("[ON = AI writes NPCs only. OFF = AI writes all characters.]","");lines.push("-- COMMANDS --");lines.push("  /rh enable|disable|toggle          (/ubis also works)");lines.push("  /rh inv|currency|time|bills on|off");lines.push("  /rh cards on|off");lines.push("  /balance  /inventory  /ledger  /time  /weather  /help  /keywords");return lines.join("\n");}
-  function ubisTimeCardBody(U){var t=U.time;var mn=UBIS_MONTHS[t.month-1];var todH=ubisGetTodayHolidays(U);var upH=ubisGetUpcomingHolidays(U,14);var actEv=ubisGetActiveEvents(U);var ss=U.settings.seasons;var sm=ss&&ss.length>=t.month?ss[t.month-1]:null;var lines=["== TIME SETTINGS ==","","-- DATE & TIME (editable) --","[Month: 1-12 | Day: 1-31 | Hour: 0-23]","Year:  "+t.year,"Month: "+t.month,"Day:   "+t.day,"Hour:  "+Math.floor(t.hour),"","-- CURRENT --","  "+mn.name+" "+t.day+", Year "+t.year+"  "+ubisFormatHour(t.hour),"  Adventure day: "+ubisTotalDays(t)];if(sm)lines.push("  "+sm.seasonName+" | Weather: "+(U.currentWeather||"Clear"));if(actEv.length>0){lines.push("");for(var ei=0;ei<actEv.length;ei++){var evd=actEv[ei];lines.push("  -- "+(evd.daysAway===0?"TODAY: ":"In "+evd.daysAway+"d: ")+evd.event.name);}}if(todH.length>0){lines.push("");for(var hi=0;hi<todH.length;hi++)lines.push("  ** "+todH[hi].name+" ("+todH[hi].type+")");}lines.push("","Hrs/turn: "+ubisFormatDuration(U.settings.hoursPerTurn),"[Accepted: 2h | 30m | 1h30m | 2]","");if(upH.length>0){for(var ui=0;ui<upH.length;ui++){var uh=upH[ui].holiday;lines.push("  In "+upH[ui].daysAway+"d: "+uh.name);}lines.push("");}lines.push("-- CALENDAR --");for(var i=0;i<UBIS_MONTHS.length;i++)lines.push((i+1===t.month?"> ":"  ")+UBIS_MONTHS[i].name+" ("+UBIS_MONTHS[i].days+"d)");return lines.join("\n");}
+function ubisConfigCardBody(U){var s=U.settings;var cc=U.cardConfig;var t=ubisGetTiers();var lines=["== CONFIGURE REALMHEART ==","[Changes apply on the next turn.]",""];lines.push("-- SYSTEM --");lines.push("Preset:           "+ubisResolvePreset()+"  (fantasy | modern | sci-fi)");lines.push("[Switching preset resets Prices & Goods, Holidays, Bills, Income, and Seasons to that preset's defaults.]");lines.push("Script:           "+(s.scriptEnabled?"ON":"OFF"));lines.push("Inventory auto:   "+(s.inventoryEnabled?"ON":"OFF"));lines.push("Currency auto:    "+(s.currencyEnabled?"ON":"OFF"));lines.push("Time auto:        "+(s.timeEnabled?"ON":"OFF"));lines.push("Bills auto:       "+(s.billsEnabled?"ON":"OFF"));lines.push("Gambling auto:    "+(s.gamblingEnabled?"ON":"OFF"));lines.push("Seasons auto:     "+(s.seasonsEnabled?"ON":"OFF"));lines.push("Currency context: "+(s.currencyContextEnabled?"ON":"OFF"));lines.push("Narrator mode:    "+(s.narratorMode?"ON":"OFF"));lines.push("Require inventory for sales: "+(s.requireInventoryForSales?"ON":"OFF"));lines.push("[If ON, selling an item you don't actually have is rejected. Buying is never affected by this.]");lines.push("");lines.push("-- STORY CARDS --");lines.push("Master:           "+(cc.masterEnabled?"ON":"OFF"));lines.push("Inventory:        "+(cc["Inventory"]?"ON":"OFF"));lines.push("Configure Realmheart: "+(cc["Configure Realmheart"]?"ON":"OFF"));lines.push("Configure Time:   "+(cc["Configure Time Settings"]?"ON":"OFF"));lines.push("Bills:            "+(cc["Bills"]?"ON":"OFF"));lines.push("Ledger:           "+(cc["Ledger"]?"ON":"OFF"));lines.push("Prices & Goods:   "+(cc["Prices & Goods"]?"ON":"OFF"));lines.push("Bounty Board:     "+(cc["Bounty Board"]?"ON":"OFF"));lines.push("Holidays:         "+(cc["Holidays"]?"ON":"OFF"));lines.push("Events:           "+(cc["Events"]?"ON":"OFF"));lines.push("Seasons:          "+(cc["Seasons"]?"ON":"OFF"));lines.push("Gambling Hall:    "+(cc["Gambling Hall"]?"ON":"OFF"));lines.push("");if(ubisResolvePreset()==="fantasy"&&s.tiers){lines.push("-- CURRENCY TIERS --");lines.push("[Edit: Tier N name: NewName   or   Tier N value: 100]");for(var i=0;i<t.length;i++){lines.push("Tier "+(i+1)+" name:  "+t[i].name);lines.push("Tier "+(i+1)+" value: "+t[i].valueInBase);lines.push("");}lines.push("[Note: tiers are also viewable in Prices & Goods card]","");}if(ubisResolvePreset()==="modern"){lines.push("-- CURRENCY --");lines.push("  Currency name:   "+(s.modernCurrencyName||"Dollar"));lines.push("  Currency symbol: "+(s.modernCurrencySymbol||"$"));lines.push("  (Edit directly. Changes apply next turn.)","");}if(ubisResolvePreset()==="sci-fi"){lines.push("-- CURRENCY --");lines.push("  Currency name:   "+(s.scifiCurrencyName||"Credit"));lines.push("  Currency symbol: "+(s.scifiCurrencySymbol||"cr"));lines.push("  (Edit directly. Changes apply next turn.)","");}lines.push("-- NARRATOR MODE --");lines.push("[ON = AI writes NPCs only. OFF = AI writes all characters.]","");lines.push("-- COMMANDS --");lines.push("  /rh enable|disable|toggle          (/ubis also works)");lines.push("  /rh inv|currency|time|bills on|off");lines.push("  /rh cards on|off");lines.push("  /balance  /inventory  /ledger  /time  /weather  /help  /keywords");return lines.join("\n");}
+function ubisTimeCardBody(U){var t=U.time;var mn=UBIS_MONTHS[t.month-1];var todH=ubisGetTodayHolidays(U);var upH=ubisGetUpcomingHolidays(U,14);var actEv=ubisGetActiveEvents(U);var ss=U.settings.seasons;var sm=ss&&ss.length>=t.month?ss[t.month-1]:null;var lines=["== TIME SETTINGS ==","","-- DATE & TIME (editable) --","[Month: 1-12 | Day: 1-31 | Hour: 0-23]","Year:  "+t.year,"Month: "+t.month,"Day:   "+t.day,"Hour:  "+Math.floor(t.hour),"","[Editing Adventure Day resets the elapsed-day counter without changing the calendar date above.]","Adventure Day: "+ubisTotalDays(t),"","-- CURRENT --","  "+mn.name+" "+t.day+", Year "+t.year+"  "+ubisFormatHour(t.hour),"  Adventure day: "+ubisTotalDays(t)];if(sm)lines.push("  "+sm.seasonName+" | Weather: "+(U.currentWeather||"Clear"));if(actEv.length>0){lines.push("");for(var ei=0;ei<actEv.length;ei++){var evd=actEv[ei];lines.push("  -- "+(evd.daysAway===0?"TODAY: ":"In "+evd.daysAway+"d: ")+evd.event.name);}}if(todH.length>0){lines.push("");for(var hi=0;hi<todH.length;hi++)lines.push("  ** "+todH[hi].name+" ("+todH[hi].type+")");}lines.push("","Hrs/turn: "+ubisFormatDuration(U.settings.hoursPerTurn),"[Accepted: 2h | 30m | 1h30m | 2]","");if(upH.length>0){for(var ui=0;ui<upH.length;ui++){var uh=upH[ui].holiday;lines.push("  In "+upH[ui].daysAway+"d: "+uh.name);}lines.push("");}lines.push("-- CALENDAR --");for(var i=0;i<UBIS_MONTHS.length;i++)lines.push((i+1===t.month?"> ":"  ")+UBIS_MONTHS[i].name+" ("+UBIS_MONTHS[i].days+"d)");return lines.join("\n");}
 
-  function ubisBillsCardBody(U){var s=U.settings;var day=ubisTotalDays(U.time);var sm=ubisGetTiers()[ubisGetTiers().length-1].plural.toLowerCase();var lines=["== BILLS & INCOME ==","","Balance: "+ubisFormatBalance(U.balance)+" | Day: "+day,"","[ADD BILL:   Name | 20 "+sm+" | 1d]","[ADD INCOME: Name | 80 "+sm+" | 7d]","[Intervals:  1d | 7d | 1w | 30d | 1m | 1y | 2y]","[DEL: Name]","[Toggle: [ON] or [OFF] before the name]","","-- RECURRING BILLS --"];var i,b,inc,ld,dl,bl;if(!s.bills||s.bills.length===0){lines.push("  (none yet)");}else{for(i=0;i<s.bills.length;i++){b=s.bills[i];ld=U.billCounters[b.name]||0;dl=Math.max(0,(ld+b.intervalDays)-day);bl=(b.enabled?"[ON]  ":"[OFF] ")+b.name+": -"+ubisFormatBalance(b.amount)+" / "+ubisFormatIntervalDays(b.intervalDays);if(b.enabled)bl+="  (due in "+dl+"d)";if(b.items&&b.items.length>0)bl+="  Items: "+b.items.map(function(it){return it.name+" x"+it.qty;}).join(", ");lines.push("  "+bl);}}lines.push("","-- RECURRING INCOME --");if(!s.income||s.income.length===0){lines.push("  (none yet)");}else{for(i=0;i<s.income.length;i++){inc=s.income[i];ld=U.incomeCounters[inc.name]||0;dl=Math.max(0,(ld+inc.intervalDays)-day);bl=(inc.enabled?"[ON]  ":"[OFF] ")+inc.name+": +"+ubisFormatBalance(inc.amount)+" / "+ubisFormatIntervalDays(inc.intervalDays);if(inc.enabled)bl+="  (in "+dl+"d)";lines.push("  "+bl);}}return lines.join("\n");}
+function ubisBillsCardBody(U){var s=U.settings;var day=ubisTotalDays(U.time);var sm=ubisGetTiers()[ubisGetTiers().length-1].plural.toLowerCase();var hm=!!s.hardmodeConsequences;var lines=["== BILLS & INCOME ==","","Balance: "+ubisFormatBalance(U.balance)+" | Day: "+day,"Hardmode Consequences: "+(hm?"ON":"OFF")];if(hm)lines.push("[If ON, bills/drains take only what's available instead of going negative,"," and repeated shortfalls escalate into real consequences.]");lines.push("","[ADD BILL:   Name | 20 "+sm+" | 1d"+(hm?" | Grace | Penalty":"")+"]","[ADD INCOME: Name | 80 "+sm+" | 7d]","[ADD WELL:   Name | Item | Qty | 7d]","[ADD DRAIN:  Name | Item | Qty | 7d"+(hm?" | Grace | Penalty":"")+"]","[Intervals:  1d | 7d | 1w | 30d | 1m | 1y | 2y]","[DEL: Name]","[Toggle: [ON] or [OFF] before the name]","","-- RECURRING BILLS --");var i,b,inc,ld,dl,bl;if(!s.bills||s.bills.length===0){lines.push("  (none yet)");}else{for(i=0;i<s.bills.length;i++){b=s.bills[i];ld=U.billCounters[b.name]||0;dl=Math.max(0,(ld+b.intervalDays)-day);bl=(b.enabled?"[ON]  ":"[OFF] ")+b.name+": -"+ubisFormatBalance(b.amount)+" / "+ubisFormatIntervalDays(b.intervalDays);if(b.enabled)bl+="  (due in "+dl+"d)";if(b.items&&b.items.length>0)bl+="  Items: "+b.items.map(function(it){return it.name+" x"+it.qty;}).join(", ");lines.push("  "+bl);if(hm){lines.push("    Grace: "+(b.grace||0)+" | Missed: "+(b.missed||0));lines.push("    Penalty: "+(b.penalty||"(none set)"));}}}lines.push("","-- RECURRING INCOME --");if(!s.income||s.income.length===0){lines.push("  (none yet)");}else{for(i=0;i<s.income.length;i++){inc=s.income[i];ld=U.incomeCounters[inc.name]||0;dl=Math.max(0,(ld+inc.intervalDays)-day);bl=(inc.enabled?"[ON]  ":"[OFF] ")+inc.name+": +"+ubisFormatBalance(inc.amount)+" / "+ubisFormatIntervalDays(inc.intervalDays);if(inc.enabled)bl+="  (in "+dl+"d)";lines.push("  "+bl);}}
+lines.push("","-- RESOURCE WELLS --");if(!s.wells||s.wells.length===0){lines.push("  (none yet)");}else{for(i=0;i<s.wells.length;i++){var w=s.wells[i];var wld=U.wellCounters[w.name]||0;var wdl=Math.max(0,(wld+w.intervalDays)-day);var wbl=(w.enabled?"[ON]  ":"[OFF] ")+w.name+": +"+w.qty+" "+w.item+" / "+ubisFormatIntervalDays(w.intervalDays);if(w.enabled)wbl+="  (in "+wdl+"d)";lines.push("  "+wbl);}}
+lines.push("","-- RESOURCE DRAINS --");if(!s.drains||s.drains.length===0){lines.push("  (none yet)");}else{for(i=0;i<s.drains.length;i++){var dr=s.drains[i];var drld=U.drainCounters[dr.name]||0;var drdl=Math.max(0,(drld+dr.intervalDays)-day);var drbl=(dr.enabled?"[ON]  ":"[OFF] ")+dr.name+": -"+dr.qty+" "+dr.item+" / "+ubisFormatIntervalDays(dr.intervalDays);if(dr.enabled)drbl+="  (due in "+drdl+"d)";lines.push("  "+drbl);if(hm){lines.push("    Grace: "+(dr.grace||0)+" | Missed: "+(dr.missed||0));lines.push("    Penalty: "+(dr.penalty||"(none set)"));}}}
+return lines.join("\n");}
 
-  function ubisLedgerCardBody(U){
-  var lines=["== LEDGER ==",""];
-  lines.push("Balance: "+ubisFormatBalance(U.balance),"");
-  lines.push("-- RECENT TRANSACTIONS (newest first) --");
-  var recent=(U.ledger||[]).slice(-20).reverse();
-  if(recent.length===0){lines.push("  (no transactions yet)");}else{
-  recent.forEach(function(e){
-  if(e.type==="time")return;
-  var sgn=e.amount>0?"+":"";var amt=e.amount!==0?"  "+sgn+ubisFormatBalance(Math.abs(e.amount)):"";
-  var tag={income:"[EARN]",expense:"[SPEND]",bill:"[BILL]",inv_add:"[GOT]",inv_remove:"[LOST]"}[e.type]||"["+e.type.toUpperCase()+"]";
-  lines.push("  T"+e.turn+" "+tag+" "+e.description+amt);
-  });}
+function ubisLedgerCardBody(U){
+var lines=["== LEDGER ==",""];
+lines.push("Balance: "+ubisFormatBalance(U.balance),"");
+lines.push("-- RECENT TRANSACTIONS (newest first) --");
+var recent=(U.ledger||[]).slice(-20).reverse();
+if(recent.length===0){lines.push("  (no transactions yet)");}else{
+recent.forEach(function(e){
+if(e.type==="time")return;
+var sgn=e.amount>0?"+":"";var amt=e.amount!==0?"  "+sgn+ubisFormatBalance(Math.abs(e.amount)):"";
+var tag={income:"[EARN]",expense:"[SPEND]",bill:"[BILL]",inv_add:"[GOT]",inv_remove:"[LOST]",gamble:"[GAMBLE]"}[e.type]||"["+e.type.toUpperCase()+"]";
+lines.push("  T"+e.turn+" "+tag+" "+e.description+amt);
+});}
+return lines.join("\n");
+}
+
+function ubisPricesGoodsCardBody(U){
+  var pl=U.settings.priceList||[];var mode=ubisResolvePreset();var pk=mode.replace("-","");
+  var tiers=ubisGetTiers();
+  var lines=["== PRICES & GOODS ==","","-- CURRENCY TIERS --"];
+  if(mode==="fantasy"&&U.settings.tiers){
+    lines.push("(Read-only — edit in Configure Realmheart)","");
+    for(var ti=0;ti<U.settings.tiers.length;ti++){var tier=U.settings.tiers[ti];lines.push("  Tier "+(ti+1)+" name:  "+tier.name);lines.push("  Tier "+(ti+1)+" value: "+tier.valueInBase);lines.push("");}
+  }else if(mode==="modern"){lines.push("  Dollar ($) — 1 base unit","");}
+  else if(mode==="sci-fi"){lines.push("  Credit (cr) — 1 base unit","");}
+  var sectionLabel=mode==="modern"?"GOODS & SERVICES (USD)":mode==="sci-fi"?"GOODS & SERVICES (Credits)":"GOODS & SERVICES";
+  lines.push("-- "+sectionLabel+" --");
+  if(mode==="fantasy"){lines.push("  Notation: cp = Copper  |  s = Silver  |  g = Gold");}
+  lines.push("  (Edit any value directly. Changes apply next turn.)","");
+  lines.push("[ADD ITEM: Category | Label | Amount]","[DEL ITEM: Category | Label]","[ADD CATEGORY: Name]","[DEL CATEGORY: Name]","[RENAME CATEGORY: OldName | NewName]","");
+  if(pl.length===0){lines.push("  (none)");}else{for(var ci=0;ci<pl.length;ci++){var cat=pl[ci];lines.push("  "+cat.category+":");if(!cat.tiers||cat.tiers.length===0){lines.push("    (no items)");}else{var sorted=cat.tiers.slice().sort(function(a,b){return a.amount-b.amount;});for(var t2=0;t2<sorted.length;t2++)lines.push("    "+ubisFormatBalance(sorted[t2].amount)+"  --  "+sorted[t2].label);}lines.push("");}}
   return lines.join("\n");
+}
+function ubisBountyCardBody(U){var mode=ubisResolvePreset();var pk=mode.replace("-","");var pr=U.settings.jobPayouts&&U.settings.jobPayouts[pk]||[];var label=mode==="modern"?"== JOB BOARD ==":mode==="sci-fi"?"== CONTRACT BOARD ==":"== BOUNTY BOARD ==";var lines=[label,""];lines.push("  Notation: cp = Copper  |  s = Silver  |  g = Gold");lines.push("  (Edit values directly on any line. Changes apply next turn.)","");lines.push("[ADD: Label | min | max | description]","[DEL: Label]","");if(pr.length===0){lines.push("  (none)","");}else{for(var i=0;i<pr.length;i++){lines.push("  "+pr[i].label+" | "+ubisFormatBalance(pr[i].minPay)+" | "+ubisFormatBalance(pr[i].maxPay));lines.push("    "+pr[i].desc);lines.push("");}}lines.push("-- HOW TO USE --");lines.push("  /earn [min] [coin]  to reward yourself manually");lines.push("  Or let the AI reference these tiers in narration.");return lines.join("\n");}
+function ubisHolidaysCardBody(U){var hols=(U.settings&&U.settings.holidays)||[];var t=U.time;var mn=UBIS_MONTHS[t.month-1];var todH=ubisGetTodayHolidays(U);var upH=ubisGetUpcomingHolidays(U,30);var lines=["== HOLIDAYS & BIRTHDAYS ==","","Today: "+mn.name+" "+t.day+", Year "+t.year,"","[To edit: change a line below directly, e.g.  [ON] Name | month | day | type]","[Add:    ADD: Name | month | day | type | description]","[Delete: DEL: Name]","[Types:  holiday, birthday, seasonal, religious, custom]",""];if(todH.length>0){lines.push("-- TODAY --");for(var ti=0;ti<todH.length;ti++){lines.push("  ** "+todH[ti].name+" ("+todH[ti].type+")");lines.push("     "+todH[ti].description);}lines.push("");}if(upH.length>0){lines.push("-- UPCOMING (next 30 days) --");for(var ui=0;ui<upH.length;ui++){var uh=upH[ui].holiday;lines.push("  In "+upH[ui].daysAway+"d: "+uh.name+" ("+UBIS_MONTHS[uh.month-1].name+" "+uh.day+") -- "+uh.type);}lines.push("");}lines.push("-- ALL ENTRIES --","");if(hols.length===0){lines.push("  (none)");}else{var types=["birthday","holiday","seasonal","religious","custom"];for(var ty=0;ty<types.length;ty++){var grp=hols.filter(function(h){return h.type===types[ty];});if(grp.length===0)continue;lines.push("  -- "+types[ty].toUpperCase()+" --");for(var gi=0;gi<grp.length;gi++){var h=grp[gi];lines.push("  "+(h.enabled?"[ON] ":"[OFF]")+" "+h.name+" | "+h.month+" | "+h.day+" | "+h.type);lines.push("    "+UBIS_MONTHS[h.month-1].name+" "+h.day+"   "+h.description);}lines.push("");}}return lines.join("\n");}
+
+function ubisEventsCardBody(U){var ev=(U.settings&&U.settings.events)||[];var t=U.time;var mn=UBIS_MONTHS[t.month-1];var actEv=ubisGetActiveEvents(U);var lines=["== EVENTS ==","","Today: "+mn.name+" "+t.day+", Year "+t.year,"","[ADD: Name | startMonth | startDay | endMonth | endDay | leadDays | repeat | description]","[Use - for endMonth/endDay if single-day. repeat: none or yearly]","[Toggle: change [ON] to [OFF] directly on any entry line]","[Delete: DEL: Event Name]",""];if(actEv.length>0){lines.push("-- ACTIVE / UPCOMING --");for(var ai=0;ai<actEv.length;ai++){var ae=actEv[ai];lines.push("  "+(ae.daysAway===0?"-- TODAY: ":"-- In "+ae.daysAway+"d: ")+ae.event.name);lines.push("    "+ae.event.description);}lines.push("");}lines.push("-- ALL EVENTS --","");if(ev.length===0){lines.push("  (none)");}else{for(var i=0;i<ev.length;i++){var e=ev[i];var ss=UBIS_MONTHS[e.startMonth-1].name+" "+e.startDay;var es="";if(e.endMonth&&e.endDay&&(e.endMonth!==e.startMonth||e.endDay!==e.startDay))es=" to "+UBIS_MONTHS[e.endMonth-1].name+" "+e.endDay;lines.push("  "+(e.enabled?"[ON] ":"[OFF]")+" "+e.name);lines.push("    "+ss+es+(e.repeat==="yearly"?" [yearly]":"")+(e.leadDays>0?" ["+e.leadDays+"d lead]":""));lines.push("    "+e.description);lines.push("");}}return lines.join("\n");}
+
+function ubisSeasonsCardBody(U){var ss=U.settings.seasons||[];var t=U.time;var cm=t.month;var sm=ss.length>=cm?ss[cm-1]:null;var lines=["== SEASONS ==","(Read-only — managed by script)","","","-- NOW: "+UBIS_MONTHS[cm-1].name+" --"];if(sm){lines.push("  Season:  "+sm.seasonName);lines.push("  Weather: "+(U.currentWeather||"Clear"));lines.push("  Mood:    "+sm.mood);var tbl=sm.weather||[];for(var wi=0;wi<tbl.length;wi++)lines.push("  "+tbl[wi].pct+"% "+tbl[wi].c);}else{lines.push("  (no data)");}lines.push("","-- ALL MONTHS --");for(var mi=0;mi<ss.length;mi++){var s=ss[mi];var top=(s.weather||[]).slice().sort(function(a,b){return b.pct-a.pct;}).slice(0,2).map(function(w){return w.pct+"% "+w.c;}).join(", ");lines.push((mi+1===cm?"► ":"  ")+(mi+1)+". "+UBIS_MONTHS[mi].name+" ["+s.seasonName+"] "+top);}return lines.join("\n");}
+
+
+function ubisGamblingCardBody(U){
+  var games=U.settings.gamblingGames||[];
+  var lines=["== GAMBLING HALL ==","","[Edit percentages/payouts directly. Each game's tiers should total 100%.]","[Add: ADD GAME: Name | Flags | Outcome,Pct,Payout | Outcome,Pct,Payout | ...]","[Flags: N=narrative I=item C=currency, any combo, e.g. NIC]","[Del: DEL GAME: Name]",""];
+  lines.push("-- ACTIVE SESSION --");
+  lines.push(U.activeGamble?"  "+U.activeGamble:"  None.");
+  lines.push("  [Start: /jackpot start | /coinflip start | /dice start]");
+  lines.push("  [End:   /gamble end]","");
+  for(var g=0;g<games.length;g++){
+    var game=games[g];
+    lines.push("-- "+game.name.toUpperCase()+" ("+(game.flags||"c").toUpperCase()+") --");
+    for(var i=0;i<game.outcomes.length;i++){
+      var o=game.outcomes[i];
+      lines.push("  "+o.label+" | "+o.pct+"% | "+o.payout+"x");
+    }
+    lines.push("");
   }
-
-  function ubisPricesGoodsCardBody(U){
-    var pl=U.settings.priceList||[];var mode=ubisResolvePreset();var pk=mode.replace("-","");
-    var tiers=ubisGetTiers();
-    var lines=["== PRICES & GOODS ==","","-- CURRENCY TIERS --"];
-    if(mode==="fantasy"&&U.settings.tiers){
-      lines.push("(Read-only — edit in Configure Realmheart)","");
-      for(var ti=0;ti<U.settings.tiers.length;ti++){var tier=U.settings.tiers[ti];lines.push("  Tier "+(ti+1)+" name:  "+tier.name);lines.push("  Tier "+(ti+1)+" value: "+tier.valueInBase);lines.push("");}
-    }else if(mode==="modern"){lines.push("  Dollar ($) — 1 base unit","");}
-    else if(mode==="sci-fi"){lines.push("  Credit (cr) — 1 base unit","");}
-    var sectionLabel=mode==="modern"?"GOODS & SERVICES (USD)":mode==="sci-fi"?"GOODS & SERVICES (Credits)":"GOODS & SERVICES";
-    lines.push("-- "+sectionLabel+" --");
-    if(mode==="fantasy"){lines.push("  Notation: cp = Copper  |  s = Silver  |  g = Gold");}
-    lines.push("  (Edit any value directly. Changes apply next turn.)","");
-    lines.push("[ADD ITEM: Category | Label | Amount]","[DEL ITEM: Category | Label]","[ADD CATEGORY: Name]","[DEL CATEGORY: Name]","[RENAME CATEGORY: OldName | NewName]","");
-    if(pl.length===0){lines.push("  (none)");}else{for(var ci=0;ci<pl.length;ci++){var cat=pl[ci];lines.push("  "+cat.category+":");if(!cat.tiers||cat.tiers.length===0){lines.push("    (no items)");}else{var sorted=cat.tiers.slice().sort(function(a,b){return a.amount-b.amount;});for(var t2=0;t2<sorted.length;t2++)lines.push("    "+ubisFormatBalance(sorted[t2].amount)+"  --  "+sorted[t2].label);}lines.push("");}}
-    return lines.join("\n");
-  }
-  function ubisBountyCardBody(U){var mode=ubisResolvePreset();var pk=mode.replace("-","");var pr=U.settings.jobPayouts&&U.settings.jobPayouts[pk]||[];var label=mode==="modern"?"== JOB BOARD ==":mode==="sci-fi"?"== CONTRACT BOARD ==":"== BOUNTY BOARD ==";var lines=[label,""];lines.push("  Notation: cp = Copper  |  s = Silver  |  g = Gold");lines.push("  (Edit values directly on any line. Changes apply next turn.)","");lines.push("[ADD: Label | min | max | description]","[DEL: Label]","");if(pr.length===0){lines.push("  (none)","");}else{for(var i=0;i<pr.length;i++){lines.push("  "+pr[i].label+" | "+ubisFormatBalance(pr[i].minPay)+" | "+ubisFormatBalance(pr[i].maxPay));lines.push("    "+pr[i].desc);lines.push("");}}lines.push("-- HOW TO USE --");lines.push("  /earn [min] [coin]  to reward yourself manually");lines.push("  Or let the AI reference these tiers in narration.");return lines.join("\n");}
-  function ubisHolidaysCardBody(U){var hols=(U.settings&&U.settings.holidays)||[];var t=U.time;var mn=UBIS_MONTHS[t.month-1];var todH=ubisGetTodayHolidays(U);var upH=ubisGetUpcomingHolidays(U,30);var lines=["== HOLIDAYS & BIRTHDAYS ==","","Today: "+mn.name+" "+t.day+", Year "+t.year,"","[To edit: change a line below directly, e.g.  [ON] Name | month | day | type]","[Add:    ADD: Name | month | day | type | description]","[Delete: DEL: Name]","[Types:  holiday, birthday, seasonal, religious, custom]",""];if(todH.length>0){lines.push("-- TODAY --");for(var ti=0;ti<todH.length;ti++){lines.push("  ** "+todH[ti].name+" ("+todH[ti].type+")");lines.push("     "+todH[ti].description);}lines.push("");}if(upH.length>0){lines.push("-- UPCOMING (next 30 days) --");for(var ui=0;ui<upH.length;ui++){var uh=upH[ui].holiday;lines.push("  In "+upH[ui].daysAway+"d: "+uh.name+" ("+UBIS_MONTHS[uh.month-1].name+" "+uh.day+") -- "+uh.type);}lines.push("");}lines.push("-- ALL ENTRIES --","");if(hols.length===0){lines.push("  (none)");}else{var types=["birthday","holiday","seasonal","religious","custom"];for(var ty=0;ty<types.length;ty++){var grp=hols.filter(function(h){return h.type===types[ty];});if(grp.length===0)continue;lines.push("  -- "+types[ty].toUpperCase()+" --");for(var gi=0;gi<grp.length;gi++){var h=grp[gi];lines.push("  "+(h.enabled?"[ON] ":"[OFF]")+" "+h.name+" | "+h.month+" | "+h.day+" | "+h.type);lines.push("    "+UBIS_MONTHS[h.month-1].name+" "+h.day+"   "+h.description);}lines.push("");}}return lines.join("\n");}
-
-  function ubisEventsCardBody(U){var ev=(U.settings&&U.settings.events)||[];var t=U.time;var mn=UBIS_MONTHS[t.month-1];var actEv=ubisGetActiveEvents(U);var lines=["== EVENTS ==","","Today: "+mn.name+" "+t.day+", Year "+t.year,"","[ADD: Name | startMonth | startDay | endMonth | endDay | leadDays | repeat | description]","[Use - for endMonth/endDay if single-day. repeat: none or yearly]","[Toggle: change [ON] to [OFF] directly on any entry line]","[Delete: DEL: Event Name]",""];if(actEv.length>0){lines.push("-- ACTIVE / UPCOMING --");for(var ai=0;ai<actEv.length;ai++){var ae=actEv[ai];lines.push("  "+(ae.daysAway===0?"-- TODAY: ":"-- In "+ae.daysAway+"d: ")+ae.event.name);lines.push("    "+ae.event.description);}lines.push("");}lines.push("-- ALL EVENTS --","");if(ev.length===0){lines.push("  (none)");}else{for(var i=0;i<ev.length;i++){var e=ev[i];var ss=UBIS_MONTHS[e.startMonth-1].name+" "+e.startDay;var es="";if(e.endMonth&&e.endDay&&(e.endMonth!==e.startMonth||e.endDay!==e.startDay))es=" to "+UBIS_MONTHS[e.endMonth-1].name+" "+e.endDay;lines.push("  "+(e.enabled?"[ON] ":"[OFF]")+" "+e.name);lines.push("    "+ss+es+(e.repeat==="yearly"?" [yearly]":"")+(e.leadDays>0?" ["+e.leadDays+"d lead]":""));lines.push("    "+e.description);lines.push("");}}return lines.join("\n");}
-
-  function ubisSeasonsCardBody(U){var ss=U.settings.seasons||[];var t=U.time;var cm=t.month;var sm=ss.length>=cm?ss[cm-1]:null;var lines=["== SEASONS ==","(Read-only — managed by script)","","","-- NOW: "+UBIS_MONTHS[cm-1].name+" --"];if(sm){lines.push("  Season:  "+sm.seasonName);lines.push("  Weather: "+(U.currentWeather||"Clear"));lines.push("  Mood:    "+sm.mood);var tbl=sm.weather||[];for(var wi=0;wi<tbl.length;wi++)lines.push("  "+tbl[wi].pct+"% "+tbl[wi].c);}else{lines.push("  (no data)");}lines.push("","-- ALL MONTHS --");for(var mi=0;mi<ss.length;mi++){var s=ss[mi];var top=(s.weather||[]).slice().sort(function(a,b){return b.pct-a.pct;}).slice(0,2).map(function(w){return w.pct+"% "+w.c;}).join(", ");lines.push((mi+1===cm?"► ":"  ")+(mi+1)+". "+UBIS_MONTHS[mi].name+" ["+s.seasonName+"] "+top);}return lines.join("\n");}
-
-
-  // ------------------------------------------------------------
-  // SECTION 10 — HOOKS  (called by AI Dungeon each turn)
-  //              Note: hook/function names are internal and unchanged.
-  // ------------------------------------------------------------
-  function onLibrary_UBIS(){if(state.ubis===undefined)state.ubis={};var U=state.ubis;
-  if(U.balance===undefined)U.balance=ubisGetDefaultBalance();
-  if(U.inventory===undefined)U.inventory=JSON.parse(JSON.stringify(ubisGetDefaultInventory()));
-  if(U.ledger===undefined)U.ledger=[];if(U.billCounters===undefined)U.billCounters={};
-  if(U.incomeCounters===undefined)U.incomeCounters={};if(U.turnCount===undefined)U.turnCount=0;
-  if(U.denied===undefined)U.denied=[];if(U.pendingCmd===undefined)U.pendingCmd="";
-  if(U.currentWeather===undefined)U.currentWeather="";if(U.weatherDay===undefined)U.weatherDay=-1;
-  if(U.time===undefined)U.time={year:UBIS_CONFIG.startYear,month:UBIS_CONFIG.startMonth,day:UBIS_CONFIG.startDay,hour:UBIS_CONFIG.startHour,totalHours:UBIS_CONFIG.startHour};
-  if(U.settings===undefined){U.settings={preset:UBIS_CONFIG.preset,scriptEnabled:UBIS_CONFIG.scriptEnabled,hoursPerTurn:UBIS_CONFIG.hoursPerTurn,inventoryEnabled:UBIS_CONFIG.inventoryEnabled,currencyEnabled:UBIS_CONFIG.currencyEnabled,timeEnabled:UBIS_CONFIG.timeEnabled,billsEnabled:UBIS_CONFIG.billsEnabled,currencyContextEnabled:UBIS_CONFIG.currencyContextEnabled,narratorMode:UBIS_CONFIG.narratorMode===true,tiers:UBIS_CONFIG.preset==="fantasy"?UBIS_TIERS.map(function(t){return Object.assign({},t);}):null,bills:JSON.parse(JSON.stringify(ubisGetDefaultBills())),income:JSON.parse(JSON.stringify(ubisGetDefaultIncome())),priceList:JSON.parse(JSON.stringify(ubisGetDefaultPriceList())),jobPayouts:JSON.parse(JSON.stringify(UBIS_CONFIG.jobPayouts)),holidays:JSON.parse(JSON.stringify(ubisGetDefaultHolidays())),events:JSON.parse(JSON.stringify(UBIS_CONFIG.events)),seasons:ubisGetDefaultSeasons()};}
-  if(!U.settings.preset)U.settings.preset=UBIS_CONFIG.preset;
-  if(U.settings.narratorMode===undefined)U.settings.narratorMode=false;
-  if(U.currentWeather===undefined)U.currentWeather="";if(U.weatherDay===undefined)U.weatherDay=-1;
-  if(ubisResolvePreset()==="fantasy"&&(!U.settings.tiers||!U.settings.tiers.length))U.settings.tiers=UBIS_TIERS.map(function(t){return Object.assign({},t);});
-  if(!U.settings.priceList)U.settings.priceList=JSON.parse(JSON.stringify(ubisGetDefaultPriceList()));
-  if(!U.settings.jobPayouts)U.settings.jobPayouts=JSON.parse(JSON.stringify(UBIS_CONFIG.jobPayouts));
-  if(!U.settings.holidays)U.settings.holidays=JSON.parse(JSON.stringify(ubisGetDefaultHolidays()));
-  if(!U.settings.events)U.settings.events=JSON.parse(JSON.stringify(UBIS_CONFIG.events));
-  if(!U.settings.seasons)U.settings.seasons=ubisGetDefaultSeasons();
-  if(U.settings.currencyContextEnabled===undefined)U.settings.currencyContextEnabled=UBIS_CONFIG.currencyContextEnabled;
-  if(!Array.isArray(U.settings.bills))U.settings.bills=JSON.parse(JSON.stringify(ubisGetDefaultBills()));
-  if(!Array.isArray(U.settings.income))U.settings.income=JSON.parse(JSON.stringify(ubisGetDefaultIncome()));
-  if(U.cardConfig===undefined){U.cardConfig={masterEnabled:UBIS_CONFIG.cardsEnabled.master,"Inventory":UBIS_CONFIG.cardsEnabled.inventory,"Configure Realmheart":UBIS_CONFIG.cardsEnabled.configUBIS,"Configure Time Settings":UBIS_CONFIG.cardsEnabled.configTime,"Bills":UBIS_CONFIG.cardsEnabled.bills,"Ledger":UBIS_CONFIG.cardsEnabled.ledger,"Prices & Goods":UBIS_CONFIG.cardsEnabled.pricesGoods,"Bounty Board":true,"Holidays":UBIS_CONFIG.cardsEnabled.holidays,"Events":UBIS_CONFIG.cardsEnabled.events,"Seasons":UBIS_CONFIG.cardsEnabled.seasons};}
-  if(U.cardConfig["Prices & Goods"]===undefined)U.cardConfig["Prices & Goods"]=true;if(U.cardConfig["Bounty Board"]===undefined)U.cardConfig["Bounty Board"]=true;
-  if(U.cardConfig["Holidays"]===undefined)U.cardConfig["Holidays"]=true;
-  if(U.cardConfig["Events"]===undefined)U.cardConfig["Events"]=true;
-  if(U.cardConfig["Seasons"]===undefined)U.cardConfig["Seasons"]=true;
-  ubisEnsureCounters(U);ubisCreateCards();ubisReadAllCards();ubisWriteAllCards();
-  log("[Realmheart] Loaded. Preset: "+ubisResolvePreset()+" | Balance: "+ubisFormatBalance(U.balance));}
-
-  function onInput_UBIS(text){var U=state.ubis;if(!U)return text;
-  U.denied=[];U.pendingCmd="";ubisReadAllCards();
-  var clean=text.replace(/^[>\s"']+/,"").trim();
-  var sp=clean.indexOf("/");
-  if(sp!==-1&&sp<4){
-    var cmd=clean.slice(sp);
-    var res=ubisParseCommand(cmd);
-    if(res.handled){
-      // FIX: return command output DIRECTLY from input hook.
-      // This prevents dependency on output hook firing, which is unreliable
-      // when input returns a space. The AI sees this as player text and
-      // generates a minimal acknowledgment rather than ignoring it.
-      ubisWriteAllCards();
-      return "=== REALMHEART ===\n"+res.lines.join("\n")+"\n=== END ===";
+  lines.push("-- SETTINGS --");
+  lines.push("  Debt on loss: "+(U.settings.debtOnGambleLoss?"ON":"OFF"));
+  lines.push("  [If ON, a loss you can't cover goes negative instead of being blocked.]","");
+  lines.push("-- RECENT ROUNDS --");
+  var recent=(U.recentGambles||[]).slice(-2).reverse();
+  if(recent.length===0){lines.push("  (none yet)");}
+  else{for(var r=0;r<recent.length;r++){var rg=recent[r];lines.push("  T"+rg.turn+"  "+rg.game+"   Bet: "+ubisFormatBalance(rg.bet)+"   "+rg.outcome+"   "+(rg.net>=0?"+":"-")+ubisFormatBalance(Math.abs(rg.net)));}}
+  lines.push("","  [Full history: /ledger]","");
+  var gs=U.gambleStats||{wins:0,losses:0,pushes:0,currentStreak:0,streakType:null,longestWinStreak:0,longestLoseStreak:0};
+  lines.push("-- LIFETIME STATS --");
+  lines.push("  Wins: "+gs.wins+"  |  Losses: "+gs.losses+"  |  Pushes: "+gs.pushes);
+  lines.push("");
+  var streakLabel=gs.currentStreak>0?(gs.streakType==="win"?"Win streak of "+gs.currentStreak:"Lose streak of "+gs.currentStreak):"No active streak";
+  lines.push("  Current: "+streakLabel);
+  lines.push("");
+  lines.push("  All-Time Records:");
+  lines.push("    Longest win streak: "+gs.longestWinStreak);
+  lines.push("    Longest lose streak: "+gs.longestLoseStreak);
+  return lines.join("\n");
+}
+function ubisReadGamblingCard(){
+  var lines=ubisCardLines("Gambling Hall");if(!lines)return;
+  var U=state.ubis;var games=U.settings.gamblingGames;if(!games)return;
+  var currentGame=null;
+  for(var i=0;i<lines.length;i++){
+    var tr=lines[i].trim();var lo=tr.toLowerCase();
+    if(!tr)continue;
+    if(tr.indexOf("-- ")===0&&tr.lastIndexOf(" --")===tr.length-3){
+      var fullLabel=tr.slice(3,-3).trim();
+      if(fullLabel==="ACTIVE SESSION"||fullLabel==="SETTINGS"||fullLabel==="RECENT ROUNDS"||fullLabel==="LIFETIME STATS"){currentGame=null;continue;}
+      currentGame=null;
+      var hm=fullLabel.match(/^(.+?)\s*\(([a-zA-Z]+)\)$/);
+      var hLabel=hm?hm[1].trim():fullLabel;
+      var hFlags=hm?hm[2].toLowerCase().replace(/[^nic]/g,""):null;
+      for(var gi=0;gi<games.length;gi++){if(games[gi].name.toUpperCase()===hLabel){currentGame=games[gi];if(hFlags)games[gi].flags=hFlags;break;}}
+      continue;
+    }
+    if(tr.charAt(0)==="["||tr.charAt(0)==="("||tr.indexOf("Full history")!==-1)continue;
+    if(lo.indexOf("debt on loss:")===0){
+      var val=tr.slice(tr.indexOf(":")+1).trim().toLowerCase().split(/[\s\u2014-]+/)[0];
+      if(val==="on")U.settings.debtOnGambleLoss=true;
+      else if(val==="off")U.settings.debtOnGambleLoss=false;
+      continue;
+    }
+    if(lo.indexOf("add game:")===0){
+      var parts=tr.slice(9).trim().split("|");
+      if(parts.length>=3){
+        var gname=parts[0].trim();
+        var gflags=parts[1].trim().toLowerCase().replace(/[^nic]/g,"");
+        var exists=false;
+        for(var ei=0;ei<games.length;ei++){if(games[ei].name.toLowerCase()===gname.toLowerCase()){exists=true;break;}}
+        if(!exists&&gname&&gflags){
+          var outcomes=[];
+          for(var pi=2;pi<parts.length;pi++){
+            var seg=parts[pi].trim().split(",");
+            if(seg.length>=3){
+              var lbl=seg[0].trim(),pct=parseFloat(seg[1]),pay=parseFloat(seg[2]);
+              if(lbl&&!isNaN(pct)&&!isNaN(pay))outcomes.push({label:lbl,pct:pct,payout:pay});
+            }
+          }
+          if(outcomes.length>0)games.push({name:gname,flags:gflags,outcomes:outcomes,description:"A custom wager game called "+gname+"."});
+        }
+      }
+      continue;
+    }
+    if(lo.indexOf("del game:")===0){
+      var dn=tr.slice(9).trim().toLowerCase();
+      U.settings.gamblingGames=games.filter(function(g){return g.name.toLowerCase()!==dn;});
+      games=U.settings.gamblingGames;
+      currentGame=null;
+      continue;
+    }
+    if(currentGame&&tr.indexOf("|")!==-1){
+      var op=tr.split("|");
+      if(op.length>=3){
+        var olabel=op[0].trim();
+        var opct=parseFloat(op[1].replace("%","").trim());
+        var opay=parseFloat(op[2].replace("x","").trim());
+        for(var oi=0;oi<currentGame.outcomes.length;oi++){
+          if(currentGame.outcomes[oi].label.toLowerCase()===olabel.toLowerCase()){
+            if(!isNaN(opct))currentGame.outcomes[oi].pct=opct;
+            if(!isNaN(opay))currentGame.outcomes[oi].payout=opay;
+            break;
+          }
+        }
+      }
     }
   }
-  if(!U.settings.scriptEnabled)return text;
-  var notif=[];var hardBlocked=false;
-  if(U.settings.timeEnabled){var sk=ubisDetectTimeSkip(clean);if(sk>0){ubisAdvanceHours(U,sk);ubisLedger(U,"time","Skip +"+ubisFormatDuration(sk),0);notif.push("[TIME] +"+ubisFormatDuration(sk)+" => "+ubisFormatDate(U));}}
-  if(U.settings.currencyEnabled){var cg=ubisDetectPlayerCurrencyGain(U,clean);var cl=ubisDetectPlayerCurrencyLoss(U,clean);var den=U.denied||[];if(den.length>0){for(var di=0;di<den.length;di++)notif.push(den[di]);hardBlocked=true;}else{if(cg>0)notif.push("[+] Gained: "+ubisFormatBalance(cg));if(cl>0)notif.push("[-] Spent:  "+ubisFormatBalance(cl));if(cg>0||cl>0)notif.push("[BALANCE] "+ubisFormatBalance(U.balance));}U.denied=[];}
-  if(U.settings.inventoryEnabled&&!hardBlocked){var con=ubisDetectPlayerConsume(U,clean);var add=ubisDetectPlayerAdd(U,clean);var rem=ubisDetectPlayerRemove(U,clean).concat(con);for(var ai=0;ai<add.length;ai++)notif.push("[+] "+add[ai]);for(var ri=0;ri<rem.length;ri++)notif.push("[-] "+rem[ri]);if(add.length>0||rem.length>0){var bagE=Object.entries(U.inventory||{});var bagT=0;for(var bi=0;bi<bagE.length;bi++)bagT+=bagE[bi][1];notif.push("[BAG] "+bagE.length+" type"+(bagE.length===1?"":"s")+" | "+bagT+" item"+(bagT===1?"":"s")+" | use /inventory for full list");}}
-  if(notif.length>0){U.pendingCmd=notif.join("\n");ubisWriteAllCards();}
-  if(hardBlocked)return"The player attempts the action but cannot afford it. They only have "+ubisFormatBalance(U.balance)+" and do not have enough funds. Narrate the scene as a failure — the transaction does not go through.";
-  return text;}
+}
 
-  function onContext_UBIS(text){var U=state.ubis;if(!U)return text;ubisCreateCards();ubisWriteAllCards();ubisExpireEvents(U);var cd=ubisTotalDays(U.time);if(cd!==U.weatherDay){U.currentWeather=ubisRollWeather(U);U.weatherDay=cd;}var t=U.time;var mn=UBIS_MONTHS[t.month-1];var en=Object.entries(U.inventory||{});var inv=en.length>0?en.map(function(x){return x[0]+(x[1]>1?" x"+x[1]:"");}).join(", "):"nothing";var curLine="";if(U.settings.currencyContextEnabled){var tiers=ubisGetTiers();var smt=tiers[tiers.length-1];var tp=[],cp=[];for(var ti=0;ti<tiers.length;ti++)tp.push(tiers[ti].name+" ("+tiers[ti].valueInBase+" base)");for(var ci=0;ci<tiers.length-1;ci++)cp.push("1 "+tiers[ci].name+" = "+Math.floor(tiers[ci].valueInBase/smt.valueInBase)+" "+smt.plural);curLine="\nCurrency: "+tp.join(", ");if(cp.length>0)curLine+=" | "+cp.join(", ");}var prLine="";var pl=U.settings.priceList||[];if(pl.length>0){var pp=[];for(var pi=0;pi<pl.length;pi++){var cat=pl[pi];if(!cat.tiers||!cat.tiers.length)continue;var srt=cat.tiers.slice().sort(function(a,b){return a.amount-b.amount;});pp.push(cat.category+": "+ubisFormatBalance(srt[0].amount)+" - "+ubisFormatBalance(srt[srt.length-1].amount));}if(pp.length>0)prLine="\nPrice ranges: "+pp.join(" | ");}var paLine="";var pk=ubisResolvePreset().replace("-","");var jp=U.settings.jobPayouts&&U.settings.jobPayouts[pk];if(jp&&jp.length>0){var jpp=[];for(var ji=0;ji<jp.length;ji++)jpp.push(jp[ji].label+": "+ubisFormatBalance(jp[ji].minPay)+"-"+ubisFormatBalance(jp[ji].maxPay));paLine="\nJob payouts: "+jpp.join(" | ");}var seaLine="";var ss=U.settings.seasons;if(ss&&ss.length>=t.month){var csm=ss[t.month-1];seaLine="\nSeason: "+csm.seasonName+" | Weather: "+(U.currentWeather||"Clear")+" | "+mn.name+" -- "+csm.mood;}var evLines="";var actEv=ubisGetActiveEvents(U);var ta_ev=ubisTotalDays(U.time);var evToShow=actEv.filter(function(ev){return !(ev.daysAway===0&&ev.event.lastShownDay===U.turnCount);});if(evToShow.length>0){var ep=[];for(var ei=0;ei<evToShow.length;ei++){var ev=evToShow[ei];var pfx=ev.daysAway===0?"[EVENT -- TODAY]":"[UPCOMING EVENT -- in "+ev.daysAway+" day"+(ev.daysAway===1?"":"s")+"]";ep.push(pfx+" "+ev.event.name+": "+ev.event.description);}evLines="\n"+ep.join("\n");for(var ei2=0;ei2<evToShow.length;ei2++){if(evToShow[ei2].daysAway===0)evToShow[ei2].event.lastShownDay=U.turnCount;}}var holLine="";var todH=ubisGetTodayHolidays(U);if(todH.length>0){var hp=[];for(var hi=0;hi<todH.length;hi++){var h=todH[hi];hp.push("["+(h.type==="birthday"?"BIRTHDAY":"HOLIDAY")+": "+h.name+"] "+h.description);}holLine="\n"+hp.join("\n");}
-  var narLine="";if(U.settings.narratorMode)narLine="\\n[NARRATOR MODE: ACTIVE -- You are the narrator only. You must not write the player character's actions, speech, decisions, or internal thoughts under any circumstances. Write only NPC dialogue, NPC reactions, and scene description. End your response before the player character acts or speaks. Wait for the player to provide all player character input.]";var ws=[""," =====================================","[CURRENT WORLD STATE -- use this as ground truth for the scene."," Answer any player questions about time, date, money, inventory, or weather from this block."," Prioritize any [EVENT] or [HOLIDAY] entries — these define what is happening RIGHT NOW.]"].join("\n");ws+=evLines+holLine;ws+="\n"+[ubisGetCurrencyLabel()+": "+ubisFormatBalance(U.balance),"Carrying: "+inv,"Time: "+ubisFormatHour(t.hour),"Date: "+mn.name+" "+t.day+", Year "+t.year+" (Adventure day "+ubisTotalDays(t)+")","====================================="].join("\n");ws+=seaLine+curLine+prLine+paLine+narLine;return text+ws;}
+// ------------------------------------------------------------
+// SECTION 10 — HOOKS  (called by AI Dungeon each turn)
+//              Note: hook/function names are internal and unchanged.
+// ------------------------------------------------------------
+function onLibrary_UBIS(){if(state.ubis===undefined)state.ubis={};var U=state.ubis;
+if(U.balance===undefined)U.balance=ubisGetDefaultBalance();
+if(U.inventory===undefined)U.inventory=JSON.parse(JSON.stringify(ubisGetDefaultInventory()));
+if(U.ledger===undefined)U.ledger=[];if(U.billCounters===undefined)U.billCounters={};
+if(U.incomeCounters===undefined)U.incomeCounters={};if(U.turnCount===undefined)U.turnCount=0;
+if(U.denied===undefined)U.denied=[];if(U.pendingCmd===undefined)U.pendingCmd="";
+if(U.currentWeather===undefined)U.currentWeather="";if(U.weatherDay===undefined)U.weatherDay=-1;
+if(U.time===undefined)U.time={year:UBIS_CONFIG.startYear,month:UBIS_CONFIG.startMonth,day:UBIS_CONFIG.startDay,hour:UBIS_CONFIG.startHour,totalHours:UBIS_CONFIG.startHour};
+if(U.settings===undefined){U.settings={preset:UBIS_CONFIG.preset,scriptEnabled:UBIS_CONFIG.scriptEnabled,hoursPerTurn:UBIS_CONFIG.hoursPerTurn,inventoryEnabled:UBIS_CONFIG.inventoryEnabled,currencyEnabled:UBIS_CONFIG.currencyEnabled,timeEnabled:UBIS_CONFIG.timeEnabled,billsEnabled:UBIS_CONFIG.billsEnabled,currencyContextEnabled:UBIS_CONFIG.currencyContextEnabled,narratorMode:UBIS_CONFIG.narratorMode===true,tiers:UBIS_CONFIG.preset==="fantasy"?UBIS_TIERS.map(function(t){return Object.assign({},t);}):null,bills:JSON.parse(JSON.stringify(ubisGetDefaultBills())),income:JSON.parse(JSON.stringify(ubisGetDefaultIncome())),priceList:JSON.parse(JSON.stringify(ubisGetDefaultPriceList())),jobPayouts:JSON.parse(JSON.stringify(UBIS_CONFIG.jobPayouts)),holidays:JSON.parse(JSON.stringify(ubisGetDefaultHolidays())),events:JSON.parse(JSON.stringify(UBIS_CONFIG.events)),seasons:ubisGetDefaultSeasons(),wells:[],drains:[],hardmodeConsequences:false};}
+if(!U.settings.preset)U.settings.preset=UBIS_CONFIG.preset;
+if(U.settings.narratorMode===undefined)U.settings.narratorMode=false;
+if(U.currentWeather===undefined)U.currentWeather="";if(U.weatherDay===undefined)U.weatherDay=-1;
+if(ubisResolvePreset()==="fantasy"&&(!U.settings.tiers||!U.settings.tiers.length))U.settings.tiers=UBIS_TIERS.map(function(t){return Object.assign({},t);});
+if(!U.settings.priceList)U.settings.priceList=JSON.parse(JSON.stringify(ubisGetDefaultPriceList()));
+if(!U.settings.jobPayouts)U.settings.jobPayouts=JSON.parse(JSON.stringify(UBIS_CONFIG.jobPayouts));
+if(!U.settings.holidays)U.settings.holidays=JSON.parse(JSON.stringify(ubisGetDefaultHolidays()));
+if(!U.settings.events)U.settings.events=JSON.parse(JSON.stringify(UBIS_CONFIG.events));
+if(!U.settings.seasons)U.settings.seasons=ubisGetDefaultSeasons();
+if(!U.settings.gamblingGames)U.settings.gamblingGames=ubisGetDefaultGamblingGames();
+else if(!ubisFindGame(U,"High Stakes"))U.settings.gamblingGames.push({name:"High Stakes",type:"highstakes",outcomes:[{label:"WIN",pct:50,payout:0},{label:"LOSE",pct:50,payout:0}],description:"High Stakes involves no currency or items. Whatever the player has staked is on the line -- risk, danger, or something they value. A win means they come through. A loss means the stake is genuinely lost."});
+if(U.settings.debtOnGambleLoss===undefined)U.settings.debtOnGambleLoss=false;
+if(U.settings.gamblingEnabled===undefined)U.settings.gamblingEnabled=UBIS_CONFIG.gamblingEnabled;
+if(U.settings.seasonsEnabled===undefined)U.settings.seasonsEnabled=UBIS_CONFIG.seasonsEnabled;
+if(U.settings.requireInventoryForSales===undefined)U.settings.requireInventoryForSales=UBIS_CONFIG.requireInventoryForSales;
+if(U.activeGamble===undefined)U.activeGamble=null;
+if(U.recentGambles===undefined)U.recentGambles=[];
+if(U.pendingGambleResult===undefined)U.pendingGambleResult=null;
+if(U.gambleStats===undefined)U.gambleStats={wins:0,losses:0,pushes:0,currentStreak:0,streakType:null,longestWinStreak:0,longestLoseStreak:0};
+if(U.pendingPenalties===undefined)U.pendingPenalties=[];
+if(U.settings.currencyContextEnabled===undefined)U.settings.currencyContextEnabled=UBIS_CONFIG.currencyContextEnabled;
+if(!Array.isArray(U.settings.bills))U.settings.bills=JSON.parse(JSON.stringify(ubisGetDefaultBills()));
+if(!Array.isArray(U.settings.income))U.settings.income=JSON.parse(JSON.stringify(ubisGetDefaultIncome()));
+if(!Array.isArray(U.settings.wells))U.settings.wells=[];
+if(U.wellCounters===undefined)U.wellCounters={};
+if(!Array.isArray(U.settings.drains))U.settings.drains=[];
+if(U.drainCounters===undefined)U.drainCounters={};
+if(U.settings.hardmodeConsequences===undefined)U.settings.hardmodeConsequences=false;
+if(U.pendingPenalties===undefined)U.pendingPenalties=[];
+if(U.cardConfig===undefined){U.cardConfig={masterEnabled:UBIS_CONFIG.cardsEnabled.master,"Inventory":UBIS_CONFIG.cardsEnabled.inventory,"Configure Realmheart":UBIS_CONFIG.cardsEnabled.configUBIS,"Configure Time Settings":UBIS_CONFIG.cardsEnabled.configTime,"Bills":UBIS_CONFIG.cardsEnabled.bills,"Ledger":UBIS_CONFIG.cardsEnabled.ledger,"Prices & Goods":UBIS_CONFIG.cardsEnabled.pricesGoods,"Bounty Board":true,"Holidays":UBIS_CONFIG.cardsEnabled.holidays,"Events":UBIS_CONFIG.cardsEnabled.events,"Seasons":UBIS_CONFIG.cardsEnabled.seasons,"Gambling Hall":UBIS_CONFIG.cardsEnabled.gamblingHall};}
+if(U.cardConfig["Prices & Goods"]===undefined)U.cardConfig["Prices & Goods"]=true;if(U.cardConfig["Bounty Board"]===undefined)U.cardConfig["Bounty Board"]=true;
+if(U.cardConfig["Holidays"]===undefined)U.cardConfig["Holidays"]=true;
+if(U.cardConfig["Events"]===undefined)U.cardConfig["Events"]=true;
+if(U.cardConfig["Seasons"]===undefined)U.cardConfig["Seasons"]=true;
+if(U.cardConfig["Gambling Hall"]===undefined)U.cardConfig["Gambling Hall"]=true;
+ubisEnsureCounters(U);ubisCreateCards();ubisReadAllCards();ubisWriteAllCards();
+log("[Realmheart] Loaded. Preset: "+ubisResolvePreset()+" | Balance: "+ubisFormatBalance(U.balance));}
 
-  function onOutput_UBIS(text){var U=state.ubis;if(!U)return text;
-  if(U.pendingCmd&&U.pendingCmd!==""){var msg=U.pendingCmd;U.pendingCmd="";ubisWriteAllCards();return msg+"\n"+text;}
-  if(!U.settings.scriptEnabled){ubisWriteAllCards();return text;}
-  U.denied=[];U.turnCount+=1;var out=[];
-  var db=ubisTotalDays(U.time);if(U.settings.timeEnabled)ubisAdvanceHours(U,U.settings.hoursPerTurn);
-  if(ubisTotalDays(U.time)!==db){U.currentWeather=ubisRollWeather(U);U.weatherDay=ubisTotalDays(U.time);}
-  var sk=0;if(U.settings.timeEnabled){sk=ubisDetectTimeSkip(text);if(sk>0){var dbs=ubisTotalDays(U.time);ubisAdvanceHours(U,sk);ubisLedger(U,"time","Skip +"+ubisFormatDuration(sk),0);if(ubisTotalDays(U.time)!==dbs){U.currentWeather=ubisRollWeather(U);U.weatherDay=ubisTotalDays(U.time);}}}
-  var notices=[];if(U.settings.billsEnabled){notices=ubisProcessBills(U);for(var ni=0;ni<notices.length;ni++)out.push(notices[ni]);}
-  var gained=0,lost=0;if(U.settings.currencyEnabled){gained=ubisTryCurrencyGain(U,text.toLowerCase());lost=ubisTryCurrencyLoss(U,text.toLowerCase());}
-  var den=U.denied||[];var hasC=gained>0||lost>0||notices.length>0||sk>0||den.length>0;
-  if(hasC){out.push("----------------------------------");for(var di=0;di<den.length;di++)out.push(den[di]);if(sk>0)out.push("[TIME] +"+ubisFormatDuration(sk)+" => "+ubisFormatDate(U));if(gained>0)out.push("[+] Gained: "+ubisFormatBalance(gained));if(lost>0)out.push("[-] Spent:  "+ubisFormatBalance(lost));if(gained>0||lost>0)out.push("[BALANCE] "+ubisFormatBalance(U.balance));out.push("----------------------------------");}
-  ubisWriteAllCards();if(out.length>0)return out.join("\n")+"\n"+text;return text;}
+function ubisNonCap(p){return p.replace(/^\(/,"(?:");}
+function ubisAmountBlobPattern(){var qpNC=ubisNonCap(ubisQtyPattern());var cpNC=ubisNonCap(ubisCoinPattern());return "(\\$\\s?\\d+(?:\\.\\d+)?|"+qpNC+"\\s+"+cpNC+")";}
+function ubisParseAmountBlob(blob){var dm=blob.match(/^\$\s?(\d+(?:\.\d+)?)$/);if(dm)return Math.round(parseFloat(dm[1]));var parts=blob.trim().split(/\s+/);var coin=parts[parts.length-1];var qtyStr=parts.slice(0,-1).join(" ");var qty=ubisParseQtyStr(qtyStr);return qty*ubisCoiNameToBase(coin);}
+function ubisResolvePurchase(U,itemDesc,amountBase,notif){
+if(amountBase<=0)return false;
+var itemQty=ubisExtractQty(itemDesc)||1;
+var cleanItem=ubisCleanItem(itemDesc);if(!cleanItem)return false;
+if(U.balance<amountBase){U.denied=U.denied||[];U.denied.push("[DECLINED] You do not have enough funds to buy "+cleanItem+".");return true;}
+U.balance-=amountBase;
+ubisAddItem(U,cleanItem,itemQty);
+ubisLedger(U,"expense","Bought "+cleanItem+" x"+itemQty,-amountBase);
+notif.push("[PURCHASE] Bought "+itemQty+"x "+cleanItem+" for "+ubisFormatBalance(amountBase));
+notif.push("[BALANCE] "+ubisFormatBalance(U.balance));
+return true;
+}
+function ubisResolveSale(U,itemDesc,amountBase,notif){
+if(amountBase<=0)return false;
+var itemQty=ubisExtractQty(itemDesc)||1;
+var cleanItem=ubisCleanItem(itemDesc);if(!cleanItem)return false;
+var itemKey=ubisFindInvKey(U,cleanItem);
+var haveQty=itemKey?(U.inventory[itemKey]||0):0;
+if(U.settings.requireInventoryForSales){
+if(!itemKey||haveQty<itemQty){U.denied=U.denied||[];U.denied.push("[DECLINED] You don\'t have "+(itemQty>1?itemQty+"x ":"")+cleanItem+" to sell.");return true;}
+ubisRemoveItem(U,itemKey,itemQty,true);
+}else{
+if(itemKey&&haveQty>=itemQty)ubisRemoveItem(U,itemKey,itemQty,true);
+}
+U.balance+=amountBase;
+ubisLedger(U,"income","Sold "+cleanItem+" x"+itemQty,amountBase);
+notif.push("[SALE] Sold "+itemQty+"x "+cleanItem+" for "+ubisFormatBalance(amountBase));
+notif.push("[BALANCE] "+ubisFormatBalance(U.balance));
+return true;
+}
+function ubisDetectPurchaseSale(U,text,notif){
+var lo=text.toLowerCase();var ab=ubisAmountBlobPattern();
+var buyVerbs="(?:buy|bought|purchase[ds]?)";
+var rxBuyFor=new RegExp("(?:you|i)\\s+"+buyVerbs+"\\s+(.+?)\\s+for\\s+"+ab,"i");
+var mBF=rxBuyFor.exec(lo);
+if(mBF)return ubisResolvePurchase(U,mBF[1],ubisParseAmountBlob(mBF[2]),notif);
+var paySpendVerbs="(?:pay|paid|spend|spent)";
+var rxPaySpend=new RegExp("(?:you|i)\\s+"+paySpendVerbs+"\\s+"+ab+"\\s+(?:on|for)\\s+(.+)","i");
+var mPS=rxPaySpend.exec(lo);
+if(mPS)return ubisResolvePurchase(U,mPS[2],ubisParseAmountBlob(mPS[1]),notif);
+var sellVerbs="(?:sell|sold)";
+var rxSell=new RegExp("(?:you|i)\\s+"+sellVerbs+"\\s+(.+?)\\s+for\\s+"+ab,"i");
+var mS=rxSell.exec(lo);
+if(mS)return ubisResolveSale(U,mS[1],ubisParseAmountBlob(mS[2]),notif);
+var tradeVerbs="(?:trade[ds]?|barter(?:ed)?|gave|give)";
+var rxTradeBuy=new RegExp("(?:you|i)\\s+"+tradeVerbs+"\\s+"+ab+"\\s+for\\s+(.+)","i");
+var mTB=rxTradeBuy.exec(lo);
+if(mTB)return ubisResolvePurchase(U,mTB[2],ubisParseAmountBlob(mTB[1]),notif);
+var rxTradeSell=new RegExp("(?:you|i)\\s+"+tradeVerbs+"\\s+(.+?)\\s+for\\s+"+ab,"i");
+var mTS=rxTradeSell.exec(lo);
+if(mTS)return ubisResolveSale(U,mTS[1],ubisParseAmountBlob(mTS[2]),notif);
+return false;
+}
 
-
-  // ------------------------------------------------------------
-  // SECTION 11 — COMMAND PARSER  (/help, /balance, etc.)
-  // ------------------------------------------------------------
-  function ubisParseCommand(cmd){var U=state.ubis;var lo=cmd.toLowerCase().trim();var lines=[];
-  if(lo==="/help"){
-   lines.push("⚔️ ═══════════════════════════════════════ ⚔️");
-   lines.push("        Welcome to Realmheart!");
-   lines.push("      The living heart of your world.");
-   lines.push("⚔️ ═══════════════════════════════════════ ⚔️","");
-   lines.push("🌎 Realmheart is a full world-state engine running");
-   lines.push("   silently behind your story. It tracks your money,");
-   lines.push("   inventory, time, weather, bills, and world events");
-   lines.push("   automatically — no setup required.");
-   lines.push("   (Formerly known as UBIS)","");
-   lines.push("📖 TYPE /keywords FOR A FULL KEYWORD REFERENCE","");
-   lines.push("─────────────── 💰 ECONOMY ────────────────");
-   lines.push("  Realmheart watches your story for currency");
-   lines.push("  changes and updates your wallet automatically.");
-   lines.push("  Purchases are blocked if you can't afford them.","");
-   lines.push("  /balance          Show your current wallet balance.");
-   lines.push("  /earn [N] [coin]  Manually add funds.");
-   lines.push("  /pay  [N] [coin]  Manually deduct funds.","");
-   lines.push("─────────────── 🎒 INVENTORY ────────────────");
-   lines.push("  Items gained or lost in your story are tracked");
-   lines.push("  automatically. You can also manage them directly");
-   lines.push("  in the Inventory card or use these commands:","");
-   lines.push("  /inventory               Show your full inventory.");
-   lines.push("  /additem [name] [qty]    Manually add an item.");
-   lines.push("  /removeitem [name] [qty] Manually remove an item.","");
-   lines.push("─────────────── 🕰️ TIME ─────────────────────────");
-   lines.push("  A full calendar and clock run in the background.");
-   lines.push("  Time advances each turn and skips forward when");
-   lines.push("  your story describes time passing. You can edit");
-   lines.push("  time, days, months, hours, and Hours Per Turn");
-   lines.push("  directly from the Configure Time card.","");
-   lines.push("  /time     Show current date, time, and weather.");
-   lines.push("  /weather  Show the full weather and season report.","");
-   lines.push("─────────────── 📒 LEDGER ────────────────────────");
-   lines.push("  Every transaction is recorded automatically.");
-   lines.push("  The story card shows the last 20 with the most");
-   lines.push("  recent on top. The command shows the full stored");
-   lines.push("  history (up to 50 entries).","");
-   lines.push("  /ledger   Show full transaction history.","");
-   lines.push("─────────────── 📅 WORLD ─────────────────────────");
-   lines.push("  Holidays, events, and seasons are tracked and");
-   lines.push("  injected into the AI's context automatically.");
-   lines.push("  You can add, remove, and edit holidays and");
-   lines.push("  events directly from their story cards.","");
-   lines.push("  /holidays  Show upcoming and active holidays.");
-   lines.push("  /events    Show upcoming and active story events.","");
-   lines.push("─────────────── ⚙️ SYSTEM ─────────────────────────");
-   lines.push("  /rh enable | disable | toggle");
-   lines.push("  /rh inv | currency | time | bills  on | off");
-   lines.push("  /rh cards on | off");
-   lines.push("  (You can also use /ubis instead of /rh)","");
-   lines.push("─────────────── 🃏 STORY CARDS ───────────────────");
-   lines.push("  All cards live under category: Realmheart");
-   lines.push("  and are editable directly in-game.","");
-   lines.push("  Inventory            Bills");
-   lines.push("  Configure Realmheart Ledger");
-   lines.push("  Configure Time       Prices & Goods");
-   lines.push("  Bounty Board         Holidays");
-   lines.push("  Events               Seasons","");
-   lines.push("  ✏️ Edit cards directly to add bills, adjust");
-   lines.push("  inventory quantities, or change settings.");
-   lines.push("  Changes apply on the next turn.","");
-   lines.push("⚔️ ═══════════════════════════════════════ ⚔️");
-   lines.push("    May your purse stay full and your story");
-   lines.push("    never grow stale. Good luck, adventurer! 🎲");
-   lines.push("⚔️ ═══════════════════════════════════════ ⚔️");
-   return{handled:true,lines:lines};
+function onInput_UBIS(text){var U=state.ubis;if(!U)return text;
+U.denied=[];U.pendingCmd="";ubisReadAllCards();
+var clean=text.replace(/^[>\s]+/,"").replace(/^you\s+/i,"").replace(/^say,?\s+/i,"").replace(/^["']+/,"").trim();
+var detectText=text.replace(/^[>\s]+/,"").replace(/^["']+/,"").trim();
+var sp=clean.indexOf("/");
+if(sp!==-1&&sp<4){
+  var cmd=clean.slice(sp).replace(/["']+$/,"").replace(/\.+$/,"");
+  var res=ubisParseCommand(cmd);
+  if(res.handled){
+    // FIX: return command output DIRECTLY from input hook.
+    // This prevents dependency on output hook firing, which is unreliable
+    // when input returns a space. The AI sees this as player text and
+    // generates a minimal acknowledgment rather than ignoring it.
+    ubisWriteAllCards();
+    return "=== REALMHEART ===\n"+res.lines.join("\n")+"\n=== END ===";
   }
-  if(lo==="/keywords"){
-   lines.push("⚔️ ══════════════════════════════════════ ⚔️");
-   lines.push("     REALMHEART — KEYWORD REFERENCE");
-   lines.push("  These words trigger Realmheart silently");
-   lines.push("  while you play. No commands needed.");
-   lines.push("⚔️ ══════════════════════════════════════ ⚔️","");
-   lines.push("─────────────── 🎒 INVENTORY ────────────────");
-   lines.push("  Scanned from YOUR input only.","");
-   lines.push("  ➕ GAIN AN ITEM:");
-   lines.push("     pick up · grab · snatch · take · took");
-   lines.push("     pocket · loot · collect · steal · stole");
-   lines.push("     gather · retrieve · claim · receive");
-   lines.push("     obtain · obtained · acquire · accept · find");
-   lines.push("     purchase · buy · trade for · barter for","");
-   lines.push("  ➖ LOSE AN ITEM:");
-   lines.push("     drop · discard · sell · give away");
-   lines.push("     hand over · toss away · abandon");
-   lines.push("     use up · burn · surrender · sacrifice");
-   lines.push("     trade away · destroy · break · smash");
-   lines.push("     consume · eat · drink","");
-   lines.push("─────────────── 💰 CURRENCY ────────────────");
-   lines.push("  Scanned from BOTH your input and AI output.","");
-   lines.push("  ➕ GAINING FUNDS:");
-   lines.push("     received · earned · found · gained");
-   lines.push("     got · looted · took · take · collected");
-   lines.push("     are paid · were paid · picked up · pick up");
-   lines.push("     steal · stole · obtain · obtained");
-   lines.push("     given to you · handed to you");
-   lines.push("     awarded to you · paid to you","");
-   lines.push("  ➖ SPENDING FUNDS:");
-   lines.push("     paid · spent · gave · lost");
-   lines.push("     handed over · parted with");
-   lines.push("     purchased · bought · traded");
-   lines.push("     costs · costing");
-   lines.push("     \"in exchange for...\"");
-   lines.push("     \"for the price of...\"");
-   lines.push("     \"for the sum of...\"","");
-   lines.push("─────────────── 🕰️ TIME-SKIP PHRASES ──────");
-   lines.push("  Scanned from AI output only.");
-   lines.push("  N = any digit or word number (two, five, ten...)","");
-   lines.push("  \"a moment passes\" · \"a minute passes\"");
-   lines.push("  \"N minutes later\" · \"a few minutes passed\"");
-   lines.push("  \"an hour passes\" · \"N hours later\"");
-   lines.push("  \"the next day\" · \"the following day\"");
-   lines.push("  \"overnight\" · \"next morning\"");
-   lines.push("  \"N days later\" · \"N days passed\"");
-   lines.push("  \"a week passed\" · \"N weeks later\"");
-   lines.push("  \"a month passed\" · \"N months later\"");
-   lines.push("  \"it's been a month\" · \"it's been a year\"");
-   lines.push("  \"a year has passed\" · \"N years later\"","");
-   lines.push("⚔️ ══════════════════════════════════════ ⚔️");
-   lines.push("  Tip: Currency is detected automatically");
-   lines.push("  even when an NPC pays you mid-story!");
-   lines.push("⚔️ ══════════════════════════════════════ ⚔️");
-   return{handled:true,lines:lines};
-  }
-  if(lo==="/balance"){lines.push("["+ubisGetCurrencyLabel().toUpperCase()+"] "+ubisFormatBalance(U.balance));return{handled:true,lines:lines};}
-  if(lo==="/inventory"){var en=Object.entries(U.inventory||{});lines.push("=== "+ubisGetInventoryLabel().toUpperCase()+" ===");if(en.length===0){lines.push("  (empty)");}else{en.sort(function(a,b){return a[0].localeCompare(b[0]);});for(var ie=0;ie<en.length;ie++)lines.push("  "+en[ie][0]+": (Qty: "+en[ie][1]+")");}lines.push("  "+ubisGetCurrencyLabel()+": "+ubisFormatBalance(U.balance));return{handled:true,lines:lines};}
-  if(lo==="/ledger"){lines.push("=== RECENT LEDGER ===");var rec=(U.ledger||[]).slice(-50);if(rec.length===0){lines.push("  No transactions yet.");}else{for(var le=0;le<rec.length;le++){var e=rec[le];if(e.type==="time")continue;var sgn=e.amount>=0?"+":"";var amt=e.amount!==0?" ("+sgn+ubisFormatBalance(Math.abs(e.amount))+")":"";lines.push("  [T"+e.turn+"] "+e.type.toUpperCase()+": "+e.description+amt);}}return{handled:true,lines:lines};}
-  if(lo==="/time"){lines.push("[TIME] "+ubisFormatDate(U)+"  Day "+ubisTotalDays(U.time));var ss=U.settings.seasons;var t=U.time;if(ss&&ss.length>=t.month)lines.push("  "+ss[t.month-1].seasonName+" | Weather: "+(U.currentWeather||"Clear"));var todH=ubisGetTodayHolidays(U);if(todH.length>0)for(var th=0;th<todH.length;th++)lines.push("  ** "+todH[th].name);var actEv=ubisGetActiveEvents(U);if(actEv.length>0)for(var ae=0;ae<actEv.length;ae++)lines.push("  -- "+(actEv[ae].daysAway===0?"TODAY: ":"In "+actEv[ae].daysAway+"d: ")+actEv[ae].event.name);return{handled:true,lines:lines};}
-  if(lo==="/weather"){var ss2=U.settings.seasons;var t2=U.time;lines.push("=== WEATHER ===");if(ss2&&ss2.length>=t2.month){var csm=ss2[t2.month-1];lines.push("  Today:  "+(U.currentWeather||"Clear"),"  Season: "+csm.seasonName,"  Month:  "+UBIS_MONTHS[t2.month-1].name,"  Mood:   "+csm.mood,"");lines.push("  Chance table:");var tbl=csm.weather||[];for(var wi=0;wi<tbl.length;wi++)lines.push("    "+tbl[wi].pct+"%  "+tbl[wi].c);}else lines.push("  No season data.");return{handled:true,lines:lines};}
-  if(lo==="/holidays"){lines.push("=== UPCOMING HOLIDAYS ===");var upH=ubisGetUpcomingHolidays(U,30);if(upH.length===0)lines.push("  None in next 30 days.");else for(var ui=0;ui<upH.length;ui++){var uh=upH[ui].holiday;lines.push("  In "+upH[ui].daysAway+"d: "+uh.name+" ("+UBIS_MONTHS[uh.month-1].name+" "+uh.day+") -- "+uh.type);}var todH2=ubisGetTodayHolidays(U);if(todH2.length>0){lines.push("","TODAY:");for(var th2=0;th2<todH2.length;th2++)lines.push("  ** "+todH2[th2].name+" -- "+todH2[th2].description);}return{handled:true,lines:lines};}
-  if(lo==="/events"){lines.push("=== ACTIVE / UPCOMING EVENTS ===");var actEv2=ubisGetActiveEvents(U);if(actEv2.length===0)lines.push("  None.");else for(var ei2=0;ei2<actEv2.length;ei2++){var evd=actEv2[ei2];lines.push("  "+(evd.daysAway===0?"-- TODAY: ":"-- In "+evd.daysAway+"d: ")+evd.event.name);lines.push("    "+evd.event.description);}return{handled:true,lines:lines};}
-  if(lo.startsWith("/pay ")){var pp=cmd.slice(5).trim().split(/\s+/);var pa=parseInt(pp[0]);var pc=(pp[1]||ubisGetTiers()[ubisGetTiers().length-1].name).toLowerCase();if(!isNaN(pa)&&pa>0){var pb=pa*ubisCoiNameToBase(pc);if(pb>0){if(U.balance<pb)lines.push("[BLOCKED] Cannot afford: costs "+ubisFormatBalance(pb)+" -- only have "+ubisFormatBalance(U.balance));else{U.balance-=pb;ubisLedger(U,"expense","Pay: "+pa+" "+pc,-pb);lines.push("[BANK] Paid "+pa+" "+pc+". Balance: "+ubisFormatBalance(U.balance));}}}else lines.push("Usage: /pay [amount] [coin]");return{handled:true,lines:lines};}
-  if(lo.startsWith("/earn ")){var ep=cmd.slice(6).trim().split(/\s+/);var ea=parseInt(ep[0]);var ec=(ep[1]||ubisGetTiers()[ubisGetTiers().length-1].name).toLowerCase();if(!isNaN(ea)&&ea>0){var eb=ea*ubisCoiNameToBase(ec);if(eb>0){U.balance+=eb;ubisLedger(U,"income","Earn: "+ea+" "+ec,eb);lines.push("[BANK] Earned "+ea+" "+ec+". Balance: "+ubisFormatBalance(U.balance));}}else lines.push("Usage: /earn [amount] [coin]");return{handled:true,lines:lines};}
-  if(lo.startsWith("/additem ")){var ar=cmd.slice(9).trim();var aq=1;var am=ar.match(/\s+(\d+)$/);if(am){aq=parseInt(am[1],10);ar=ar.slice(0,ar.length-am[0].length).trim();}if(ar){var an=ubisCleanItem(ar)||(ar.charAt(0).toUpperCase()+ar.slice(1));ubisAddItem(U,an,aq);lines.push("Added: "+an+" x"+aq);lines.push("[BAG] "+ubisInventoryString(U));}else lines.push("Usage: /additem [name] [qty]");return{handled:true,lines:lines};}
-  if(lo.startsWith("/removeitem ")){var rr=cmd.slice(12).trim();var rq=1;var rm=rr.match(/\s+(\d+)$/);if(rm){rq=parseInt(rm[1],10);rr=rr.slice(0,rr.length-rm[0].length).trim();}if(rr){var rk=ubisFindInvKey(U,rr);if(rk){var rok=ubisRemoveItem(U,rk,rq,false);if(rok){lines.push("Removed: "+rk+" x"+rq);lines.push("[BAG] "+ubisInventoryString(U));}else lines.push((U.denied||[]).pop()||"Cannot remove that quantity.");}else lines.push("Not found: "+rr);}else lines.push("Usage: /removeitem [name] [qty]");return{handled:true,lines:lines};}
-  if(lo.startsWith("/ubis ")||lo.startsWith("/rh ")){var rest=(lo.startsWith("/rh ")?cmd.slice(4):cmd.slice(6)).trim();var rl=rest.toLowerCase();var pts=rl.split(/\s+/);var sub=pts[0];
-    if(sub==="enable"){U.settings.scriptEnabled=true;lines.push("[Realmheart] Script enabled.");return{handled:true,lines:lines};}
-    if(sub==="disable"){U.settings.scriptEnabled=false;lines.push("[Realmheart] Script disabled.");return{handled:true,lines:lines};}
-    if(sub==="toggle"){U.settings.scriptEnabled=!U.settings.scriptEnabled;lines.push("[Realmheart] Script "+(U.settings.scriptEnabled?"enabled.":"disabled."));return{handled:true,lines:lines};}
-    if(sub==="cards"){if(pts[1]==="on"||pts[1]==="off"){U.cardConfig.masterEnabled=(pts[1]==="on");lines.push("[Realmheart] All cards "+pts[1]+".");}else lines.push("[Realmheart] /ubis cards on|off");return{handled:true,lines:lines};}
-    if(sub==="inv"){if(pts[1]==="on"||pts[1]==="off"){U.settings.inventoryEnabled=(pts[1]==="on");lines.push("[Realmheart] Inventory auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis inv on|off");return{handled:true,lines:lines};}
-    if(sub==="currency"){if(pts[1]==="on"||pts[1]==="off"){U.settings.currencyEnabled=(pts[1]==="on");lines.push("[Realmheart] Currency auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis currency on|off");return{handled:true,lines:lines};}
-    if(sub==="time"){if(pts[1]==="on"||pts[1]==="off"){U.settings.timeEnabled=(pts[1]==="on");lines.push("[Realmheart] Time auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis time on|off");return{handled:true,lines:lines};}
-    if(sub==="bills"){if(pts[1]==="on"||pts[1]==="off"){U.settings.billsEnabled=(pts[1]==="on");lines.push("[Realmheart] Bills auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis bills on|off");return{handled:true,lines:lines};}
-    lines.push("[Realmheart] Unknown. Type /help for commands.");return{handled:true,lines:lines};}
-  return{handled:false,lines:[]};}
+}
+if(!U.settings.scriptEnabled)return text;
+var notif=[];var hardBlocked=false;var handledByPurchaseSale=false;
+if(U.settings.currencyEnabled&&U.settings.inventoryEnabled){
+  handledByPurchaseSale=ubisDetectPurchaseSale(U,detectText,notif);
+  var psDen=U.denied||[];if(psDen.length>0){for(var pi=0;pi<psDen.length;pi++)notif.push(psDen[pi]);hardBlocked=true;}
+  U.denied=[];
+}
+if(U.settings.timeEnabled){var sk=ubisDetectTimeSkip(detectText);if(sk>0){ubisAdvanceHours(U,sk);ubisLedger(U,"time","Skip +"+ubisFormatDuration(sk),0);notif.push("[TIME] +"+ubisFormatDuration(sk)+" => "+ubisFormatDate(U));}}
+if(U.settings.currencyEnabled&&!handledByPurchaseSale){var cg=ubisDetectPlayerCurrencyGain(U,detectText);var cl=ubisDetectPlayerCurrencyLoss(U,detectText);var den=U.denied||[];if(den.length>0){for(var di=0;di<den.length;di++)notif.push(den[di]);hardBlocked=true;}else{if(cg>0)notif.push("[+] Gained: "+ubisFormatBalance(cg));if(cl>0)notif.push("[-] Spent:  "+ubisFormatBalance(cl));if(cg>0||cl>0)notif.push("[BALANCE] "+ubisFormatBalance(U.balance));}U.denied=[];}
+if(U.settings.gamblingEnabled&&!hardBlocked&&!handledByPurchaseSale){ubisDetectGamble(U,detectText,notif);var gden=U.denied||[];if(gden.length>0){for(var gi=0;gi<gden.length;gi++)notif.push(gden[gi]);hardBlocked=true;}U.denied=[];}
+if(U.settings.inventoryEnabled&&!hardBlocked&&!handledByPurchaseSale){var con=ubisDetectPlayerConsume(U,detectText);var add=ubisDetectPlayerAdd(U,detectText);var rem=ubisDetectPlayerRemove(U,detectText).concat(con);for(var ai=0;ai<add.length;ai++)notif.push("[+] "+add[ai]);for(var ri=0;ri<rem.length;ri++)notif.push("[-] "+rem[ri]);if(add.length>0||rem.length>0){var bagE=Object.entries(U.inventory||{});var bagT=0;for(var bi=0;bi<bagE.length;bi++)bagT+=bagE[bi][1];notif.push("[BAG] "+bagE.length+" type"+(bagE.length===1?"":"s")+" | "+bagT+" item"+(bagT===1?"":"s")+" | use /inventory for full list");}}
+if(notif.length>0){U.pendingCmd=notif.join("\n");ubisWriteAllCards();}
+if(hardBlocked)return"The player attempts the action (a purchase or a bet) but cannot afford it. They only have "+ubisFormatBalance(U.balance)+" and do not have enough funds. Narrate the scene as a failure — the transaction does not go through.";
+return text;}
+
+function onContext_UBIS(text){var U=state.ubis;if(!U)return text;ubisCreateCards();ubisWriteAllCards();ubisExpireEvents(U);var cd=ubisTotalDays(U.time);if(U.settings.seasonsEnabled&&cd!==U.weatherDay){U.currentWeather=ubisRollWeather(U);U.weatherDay=cd;}var t=U.time;var mn=UBIS_MONTHS[t.month-1];var en=Object.entries(U.inventory||{});var inv=en.length>0?en.map(function(x){return x[0]+(x[1]>1?" x"+x[1]:"");}).join(", "):"nothing";var curLine="";if(U.settings.currencyContextEnabled){var tiers=ubisGetTiers();var smt=tiers[tiers.length-1];var tp=[],cp=[];for(var ti=0;ti<tiers.length;ti++)tp.push(tiers[ti].name+" ("+tiers[ti].valueInBase+" base)");for(var ci=0;ci<tiers.length-1;ci++)cp.push("1 "+tiers[ci].name+" = "+Math.floor(tiers[ci].valueInBase/smt.valueInBase)+" "+smt.plural);curLine="\nCurrency: "+tp.join(", ");if(cp.length>0)curLine+=" | "+cp.join(", ");}var prLine="";var pl=U.settings.priceList||[];if(pl.length>0){var pp=[];for(var pi=0;pi<pl.length;pi++){var cat=pl[pi];if(!cat.tiers||!cat.tiers.length)continue;var srt=cat.tiers.slice().sort(function(a,b){return a.amount-b.amount;});pp.push(cat.category+": "+ubisFormatBalance(srt[0].amount)+" - "+ubisFormatBalance(srt[srt.length-1].amount));}if(pp.length>0)prLine="\nPrice ranges: "+pp.join(" | ");}var paLine="";var pk=ubisResolvePreset().replace("-","");var jp=U.settings.jobPayouts&&U.settings.jobPayouts[pk];if(jp&&jp.length>0){var jpp=[];for(var ji=0;ji<jp.length;ji++)jpp.push(jp[ji].label+": "+ubisFormatBalance(jp[ji].minPay)+"-"+ubisFormatBalance(jp[ji].maxPay));paLine="\nJob payouts: "+jpp.join(" | ");}var seaLine="";var ss=U.settings.seasons;if(U.settings.seasonsEnabled&&ss&&ss.length>=t.month){var csm=ss[t.month-1];seaLine="\nSeason: "+csm.seasonName+" | Weather: "+(U.currentWeather||"Clear")+" | "+mn.name+" -- "+csm.mood;}var evLines="";var actEv=ubisGetActiveEvents(U);var ta_ev=ubisTotalDays(U.time);var evToShow=actEv.filter(function(ev){return !(ev.daysAway===0&&ev.event.lastShownDay===U.turnCount);});if(evToShow.length>0){var ep=[];for(var ei=0;ei<evToShow.length;ei++){var ev=evToShow[ei];var pfx=ev.daysAway===0?"[EVENT -- TODAY]":"[UPCOMING EVENT -- in "+ev.daysAway+" day"+(ev.daysAway===1?"":"s")+"]";ep.push(pfx+" "+ev.event.name+": "+ev.event.description);}evLines="\n"+ep.join("\n");for(var ei2=0;ei2<evToShow.length;ei2++){if(evToShow[ei2].daysAway===0)evToShow[ei2].event.lastShownDay=U.turnCount;}}var holLine="";var todH=ubisGetTodayHolidays(U);if(todH.length>0){var hp=[];for(var hi=0;hi<todH.length;hi++){var h=todH[hi];hp.push("["+(h.type==="birthday"?"BIRTHDAY":"HOLIDAY")+": "+h.name+"] "+h.description);}holLine="\n"+hp.join("\n");}
+var penaltyLine="";if(U.pendingPenalties&&U.pendingPenalties.length>0){var pp=[];for(var pi=0;pi<U.pendingPenalties.length;pi++){var pen=U.pendingPenalties[pi];pp.push("[PENALTY -- "+pen.type.toUpperCase()+": "+pen.name+", missed "+pen.missed+" in a row] "+pen.penalty);}penaltyLine="\n"+pp.join("\n");U.pendingPenalties=[];}
+var gambleResultLine="";if(U.pendingGambleResult){var pgr=U.pendingGambleResult;var directive;if(pgr.itemBet){if(pgr.itemLost){directive="[ITEM BET RESULT -- LOCKED: The player wagered "+pgr.itemQty+"x "+pgr.itemName+" on "+pgr.game+". The roll result is "+pgr.outcome+". This wager was accepted and has already resolved -- do not narrate it as unavailable, invalid, or refused. "+pgr.itemQty+"x "+pgr.itemName+" is LOST -- it has already been removed from their inventory. Narrate this loss as real and final -- do not have the item mysteriously reappear or the loss be undone.";}else{directive="[ITEM BET RESULT -- LOCKED: The player wagered "+pgr.itemQty+"x "+pgr.itemName+" on "+pgr.game+". The roll result is "+pgr.outcome+". This wager was accepted and has already resolved -- do not narrate it as unavailable, invalid, or refused. The player KEEPS all "+pgr.itemQty+"x "+pgr.itemName+" -- none was lost. Narrate this outcome as real.";}}else if(pgr.highStakes){if(pgr.won){directive="[HIGH-STAKES OUTCOME -- LOCKED: WIN. This wager was accepted and has already resolved -- do not narrate it as unavailable, invalid, or refused by the venue, dealer, or any character. The bet happened. The player has survived this risk. Narrate the danger as genuinely real, appropriate to whatever they are currently risking themselves with. Do not undercut the tension.";}else{directive="[HIGH-STAKES OUTCOME -- LOCKED: LOSE. This wager was accepted and has already resolved -- do not narrate it as unavailable, invalid, or refused by the venue, dealer, or any character. The bet happened. The player has lost this risk. Narrate the consequence as real and appropriate to the danger they took on -- including lethal or seriously harmful outcomes if that is what the scene calls for. Do not soften it, do not introduce a last-second save, misfire, interruption, or rescue.";}}else if(pgr.push){directive="[GAMBLE RESULT -- LOCKED: The player wagered "+ubisFormatBalance(pgr.bet)+" on "+pgr.game+". The roll result is "+pgr.outcome+" -- a PUSH. Their original wager is simply returned, no gain or loss. Their balance is now exactly "+ubisFormatBalance(pgr.balance)+". Narrate this as their bet being returned to them, nothing more. Do not describe any additional coins, winnings, or a payout tray. Do not reproduce or imitate the bracketed [GAMBLE]/[BALANCE] notification format in your own prose -- narrate the scene in ordinary prose only.";}else if(pgr.won){directive="[GAMBLE RESULT -- LOCKED: The player wagered "+ubisFormatBalance(pgr.bet)+" on "+pgr.game+". The roll result is "+pgr.outcome+". The player WON, gaining exactly "+ubisFormatBalance(pgr.net)+" in profit. Their balance is now exactly "+ubisFormatBalance(pgr.balance)+". Narrate this exact profit amount as what they gain -- do not add their original wager on top of it, do not invent a larger total, and do not invent different figures. Do not reproduce or imitate the bracketed [GAMBLE]/[BALANCE] notification format in your own prose -- narrate the scene in ordinary prose only.";}else{directive="[GAMBLE RESULT -- LOCKED: The player wagered "+ubisFormatBalance(pgr.bet)+" on "+pgr.game+". The roll result is "+pgr.outcome+". The player LOST -- their "+ubisFormatBalance(pgr.bet)+" wager is gone entirely, with no payout or return of any kind. Their balance is now exactly "+ubisFormatBalance(pgr.balance)+". Narrate this as a clean loss -- do NOT describe a payout tray, winnings, or any coins being returned. Do not have the player win or soften this loss. Do not reproduce or imitate the bracketed [GAMBLE]/[BALANCE] notification format in your own prose -- narrate the scene in ordinary prose only.";}gambleResultLine="\n"+directive+((pgr.highStakes||pgr.itemBet)?" This outcome is final.]":" This outcome is final and already applied to their balance.]");U.pendingGambleResult=null;}
+var gambleLine="";if(U.activeGamble){var ag=ubisFindGame(U,U.activeGamble);if(ag)gambleLine="\n[GAMBLING -- "+ag.name+" session active] "+ag.description+" Whenever a [GAMBLE RESULT] block appears, its outcome, gain, and loss figures are final and must be narrated exactly as given -- never invent different numbers, a different outcome tier, or a second notification-style summary of your own.";}
+var narLine="";if(U.settings.narratorMode)narLine="\\n[NARRATOR MODE: ACTIVE -- You are the narrator only. You must not write the player character's actions, speech, decisions, or internal thoughts under any circumstances. Write only NPC dialogue, NPC reactions, and scene description. End your response before the player character acts or speaks. Wait for the player to provide all player character input.]";var ws=[""," =====================================","[CURRENT WORLD STATE -- use this as ground truth for the scene."," Answer any player questions about time, date, money, inventory, or weather from this block."," Prioritize any [EVENT], [HOLIDAY], [GAMBLE RESULT], or [PENALTY] entries — these define what is happening RIGHT NOW, and [GAMBLE RESULT]/[PENALTY] entries are non-negotiable, already-resolved facts that MUST be narrated exactly as stated.]"].join("\n");ws+=evLines+holLine+gambleResultLine+penaltyLine;ws+="\n"+[ubisGetCurrencyLabel()+": "+ubisFormatBalance(U.balance),"Carrying: "+inv,"Time: "+ubisFormatHour(t.hour),"Date: "+mn.name+" "+t.day+", Year "+t.year+" (Adventure day "+ubisTotalDays(t)+")","====================================="].join("\n");ws+=seaLine+curLine+prLine+paLine+gambleLine+narLine;return text+ws;}
+
+function onOutput_UBIS(text){var U=state.ubis;if(!U)return text;
+var pendingMsg="";if(U.pendingCmd&&U.pendingCmd!==""){pendingMsg=U.pendingCmd;U.pendingCmd="";}
+if(!U.settings.scriptEnabled){ubisWriteAllCards();return pendingMsg?pendingMsg+"\n"+text:text;}
+U.denied=[];U.turnCount+=1;var out=[];
+var db=ubisTotalDays(U.time);if(U.settings.timeEnabled)ubisAdvanceHours(U,U.settings.hoursPerTurn);
+if(ubisTotalDays(U.time)!==db){U.currentWeather=ubisRollWeather(U);U.weatherDay=ubisTotalDays(U.time);}
+var sk=0;if(U.settings.timeEnabled){sk=ubisDetectTimeSkip(text);if(sk>0){var dbs=ubisTotalDays(U.time);ubisAdvanceHours(U,sk);ubisLedger(U,"time","Skip +"+ubisFormatDuration(sk),0);if(ubisTotalDays(U.time)!==dbs){U.currentWeather=ubisRollWeather(U);U.weatherDay=ubisTotalDays(U.time);}}}
+var notices=[];if(U.settings.billsEnabled){notices=ubisProcessBills(U);for(var ni=0;ni<notices.length;ni++)out.push(notices[ni]);}
+var gained=0,lost=0;if(U.settings.currencyEnabled){gained=ubisTryCurrencyGain(U,text.toLowerCase());lost=ubisTryCurrencyLoss(U,text.toLowerCase());}
+var den=U.denied||[];var hasC=gained>0||lost>0||notices.length>0||sk>0||den.length>0;
+if(hasC){out.push("----------------------------------");for(var di=0;di<den.length;di++)out.push(den[di]);if(sk>0)out.push("[TIME] +"+ubisFormatDuration(sk)+" => "+ubisFormatDate(U));if(gained>0)out.push("[+] Gained: "+ubisFormatBalance(gained));if(lost>0)out.push("[-] Spent:  "+ubisFormatBalance(lost));if(gained>0||lost>0)out.push("[BALANCE] "+ubisFormatBalance(U.balance));out.push("----------------------------------");}
+ubisWriteAllCards();
+var body=out.length>0?out.join("\n")+"\n"+text:text;
+return pendingMsg?pendingMsg+"\n"+body:body;}
+
+
+// ------------------------------------------------------------
+// SECTION 11 — COMMAND PARSER  (/help, /balance, etc.)
+// ------------------------------------------------------------
+function ubisParseCommand(cmd){var U=state.ubis;var lo=cmd.toLowerCase().trim();var lines=[];
+if(lo==="/help"){
+ lines.push("⚔️ ═══════════════════════════════════════ ⚔️");
+ lines.push("        Welcome to Realmheart!");
+ lines.push("      The living heart of your world.");
+ lines.push("⚔️ ═══════════════════════════════════════ ⚔️","");
+ lines.push("🌎 Realmheart is a full world-state engine running");
+ lines.push("   silently behind your story. It tracks your money,");
+ lines.push("   inventory, time, weather, bills, and world events");
+ lines.push("   automatically — no setup required.");
+ lines.push("   (Formerly known as UBIS)","");
+ lines.push("📖 TYPE /keywords FOR A FULL KEYWORD REFERENCE","");
+ lines.push("─────────────── 💰 ECONOMY ────────────────");
+ lines.push("  Realmheart watches your story for currency");
+ lines.push("  changes and updates your wallet automatically.");
+ lines.push("  Purchases are blocked if you can't afford them.","");
+ lines.push("  Buying and selling work as one coordinated action --");
+ lines.push("  \"You buy a torch for 5 gold\" moves the money AND");
+ lines.push("  adds the item in a single step. Selling works the");
+ lines.push("  same way in reverse, and trading figures out the");
+ lines.push("  direction from how you phrase it.","");
+ lines.push("  /balance          Show your current wallet balance.");
+ lines.push("  /earn [N] [coin]  Manually add funds.");
+ lines.push("  /pay  [N] [coin]  Manually deduct funds.","");
+ lines.push("─────────────── 🎰 GAMBLING HALL ───────────────");
+ lines.push("  A full casino runs behind your story.","");
+ lines.push("  Just say it in character to play:");
+ lines.push("    \"I bet 50 gold on Jackpot\"");
+ lines.push("  Once you're playing, you can drop the game name:");
+ lines.push("    \"I bet 20 more\"   (keeps playing the same game)");
+ lines.push("  Naming a different game switches to it automatically.","");
+ lines.push("  Some games accept item wagers -- \"I bet my dagger");
+ lines.push("  on the duel.\" Win, keep it. Lose, it's gone for real.","");
+ lines.push("  Walking away is as easy as saying so: \"I quit,\"");
+ lines.push("  \"I'm done,\" \"I end my gamble\" all work.","");
+ lines.push("  /jackpot start  /coinflip start  /dice start");
+ lines.push("  /highstakes start                /gamble end","");
+ lines.push("─────────────── 🎒 INVENTORY ────────────────");
+ lines.push("  Items gained or lost in your story are tracked");
+ lines.push("  automatically. You can also manage them directly");
+ lines.push("  in the Inventory card or use these commands:","");
+ lines.push("  /inventory               Show your full inventory.");
+ lines.push("  /additem [name] [qty]    Manually add an item.");
+ lines.push("  /removeitem [name] [qty] Manually remove an item.","");
+ lines.push("─────────────── 🕰️ TIME ─────────────────────────");
+ lines.push("  A calendar and clock run in the background, advancing");
+ lines.push("  each turn and skipping forward when your story");
+ lines.push("  describes time passing. Edit it on Configure Time.","");
+ lines.push("  /time     Show current date, time, and weather.");
+ lines.push("  /weather  Show the full weather and season report.","");
+ lines.push("─────────────── 📒 LEDGER ────────────────────────");
+ lines.push("  Every transaction is logged automatically. The card");
+ lines.push("  shows the last 20; the command below shows all 50.","");
+ lines.push("  /ledger   Show full transaction history.","");
+ lines.push("─────────────── ⛏️ RESOURCES ──────────────────────");
+ lines.push("  The Bills card also runs Resource Wells (passive item");
+ lines.push("  income, like a mine) and Resource Drains (recurring");
+ lines.push("  item costs, like a forge eating iron weekly).","");
+ lines.push("  Optional Hardmode toggle (on the Bills card): bills");
+ lines.push("  and drains only take what you can afford, and repeated");
+ lines.push("  shortfalls can trigger real story consequences.","");
+ lines.push("─────────────── 📅 WORLD ─────────────────────────");
+ lines.push("  Holidays, events, and seasons are tracked and");
+ lines.push("  injected into the AI's context automatically.");
+ lines.push("  You can add, remove, and edit holidays and");
+ lines.push("  events directly from their story cards.","");
+ lines.push("  /holidays  Show upcoming and active holidays.");
+ lines.push("  /events    Show upcoming and active story events.","");
+ lines.push("─────────────── ⚙️ SYSTEM ─────────────────────────");
+ lines.push("  /rh enable | disable | toggle");
+ lines.push("  /rh inv | currency | time | bills  on | off");
+ lines.push("  /rh cards on | off");
+ lines.push("  (You can also use /ubis instead of /rh)");
+ lines.push("  Gambling and Seasons toggles live on Configure");
+ lines.push("  Realmheart. Hardmode's toggle is on the Bills card.","");
+ lines.push("─────────────── 🃏 STORY CARDS ───────────────────");
+ lines.push("  All cards live under category: Realmheart.","");
+ lines.push("  Inventory            Bills");
+ lines.push("  Configure Realmheart Ledger");
+ lines.push("  Configure Time       Prices & Goods");
+ lines.push("  Bounty Board         Holidays");
+ lines.push("  Events               Seasons");
+ lines.push("  Gambling Hall","");
+ lines.push("  ✏️ Edit any card directly -- changes apply next turn.","");
+ lines.push("⚔️ ═══════════════════════════════════════ ⚔️");
+ lines.push("    May your purse stay full and your story");
+ lines.push("    never grow stale. Good luck, adventurer! 🎲");
+ lines.push("⚔️ ═══════════════════════════════════════ ⚔️");
+ return{handled:true,lines:lines};
+}
+if(lo==="/keywords"){
+ lines.push("⚔️ ══════════════════════════════════════ ⚔️");
+ lines.push("     REALMHEART — KEYWORD REFERENCE");
+ lines.push("  These words trigger Realmheart silently");
+ lines.push("  while you play. No commands needed.");
+ lines.push("⚔️ ══════════════════════════════════════ ⚔️","");
+ lines.push("─────────────── 🎒 INVENTORY ────────────────");
+ lines.push("  Scanned from YOUR input only.","");
+ lines.push("  ➕ GAIN AN ITEM:");
+ lines.push("     pick up · grab · snatch · take · took");
+ lines.push("     pocket · loot · collect · steal · stole");
+ lines.push("     gather · retrieve · claim · receive");
+ lines.push("     obtain · obtained · acquire · accept · find","");
+ lines.push("  ➖ LOSE AN ITEM:");
+ lines.push("     drop · discard · give away");
+ lines.push("     hand over · toss away · abandon");
+ lines.push("     use up · burn · surrender · sacrifice");
+ lines.push("     trade away · destroy · break · smash");
+ lines.push("     consume · eat · drink","");
+ lines.push("─────────────── 💰 CURRENCY ────────────────");
+ lines.push("  Scanned from BOTH your input and AI output.","");
+ lines.push("  ➕ GAINING FUNDS:");
+ lines.push("     received · earned · found · gained");
+ lines.push("     got · looted · took · take · collected");
+ lines.push("     are paid · were paid · picked up · pick up");
+ lines.push("     steal · stole · obtain · obtained");
+ lines.push("     given to you · handed to you");
+ lines.push("     awarded to you · paid to you","");
+ lines.push("  ➖ SPENDING FUNDS:");
+ lines.push("     paid · spent · gave · lost");
+ lines.push("     handed over · parted with");
+ lines.push("     purchased · bought · traded");
+ lines.push("     costs · costing");
+ lines.push("     \"in exchange for...\"");
+ lines.push("     \"for the price of...\"");
+ lines.push("     \"for the sum of...\"","");
+ lines.push("─────────────── 🛒 PURCHASE & SALE ─────────");
+ lines.push("  Buying and selling move currency AND the item");
+ lines.push("  together, in one coordinated action.","");
+ lines.push("  BUY: buy · bought · purchase · purchased");
+ lines.push("       pay/paid/spend/spent [amount] on/for [item]","");
+ lines.push("  SELL: sell · sold","");
+ lines.push("  TRADE: trade · traded · barter · bartered · give · gave");
+ lines.push("    (direction is figured out from your phrasing --");
+ lines.push("     \"trade 10 gold for a sword\" buys, while");
+ lines.push("     \"trade my sword for 10 gold\" sells)","");
+ lines.push("  Works with either \"500 dollars\" or \"$500\" style.","");
+ lines.push("─────────────── 🎰 GAMBLING ─────────────────");
+ lines.push("  BET:  bet · gamble · wager · stake · risk");
+ lines.push("        throw down · lay down · place a bet","");
+ lines.push("  END SESSION:  quit · stop · end · give up");
+ lines.push("                I'm done / I am done","");
+ lines.push("─────────────── 🕰️ TIME-SKIP PHRASES ──────");
+ lines.push("  Scanned from AI output only.");
+ lines.push("  N = any digit or word number (two, five, ten...)","");
+ lines.push("  \"a moment passes\" · \"a minute passes\"");
+ lines.push("  \"N minutes later\" · \"a few minutes passed\"");
+ lines.push("  \"an hour passes\" · \"N hours later\"");
+ lines.push("  \"the next day\" · \"the following day\"");
+ lines.push("  \"overnight\" · \"next morning\"");
+ lines.push("  \"N days later\" · \"N days passed\"");
+ lines.push("  \"a week passed\" · \"N weeks later\"");
+ lines.push("  \"a month passed\" · \"N months later\"");
+ lines.push("  \"a year has passed\" · \"N years later\"","");
+ lines.push("⚔️ ══════════════════════════════════════ ⚔️");
+ lines.push("  Tip: Currency is detected automatically");
+ lines.push("  even when an NPC pays you mid-story!");
+ lines.push("⚔️ ══════════════════════════════════════ ⚔️");
+ return{handled:true,lines:lines};
+}
+if(lo==="/balance"){lines.push("["+ubisGetCurrencyLabel().toUpperCase()+"] "+ubisFormatBalance(U.balance));return{handled:true,lines:lines};}
+if(lo==="/inventory"){var en=Object.entries(U.inventory||{});lines.push("=== "+ubisGetInventoryLabel().toUpperCase()+" ===");if(en.length===0){lines.push("  (empty)");}else{en.sort(function(a,b){return a[0].localeCompare(b[0]);});for(var ie=0;ie<en.length;ie++)lines.push("  "+en[ie][0]+": (Qty: "+en[ie][1]+")");}lines.push("  "+ubisGetCurrencyLabel()+": "+ubisFormatBalance(U.balance));return{handled:true,lines:lines};}
+if(lo==="/ledger"){lines.push("=== RECENT LEDGER ===");var rec=(U.ledger||[]).slice(-50);if(rec.length===0){lines.push("  No transactions yet.");}else{for(var le=0;le<rec.length;le++){var e=rec[le];if(e.type==="time")continue;var sgn=e.amount>=0?"+":"";var amt=e.amount!==0?" ("+sgn+ubisFormatBalance(Math.abs(e.amount))+")":"";lines.push("  [T"+e.turn+"] "+e.type.toUpperCase()+": "+e.description+amt);}}return{handled:true,lines:lines};}
+if(lo==="/time"){lines.push("[TIME] "+ubisFormatDate(U)+"  Day "+ubisTotalDays(U.time));var ss=U.settings.seasons;var t=U.time;if(ss&&ss.length>=t.month)lines.push("  "+ss[t.month-1].seasonName+" | Weather: "+(U.currentWeather||"Clear"));var todH=ubisGetTodayHolidays(U);if(todH.length>0)for(var th=0;th<todH.length;th++)lines.push("  ** "+todH[th].name);var actEv=ubisGetActiveEvents(U);if(actEv.length>0)for(var ae=0;ae<actEv.length;ae++)lines.push("  -- "+(actEv[ae].daysAway===0?"TODAY: ":"In "+actEv[ae].daysAway+"d: ")+actEv[ae].event.name);return{handled:true,lines:lines};}
+if(lo==="/weather"){var ss2=U.settings.seasons;var t2=U.time;lines.push("=== WEATHER ===");if(ss2&&ss2.length>=t2.month){var csm=ss2[t2.month-1];lines.push("  Today:  "+(U.currentWeather||"Clear"),"  Season: "+csm.seasonName,"  Month:  "+UBIS_MONTHS[t2.month-1].name,"  Mood:   "+csm.mood,"");lines.push("  Chance table:");var tbl=csm.weather||[];for(var wi=0;wi<tbl.length;wi++)lines.push("    "+tbl[wi].pct+"%  "+tbl[wi].c);}else lines.push("  No season data.");return{handled:true,lines:lines};}
+if(lo==="/holidays"){lines.push("=== UPCOMING HOLIDAYS ===");var upH=ubisGetUpcomingHolidays(U,30);if(upH.length===0)lines.push("  None in next 30 days.");else for(var ui=0;ui<upH.length;ui++){var uh=upH[ui].holiday;lines.push("  In "+upH[ui].daysAway+"d: "+uh.name+" ("+UBIS_MONTHS[uh.month-1].name+" "+uh.day+") -- "+uh.type);}var todH2=ubisGetTodayHolidays(U);if(todH2.length>0){lines.push("","TODAY:");for(var th2=0;th2<todH2.length;th2++)lines.push("  ** "+todH2[th2].name+" -- "+todH2[th2].description);}return{handled:true,lines:lines};}
+if(lo==="/events"){lines.push("=== ACTIVE / UPCOMING EVENTS ===");var actEv2=ubisGetActiveEvents(U);if(actEv2.length===0)lines.push("  None.");else for(var ei2=0;ei2<actEv2.length;ei2++){var evd=actEv2[ei2];lines.push("  "+(evd.daysAway===0?"-- TODAY: ":"-- In "+evd.daysAway+"d: ")+evd.event.name);lines.push("    "+evd.event.description);}return{handled:true,lines:lines};}
+if(lo.startsWith("/pay ")){var pp=cmd.slice(5).trim().split(/\s+/);var pa=parseInt(pp[0]);var pc=(pp[1]||ubisGetTiers()[ubisGetTiers().length-1].name).toLowerCase();if(!isNaN(pa)&&pa>0){var pb=pa*ubisCoiNameToBase(pc);if(pb>0){if(U.balance<pb)lines.push("[BLOCKED] Cannot afford: costs "+ubisFormatBalance(pb)+" -- only have "+ubisFormatBalance(U.balance));else{U.balance-=pb;ubisLedger(U,"expense","Pay: "+pa+" "+pc,-pb);lines.push("[BANK] Paid "+pa+" "+pc+". Balance: "+ubisFormatBalance(U.balance));}}}else lines.push("Usage: /pay [amount] [coin]");return{handled:true,lines:lines};}
+if(lo.startsWith("/earn ")){var ep=cmd.slice(6).trim().split(/\s+/);var ea=parseInt(ep[0]);var ec=(ep[1]||ubisGetTiers()[ubisGetTiers().length-1].name).toLowerCase();if(!isNaN(ea)&&ea>0){var eb=ea*ubisCoiNameToBase(ec);if(eb>0){U.balance+=eb;ubisLedger(U,"income","Earn: "+ea+" "+ec,eb);lines.push("[BANK] Earned "+ea+" "+ec+". Balance: "+ubisFormatBalance(U.balance));}}else lines.push("Usage: /earn [amount] [coin]");return{handled:true,lines:lines};}
+if(lo.startsWith("/additem ")){var ar=cmd.slice(9).trim();var aq=1;var am=ar.match(/\s+(\d+)$/);if(am){aq=parseInt(am[1],10);ar=ar.slice(0,ar.length-am[0].length).trim();}if(ar){var an=ubisCleanItem(ar)||(ar.charAt(0).toUpperCase()+ar.slice(1));ubisAddItem(U,an,aq);lines.push("Added: "+an+" x"+aq);lines.push("[BAG] "+ubisInventoryString(U));}else lines.push("Usage: /additem [name] [qty]");return{handled:true,lines:lines};}
+if(lo.startsWith("/removeitem ")){var rr=cmd.slice(12).trim();var rq=1;var rm=rr.match(/\s+(\d+)$/);if(rm){rq=parseInt(rm[1],10);rr=rr.slice(0,rr.length-rm[0].length).trim();}if(rr){var rk=ubisFindInvKey(U,rr);if(rk){var rok=ubisRemoveItem(U,rk,rq,false);if(rok){lines.push("Removed: "+rk+" x"+rq);lines.push("[BAG] "+ubisInventoryString(U));}else lines.push((U.denied||[]).pop()||"Cannot remove that quantity.");}else lines.push("Not found: "+rr);}else lines.push("Usage: /removeitem [name] [qty]");return{handled:true,lines:lines};}
+if(lo==="/jackpot start"||lo==="/coinflip start"||lo==="/dice start"||lo==="/highstakes start"){
+  var gname=lo.split(" ")[0].slice(1);
+  gname=gname==="coinflip"?"Coin Flip":gname==="highstakes"?"High Stakes":gname.charAt(0).toUpperCase()+gname.slice(1);
+  var game=ubisFindGame(U,gname);
+  if(!game){lines.push("[Gambling Hall] Game not found: "+gname);return{handled:true,lines:lines};}
+  U.activeGamble=game.name;
+  lines.push("[Gambling Hall] "+game.name+" session started. Place your bets — say things like \"I bet 50 gold\" or use \"/gamble end\" when you're done.");
+  return{handled:true,lines:lines};
+}
+if(lo==="/gamble end"){
+  if(!U.activeGamble){lines.push("[Gambling Hall] No active session to end.");return{handled:true,lines:lines};}
+  lines.push("[Gambling Hall] "+U.activeGamble+" session ended.");
+  U.activeGamble=null;
+  return{handled:true,lines:lines};
+}
+if(lo.startsWith("/ubis ")||lo.startsWith("/rh ")){var rest=(lo.startsWith("/rh ")?cmd.slice(4):cmd.slice(6)).trim();var rl=rest.toLowerCase();var pts=rl.split(/\s+/);var sub=pts[0];
+  if(sub==="enable"){U.settings.scriptEnabled=true;lines.push("[Realmheart] Script enabled.");return{handled:true,lines:lines};}
+  if(sub==="disable"){U.settings.scriptEnabled=false;lines.push("[Realmheart] Script disabled.");return{handled:true,lines:lines};}
+  if(sub==="toggle"){U.settings.scriptEnabled=!U.settings.scriptEnabled;lines.push("[Realmheart] Script "+(U.settings.scriptEnabled?"enabled.":"disabled."));return{handled:true,lines:lines};}
+  if(sub==="cards"){if(pts[1]==="on"||pts[1]==="off"){U.cardConfig.masterEnabled=(pts[1]==="on");lines.push("[Realmheart] All cards "+pts[1]+".");}else lines.push("[Realmheart] /ubis cards on|off");return{handled:true,lines:lines};}
+  if(sub==="inv"){if(pts[1]==="on"||pts[1]==="off"){U.settings.inventoryEnabled=(pts[1]==="on");lines.push("[Realmheart] Inventory auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis inv on|off");return{handled:true,lines:lines};}
+  if(sub==="currency"){if(pts[1]==="on"||pts[1]==="off"){U.settings.currencyEnabled=(pts[1]==="on");lines.push("[Realmheart] Currency auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis currency on|off");return{handled:true,lines:lines};}
+  if(sub==="time"){if(pts[1]==="on"||pts[1]==="off"){U.settings.timeEnabled=(pts[1]==="on");lines.push("[Realmheart] Time auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis time on|off");return{handled:true,lines:lines};}
+  if(sub==="bills"){if(pts[1]==="on"||pts[1]==="off"){var billsWasOff=!U.settings.billsEnabled;if(pts[1]==="on"&&billsWasOff)ubisResyncBillCounters(U);U.settings.billsEnabled=(pts[1]==="on");lines.push("[Realmheart] Bills auto "+pts[1]+".");}else lines.push("[Realmheart] /ubis bills on|off");return{handled:true,lines:lines};}
+  lines.push("[Realmheart] Unknown. Type /help for commands.");return{handled:true,lines:lines};}
+return{handled:false,lines:[]};}
+
+onLibrary_UBIS();
 
   onLibrary_UBIS();
 
@@ -48221,16 +46684,8 @@ const RM = (function () {
 }
 
 function MCPV5Create_story_card_extension() {
-  // SCE's original state keys are intentionally generic (currentEvent,
-  // lastActionCount, isRetry...). Keep the source unchanged while giving it a
-  // private persistent state view so it cannot collide with other modules.
+
   const state = MCPV5StoryCardExtensionStateView();
-
-//Other code here
-
-// ============================================================================
-// StoryCard Extension
-// ============================================================================
 
 const CONFIG_CARD_TITLE = "SCE Config";
 const DEFAULT_CONFIG = {
@@ -48253,10 +46708,6 @@ const DEFAULT_CONFIG = {
     cascadeEnabled: false,
     cascadePriorityMultiplier: 1.3
 };
-
-// ============================================================================
-// Help functions
-// ============================================================================
 
 function getCardText(card) {
     if (card.entry) return card.entry;
@@ -48334,10 +46785,6 @@ function categorizeCards(allCards, useOnlyAutouse) {
     return { eventCards, regularCards };
 }
 
-// ============================================================================
-// Blocks creating
-// ============================================================================
-
 function formatAlwaysCardsBlock(cards) {
     if (!cards || cards.length === 0) return null;
     let entries = [];
@@ -48383,12 +46830,12 @@ function formatRecallSingle(cards) {
 function formatHierarchy(cards, definedSet) {
     if (!cards || cards.length === 0) return null;
     let items = [];
-    
+
     for (let i = 0; i < cards.length; i++) {
         let card = cards[i];
         let title = getCardTitle(card);
         let content = getCardText(card);
-        
+
         if (!content) continue;
 
         let pathTitles = [];
@@ -48398,12 +46845,12 @@ function formatHierarchy(cards, definedSet) {
         let breadcrumbs = `[${pathTitles.join(' > ')}]`;
 
         if (definedSet && definedSet.has(title)) {
-            continue; 
+            continue;
         } else {
             items.push(`${breadcrumbs}:\n${content}`);
         }
     }
-    
+
     if (items.length === 0) return null;
     return items.join('\n');
 }
@@ -48443,10 +46890,6 @@ function formatRecallCandidate(candidate, definedSet) {
         return formatHierarchy(candidate.cards, definedSet);
     }
 }
-
-// ============================================================================
-// Config card
-// ============================================================================
 
 function generateConfigHelpText() {
     return `===============================================
@@ -48552,7 +46995,7 @@ alwaysIncludeCards = cardTitle1, cardTitle2, ...
 SYSTEM
 -------------------------------------------------------
 currentEventTitle / currentEventDurationLeft
-  - Used internally to track active events. 
+  - Used internally to track active events.
 =======================================================
 `;
 }
@@ -48669,7 +47112,7 @@ function writeConfigToCard(card, config) {
     lines.push("// ----- System -----");
     lines.push(`currentEventTitle = ${config.currentEventTitle || ''}`);
     lines.push(`currentEventDurationLeft = ${config.currentEventDurationLeft || 0}`);
-    
+
     setCardText(card, lines.join('\n'));
 }
 
@@ -48708,10 +47151,6 @@ function ensureConfigCard() {
     writeConfigToCard(newCard, DEFAULT_CONFIG);
     return newCard;
 }
-
-// ============================================================================
-// Weight functions
-// ============================================================================
 
 function getEventWeight(card) {
     let keys = card.keys;
@@ -48787,10 +47226,6 @@ function selectEventByWeight(events) {
     }
     return events[events.length - 1];
 }
-
-// ============================================================================
-// Tokens!
-// ============================================================================
 
 function computeHash(str) {
     let hash = 5381;
@@ -48889,7 +47324,7 @@ function buildCardBags(regularCards, customStopWords) {
             idfMap.set(token, 1);
         }
     }
-    
+
     let bags = {};
     for (let { title, tokens } of tokenLists) {
         let cardNormSq = 0;
@@ -48906,10 +47341,6 @@ function buildCardBags(regularCards, customStopWords) {
 
     return { bags, idfMap };
 }
-
-// ============================================================================
-// Hierarchy
-// ============================================================================
 
 function findCardByTitle(title, allCards) {
     if (!title) return null;
@@ -48969,10 +47400,6 @@ function candidateToPlainText(cand) {
         return formatHierarchy(cand.cards, new Set());
     }
 }
-
-// ============================================================================
-// Recall candidates 
-// ============================================================================
 
 function selectRecallCandidates(text, allCards, regularCards, config) {
     if (typeof state === 'undefined') { state = {}; }
@@ -49199,10 +47626,6 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
     return allSelected;
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
 function StoryCardExtensionContext(text) {
     if (typeof state === 'undefined') { state = {}; }
 
@@ -49286,7 +47709,7 @@ function StoryCardExtensionContext(text) {
         writeConfigToCard(configCard, config);
     }
 
-    let recallBlocks = []; 
+    let recallBlocks = [];
     let topRecallBlocks = [];
 
     if (config.contextRecallEnabled && regularCards.length > 0) {
@@ -49476,8 +47899,6 @@ function StoryCardExtensionContext(text) {
 
     return newText;
 }
-
-//Other code here
 
   function run(tab) {
     const currentText = MCPV5SafeText(globalThis.text, "\u200B");
@@ -51410,7 +49831,7 @@ function MCPV5StripRealmHeartContextLeak(value, plan) {
     );
     return cleaned;
   } catch (error) {
-    log("MCP V5.3.9.1 RealmHeart leak guard error:", error);
+    log("MCP V5.4.0 RealmHeart leak guard error:", error);
     return original;
   }
 }
@@ -51428,7 +49849,14 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
     !!(root.settings && root.settings.diagnostics)
   );
   const stateSnapshot = MCPV5SnapshotModuleState(id);
-  const inventoryBefore = MCPV5CanonicalInventoryFromState(id);
+  const tracksInventory = (
+    id === "true_auto_stats" ||
+    id === "stackable_inventory" ||
+    id === "realmheart"
+  );
+  const inventoryBefore = tracksInventory
+    ? MCPV5CanonicalInventoryFromState(id)
+    : null;
 
   let sandbox = MCPV5_CARD_SANDBOXES[id];
   if (
@@ -51508,12 +49936,14 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
 
       MCPV5StoreModuleGlobals(id);
       sandbox.commit();
-      MCPV5RecordInventoryAudit(
-        id,
-        inventoryBefore,
-        MCPV5CanonicalInventoryFromState(id),
-        plan
-      );
+      if (tracksInventory) {
+        MCPV5RecordInventoryAudit(
+          id,
+          inventoryBefore,
+          MCPV5CanonicalInventoryFromState(id),
+          plan
+        );
+      }
       return {
         text: result.text,
         stop: result.stop === true,
@@ -51538,7 +49968,7 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
       MCPV5Name(id) + " / " + tab + " / " +
       String(error && error.message ? error.message : error)
     );
-    log("MCP V5.3.9.1 module error:", MCPV5Name(id), tab, error);
+    log("MCP V5.4.0 module error:", MCPV5Name(id), tab, error);
     return { text: original, __mcpOk: false };
   } finally {
     MCPV5RestoreModuleGlobals(globalSnapshot);
@@ -51548,6 +49978,66 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
     try { globalThis.removeStoryCard = oldRemove; } catch {}
     try { globalThis.text = oldText; } catch {}
     try { globalThis.stop = oldStop; } catch {}
+  }
+}
+
+function MCPV5TrackActionHealth(tab, plan, schedule, ran, failed, skipped, elapsedMs) {
+  const root = MCPV5Root();
+  const scheduler = root.scheduler;
+  if (!scheduler.heartbeat || typeof scheduler.heartbeat !== "object") {
+    scheduler.heartbeat = {};
+  }
+  const action = Number.isFinite(info && info.actionCount)
+    ? info.actionCount : -1;
+  const ranSet = new Set(ran || []);
+  const failedSet = new Set(failed || []);
+  const skippedSet = new Set(skipped || []);
+  for (const id of MCPV5_PROFILE_ORDER) {
+    if (!plan.effective || plan.effective[id] !== true) continue;
+    const beat = scheduler.heartbeat[id] || {
+      runs: 0, deferrals: 0, failures: 0, deferStreak: 0,
+      maxDeferStreak: 0, lastInput: -1, lastContext: -1, lastOutput: -1
+    };
+    const lastKey = "last" + tab.charAt(0).toUpperCase() + tab.slice(1);
+    const duplicate = action >= 0 && beat[lastKey] === action;
+    if (!duplicate) {
+      if (ranSet.has(id)) {
+        beat.runs = Math.min(1000000, beat.runs + 1);
+        if (tab === "output") beat.deferStreak = 0;
+      } else if (skippedSet.has(id)) {
+        beat.deferrals = Math.min(1000000, beat.deferrals + 1);
+        if (tab === "output") {
+          beat.deferStreak = Math.min(100, beat.deferStreak + 1);
+          beat.maxDeferStreak = Math.max(beat.maxDeferStreak, beat.deferStreak);
+        }
+      }
+      if (failedSet.has(id)) beat.failures = Math.min(1000000, beat.failures + 1);
+      beat[lastKey] = action;
+    }
+    scheduler.heartbeat[id] = beat;
+  }
+  for (const id of Object.keys(scheduler.heartbeat)) {
+    if (!MCPV5_PROFILE_NAMES[id]) delete scheduler.heartbeat[id];
+  }
+  if (!root.performance || typeof root.performance !== "object") {
+    root.performance = {
+      peakMs: 0, overruns: 0, lastMs: 0, lastAction: -1
+    };
+  }
+  const perf = root.performance;
+  const measured = Math.min(60000, Math.max(0, Number(elapsedMs) || 0));
+  perf.peakMs = Math.max(0, Math.min(60000, perf.peakMs || 0), measured);
+  perf.lastMs = measured;
+  if (tab === "output" && perf.lastAction !== action) {
+    const settings = root.settings || MCPV5DefaultSettings();
+    if (measured > settings.hookBudgetMs) {
+      perf.overruns = Math.min(1000000, (perf.overruns || 0) + 1);
+      if (settings.diagnostics) {
+        MCPV5RecordDiagnostic("hook-budget-warning",
+          tab + ": " + measured + " ms against " + settings.hookBudgetMs + " ms");
+      }
+    }
+    perf.lastAction = action;
   }
 }
 
@@ -51583,8 +50073,18 @@ function MCPV5ExecutionOrder(tab, plan, schedule) {
 
     // Auto-Cards runs through Inner Self when Inner Self is active,
     // including Stackable Inventory's original bundled dependency.
-    if (id === "auto_cards" && plan.effective.inner_self === true) continue;
+    if (
+      id === "auto_cards" &&
+      plan.effective.inner_self === true &&
+      !(plan.dependencyOnly && plan.dependencyOnly.inner_self)
+    ) continue;
     out.push(id);
+  }
+  if (tab === "input") {
+    const hint = MCPV5CommandHint(schedule && schedule.inputText, plan);
+    if (hint && out.includes(hint)) {
+      return [hint].concat(out.filter(id => id !== hint));
+    }
   }
   return out;
 }
@@ -51642,6 +50142,10 @@ function MCPV5Run(tab, incomingText) {
     tab === "input" ? original : ""
   );
   const order = MCPV5ExecutionOrder(tab, plan, schedule);
+  if (tab === "input" && MCPV5CommandAmbiguous(original, plan)) {
+    MCPV5RecordDiagnostic("ambiguous-command",
+      "Original module handlers will resolve " + original.slice(0, 60));
+  }
   let transaction = MCPV5ActiveTransaction(tab, plan);
   const startedAt = Date.now();
 
@@ -51682,7 +50186,10 @@ function MCPV5Run(tab, incomingText) {
 
   let current = original;
 
-  if (!plan.cooperative || tab === "input") {
+  const realmheartControlStage = !!(
+    tab !== "input" && schedule && schedule.commandOwner === "realmheart"
+  );
+  if ((!plan.cooperative && !realmheartControlStage) || tab === "input") {
     for (let i = 0; i < order.length; i++) {
       const id = order[i];
       const before = current;
@@ -51723,6 +50230,37 @@ function MCPV5Run(tab, incomingText) {
         }
 
         current = MCPV5SafeText(candidate, before);
+
+        if (tab === "input" && id === "realmheart" && result.__mcpOk === true) {
+          const rootForCommand = MCPV5Root();
+          const action = Number.isFinite(info && info.actionCount)
+            ? info.actionCount : -1;
+          // Only a verified v2.5 RealmHeart command reply enters this bridge.
+          if (MCPV5RealmHeartCommandReply(current)) {
+            rootForCommand.realmheartCommand = {
+              action,
+              signature: schedule.signature,
+              reply: MCPV5RealmHeartControlFeedback(before, current).slice(0, 14000)
+            };
+            schedule.commandOwner = "realmheart";
+            schedule.controlOutput = "realmheart";
+            current = before; // Never put the reply into the player's input.
+            break; // Command is exclusive; other scripts must not process it.
+          }
+          if (
+            state.ubis &&
+            typeof state.ubis === "object" &&
+            state.ubis.pendingGambleResult &&
+            typeof state.ubis.pendingGambleResult === "object"
+          ) {
+            rootForCommand.realmheartGambleAction = {
+              action,
+              signature: schedule.signature
+            };
+          } else {
+            rootForCommand.realmheartGambleAction = null;
+          }
+        }
 
         if (
           tab === "input" &&
@@ -51773,7 +50311,11 @@ function MCPV5Run(tab, incomingText) {
       }
     }
   } else if (tab === "context") {
-    if (
+    if (!transaction && schedule && schedule.commandOwner === "realmheart") {
+      // RealmHeart's command was already applied in Input. No model task or
+      // unrelated Context module should process its control text.
+      current = original;
+    } else if (
       !transaction &&
       schedule &&
       schedule.commandOwner === "living_meters" &&
@@ -51854,15 +50396,18 @@ function MCPV5Run(tab, incomingText) {
           );
     }
   } else if (tab === "output") {
-    // A Living Meters command reply is control output, not narrative. Run only
-    // LM for this stage so protocol consumers, AR/USC-E, Slow Burn and
-    // Dice/Coin cannot inspect or rewrite a response that will be discarded.
-    if (
+    if (!transaction && schedule && schedule.commandOwner === "realmheart") {
+      // Discard the generated acknowledgement; show the exact answer created
+      // by RealmHeart v2.5 in Input. Skip all narrative/protocol decorators.
+      current = MCPV5RealmHeartReplyForAction(root, schedule) || original;
+      root.realmheartCommand = null;
+    } else if (
       !transaction &&
       schedule &&
       schedule.commandOwner === "living_meters" &&
       order.includes("living_meters")
     ) {
+      // LM control output bypasses protocol consumers and narrative decorators.
       const result = execute("living_meters", original);
       if (
         result &&
@@ -52031,7 +50576,14 @@ function MCPV5Run(tab, incomingText) {
 
       // Dice Roll and Coin Flip compete for one Outcome Roll capability. Only
       // the elected authority may decorate a normal visible story response.
-      if (!stopped && outcomeRollId) {
+      const gambleRecord = root.realmheartGambleAction;
+      const realmheartGambleTurn = !!(
+        plan.effective && plan.effective.realmheart === true &&
+        gambleRecord &&
+        gambleRecord.action === schedule.action &&
+        gambleRecord.signature === schedule.signature
+      );
+      if (!stopped && outcomeRollId && !realmheartGambleTurn) {
         const before = current;
         const result = execute(outcomeRollId, current);
         if (
@@ -52051,9 +50603,20 @@ function MCPV5Run(tab, incomingText) {
     }
   }
 
+  // The sequential path does not pass through the cooperative Output broker.
+  // Preserve the RealmHeart world-state echo guard for RealmHeart-only setups.
+  if (
+    tab === "output" && !plan.cooperative &&
+    plan.effective && plan.effective.realmheart === true &&
+    !realmheartControlStage && !transaction
+  ) {
+    current = MCPV5StripRealmHeartContextLeak(current, plan);
+  }
+
   if (plan.cooperative && sharedBase) {
     MCPV5RestoreSharedState(sharedBase);
     MCPV5CommitSharedState(sharedBase, sharedRecords, plan);
+    MCPV5TrackSharedMemoryOwnership(sharedBase, sharedRecords);
   }
 
   MCPV5MarkScheduleStage(schedule, tab);
@@ -52093,13 +50656,18 @@ function MCPV5Run(tab, incomingText) {
     failed: failed.slice(0, 16),
     skipped: skipped.slice(0, 16),
     actionModules: schedule.modules.slice(0, 16),
-    commandOwner: schedule.commandOwner || ""
+    commandOwner: schedule.commandOwner || "",
+    commandHint: schedule.commandHint || ""
   };
 
   const finalText = tab === "output" && !MCPV5HasVisibleText(current)
     ? original
     : MCPV5SafeText(current, original);
 
+  MCPV5TrackActionHealth(
+    tab, plan, schedule, ran, failed, skipped,
+    root.lastRun.elapsedMs
+  );
   MCPV5NormalizeSharedPersistentState();
   MCPV5NormalizeHostState();
 
@@ -52111,5 +50679,5 @@ function MCPV5Run(tab, incomingText) {
 try {
   MCPV5SyncControls();
 } catch (error) {
-  log("MCP V5.3.9.1 initialization error:", error);
+  log("MCP V5.4.0 initialization error:", error);
 }
