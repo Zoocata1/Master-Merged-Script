@@ -1,4 +1,4 @@
-// MASTER SCRIPT V5.3.9 — Output
+// MASTER SCRIPT V5.4.0 — Output
 const modifier = (text) => {
   const original = (
     typeof text === "string" && text.length
@@ -27,7 +27,7 @@ const modifier = (text) => {
     }
     return { text: withLeadingSpace(original) };
   } catch (error) {
-    log("MCP V5.3.3 output error:", error);
+    log("MCP V5.4.0 output error:", error);
     return { text: withLeadingSpace(original) };
   }
 }
