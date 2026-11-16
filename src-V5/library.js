@@ -1,24 +1,24 @@
 /* ============================================================
-   MASTER SCRIPT V5.4.0 — MAJOR QOL UPDATE
-   --- Please enjoy ---
-   --- Thank you for all your hard work and feedback ---
+   MASTER SCRIPT V5.4.6 — QOL Update
+   - Please Enjoy
+   - Zoocata
    ============================================================ */
 
 const MCPV5_VERSION = 5;
 const MCPV5_SCHEMA_VERSION = 3;
-const MCPV5_BUILD_VERSION = "5.4.0";
-const MCPV5_PATCH = "5.4.0-host-safe-optimization";
+const MCPV5_BUILD_VERSION = "5.4.6";
+const MCPV5_PATCH = "5.4.6-visible-evidence";
 const MCPV5_CARD_KEYS = "__MCP_EXACT_SCRIPT_COLLECTION__";
 const MCPV5_CARD_TITLE = "⚙️ Master Script Control Panel";
 const MCPV5_CARD_TYPE = "_MCP_V5_";
 const MCPV5_CONTROL_ENTRY_LIMIT = 2000;
-const MCPV5_PROFILE_NAMES = {"inner_self":"Inner Self","auto_cards":"Auto-Cards","living_characters":"Living Characters","slow_burn":"Slow Burn","living_meters":"Living Meters","story_card_extension":"Story Card Extension","true_auto_stats":"True Automatic Stats","story_arc_engine":"Story Arc Engine","narrative_governor":"Narrative Governor","stackable_inventory":"Stackable Inventory","realmheart":"RealmHeart","character_continuity":"Character Continuity","ar":"AR","usc_e":"USC-E","dice_roll":"Dice Roll","coin_flip":"Coin Flip"};
-const MCPV5_PROFILE_ORDER = ["inner_self","auto_cards","living_characters","slow_burn","living_meters","story_card_extension","true_auto_stats","story_arc_engine","narrative_governor","stackable_inventory","realmheart","character_continuity","ar","usc_e","dice_roll","coin_flip"];
+const MCPV5_PROFILE_NAMES = {"inner_self":"Inner Self","auto_cards":"Auto-Cards","living_characters":"Living Characters","slow_burn":"Slow Burn","living_meters":"Living Meters","story_card_extension":"Story Card Extension","true_auto_stats":"True Automatic Stats","story_arc_engine":"Story Arc Engine","narrative_governor":"Narrative Governor","stackable_inventory":"Stackable Inventory","realmheart":"RealmHeart","character_continuity":"Character Continuity","ar":"AR","usc_e":"USC-E","dice_roll":"Dice Roll","coin_flip":"Coin Flip","information_firewall":"Information Firewall"};
+const MCPV5_PROFILE_ORDER = ["inner_self","auto_cards","living_characters","slow_burn","living_meters","story_card_extension","true_auto_stats","story_arc_engine","narrative_governor","stackable_inventory","realmheart","character_continuity","ar","usc_e","dice_roll","coin_flip","information_firewall"];
 
 const MCPV5_INPUT_ORDER = [
   "living_meters", "slow_burn", "inner_self", "auto_cards", "living_characters",
   "true_auto_stats", "story_arc_engine", "narrative_governor",
-  "stackable_inventory", "realmheart", "character_continuity"
+  "stackable_inventory", "realmheart", "character_continuity", "information_firewall"
 ];
 
 const MCPV5_CONTEXT_ORDER = [
@@ -56,6 +56,7 @@ const MCPV5_CARD_SANDBOXES = Object.create(null);
 const MCPV5_MODULE_GLOBAL_VAULT = Object.create(null);
 
 const MCPV5_MODULE_STATE_KEYS = {
+  information_firewall: ["informationFirewall"],
   inner_self: ["AutoCards", "InnerSelf", "LSIv2", "entry", "mind", "promptDragon", "showAPI", "willStop"],
   auto_cards: ["AutoCards", "InnerSelf", "LSIv2", "entry", "mind", "promptDragon", "showAPI", "willStop"],
   living_characters: ["chaosGoblinV2", "livingThoughts"],
@@ -110,7 +111,7 @@ const MCPV5_DEFAULT_TIMINGS = {
     true_auto_stats: 110, story_arc_engine: 35, narrative_governor: 35,
     stackable_inventory: 90, realmheart: 115,
     character_continuity: 150, ar: 1, usc_e: 1,
-    dice_roll: 1, coin_flip: 1
+    dice_roll: 1, coin_flip: 1, information_firewall: 35
   },
   context: {
     inner_self: 190, auto_cards: 130, living_characters: 120,
@@ -118,7 +119,7 @@ const MCPV5_DEFAULT_TIMINGS = {
     true_auto_stats: 100, story_arc_engine: 60, narrative_governor: 55,
     stackable_inventory: 105, realmheart: 135,
     character_continuity: 220, ar: 1, usc_e: 1,
-    dice_roll: 1, coin_flip: 1
+    dice_roll: 1, coin_flip: 1, information_firewall: 35
   },
   output: {
     inner_self: 190, auto_cards: 135, living_characters: 115,
@@ -126,7 +127,7 @@ const MCPV5_DEFAULT_TIMINGS = {
     true_auto_stats: 145, story_arc_engine: 75, narrative_governor: 55,
     stackable_inventory: 145, realmheart: 165,
     character_continuity: 230, ar: 75, usc_e: 35,
-    dice_roll: 8, coin_flip: 6
+    dice_roll: 8, coin_flip: 6, information_firewall: 70
   }
 };
 
@@ -219,6 +220,45 @@ function MCPV5AutoCardsState() {
     state.AutoCards && typeof state.AutoCards === "object"
   ) ? state.AutoCards : null;
   return candidate && !Array.isArray(candidate) ? candidate : null;
+}
+
+function MCPV5SAECard(card) {
+  if (!card || typeof card !== "object") return "";
+  const type = String(card.type || "").trim().toLowerCase();
+  const keys = String(card.keys || "").trim().toLowerCase();
+  if (type === "story arc settings" && keys === type) return type;
+  if (type === "current story arc" && (keys === type || keys === "/" + type)) return type;
+  return "";
+}
+
+function MCPV5CancelSAECardCompression() {
+  const ac = MCPV5AutoCardsState();
+  const job = ac && ac.compression;
+  if (!job || typeof job.titleKey !== "string" || !job.titleKey) return;
+  const target = job.titleKey.trim().toLowerCase();
+  const protectedTarget = MCPV5_NATIVE_STORY_CARDS.some(card => {
+    const role = MCPV5SAECard(card);
+    if (!role) return false;
+    const header = /^\\{title:\\s*([^}]+)\\}/i.exec(String(card.entry || ""));
+    return target === role || (header && target === header[1].trim().toLowerCase());
+  });
+  if (!protectedTarget) return;
+  Object.assign(job, {
+    completed: 0, titleKey: "", vanityTitle: "", responseEstimate: 1400,
+    lastConstructIndex: -1, oldMemoryBank: [], newMemoryBank: []
+  });
+  const root = MCPV5Root();
+  if (root.transaction && root.transaction.name === "Auto-Cards model task" &&
+      !MCPV5AutoCardsTaskActive({effective: {auto_cards: true}})) {
+    root.transaction = null;
+  }
+  MCPV5RecordDiagnostic("sae-card-protected", "Canceled queued Auto-Cards compression for an SAE card.");
+}
+
+function MCPV5PauseAutomaticCards() {
+  const schedule = MCPV5Root().actionSchedule;
+  return !!(schedule && !schedule.completed && schedule.pauseAutomaticCards &&
+    schedule.commandHint !== "inner_self" && schedule.commandHint !== "auto_cards");
 }
 
 function MCPV5AutoCardsTaskActive(plan) {
@@ -1153,21 +1193,13 @@ function MCPV5CanonicalEntry(enabled, settings, plan, status) {
     if (enabled[id] === true) enabledNames.push(MCPV5_PROFILE_NAMES[id]);
   }
 
-  const field = (value, fallback, max) => {
-    const clean = String(value === undefined || value === null ? fallback : value)
-      .replace(/[\r\n\t]+/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-    return (clean || String(fallback)).slice(0, Math.max(1, max || 40));
-  };
-
   const bool = value => value === true ? "true" : "false";
 
   const prefixLines = [
     "╔══════════════════════════════════════════════════════╗",
     "║              MASTER SCRIPT CONTROL PANEL             ║",
     "╚══════════════════════════════════════════════════════╝",
-    "Build 5.4.0  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
+    "Build 5.4.6  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
     "",
     "⚡ QUICK ACTIONS",
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1183,6 +1215,7 @@ function MCPV5CanonicalEntry(enabled, settings, plan, status) {
     "Living Characters: " + bool(enabled.living_characters),
     "Character Continuity: " + bool(enabled.character_continuity),
     "Slow Burn: " + bool(enabled.slow_burn),
+    "Information Firewall: " + bool(enabled.information_firewall),
     "",
     "# STORY • WORLD • PACING",
     "Story Card Extension: " + bool(enabled.story_card_extension),
@@ -1201,26 +1234,6 @@ function MCPV5CanonicalEntry(enabled, settings, plan, status) {
     "USC-E: " + bool(enabled.usc_e),
     "Dice Roll: " + bool(enabled.dice_roll),
     "Coin Flip: " + bool(enabled.coin_flip),
-    "",
-    "🛡️ RECOMMENDED COMPATIBILITY SETTINGS",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "# Recommended for mixed-script setups: Balanced / Balanced / true.",
-    "Compatibility Mode: " + field(settings.compatibilityMode, "Balanced", 24),
-    "Authority Enforcement: " + field(settings.authorityEnforcement, "Balanced", 24),
-    "Workload Guard: " + bool(settings.workloadGuard),
-    "",
-    "🎛️ ADVANCED AUTHORITY SETTINGS",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "# Usually leave these on Automatic.",
-    "Compatibility Policy: " + field(settings.policy, "Automatic", 24),
-    "Inventory Authority: " + field(settings.inventoryAuthority, "Automatic", 40),
-    "NPC Facts Authority: " + field(settings.npcFactsAuthority, "Automatic", 40),
-    "NPC Mind Authority: " + field(settings.npcMindAuthority, "Automatic", 40),
-    "NPC Action Authority: " + field(settings.npcActionAuthority, "Automatic", 40),
-    "Macro Pacing Authority: " + field(settings.macroPacingAuthority, "Automatic", 40),
-    "Scene Pacing Authority: " + field(settings.scenePacingAuthority, "Automatic", 40),
-    "Relationship Pacing Authority: " + field(settings.relationshipPacingAuthority, "Automatic", 40),
-    "Outcome Roll Authority: " + field(settings.outcomeRollAuthority, "Automatic", 40),
     "",
     "⏱️ PERFORMANCE & TROUBLESHOOTING",
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1345,69 +1358,8 @@ function MCPV5SyncControls() {
   }
 
   const defaults = MCPV5DefaultSettings();
-  const legacyPolicy = MCPV5NormalizeChoice(
-    MCPV5ReadString(entry, "Compatibility Policy", defaults.policy),
-    ["Automatic", "Legacy Sequential"],
-    defaults.policy
-  );
-  const inferredMode = legacyPolicy === "Legacy Sequential"
-    ? "Legacy Exact"
-    : defaults.compatibilityMode;
-  const compatibilityMode = MCPV5NormalizeChoice(
-    MCPV5ReadString(entry, "Compatibility Mode", inferredMode),
-    ["Legacy Exact", "Balanced", "Strict"],
-    inferredMode
-  );
-
   const settings = {
-    compatibilityMode,
-    policy: compatibilityMode === "Legacy Exact"
-      ? "Legacy Sequential"
-      : "Automatic",
-    authorityEnforcement: MCPV5NormalizeChoice(
-      MCPV5ReadString(
-        entry,
-        "Authority Enforcement",
-        compatibilityMode === "Strict"
-          ? "Strict"
-          : defaults.authorityEnforcement
-      ),
-      ["Advisory", "Balanced", "Strict"],
-      compatibilityMode === "Strict"
-        ? "Strict"
-        : defaults.authorityEnforcement
-    ),
-    inventoryAuthority: MCPV5ReadString(
-      entry, "Inventory Authority", defaults.inventoryAuthority
-    ),
-    npcFactsAuthority: MCPV5ReadString(
-      entry, "NPC Facts Authority", defaults.npcFactsAuthority
-    ),
-    npcMindAuthority: MCPV5ReadString(
-      entry, "NPC Mind Authority", defaults.npcMindAuthority
-    ),
-    npcActionAuthority: MCPV5ReadString(
-      entry, "NPC Action Authority", defaults.npcActionAuthority
-    ),
-    macroPacingAuthority: MCPV5ReadString(
-      entry, "Macro Pacing Authority", defaults.macroPacingAuthority
-    ),
-    scenePacingAuthority: MCPV5ReadString(
-      entry, "Scene Pacing Authority", defaults.scenePacingAuthority
-    ),
-    relationshipPacingAuthority: MCPV5ReadString(
-      entry,
-      "Relationship Pacing Authority",
-      defaults.relationshipPacingAuthority
-    ),
-    outcomeRollAuthority: MCPV5ReadString(
-      entry,
-      "Outcome Roll Authority",
-      defaults.outcomeRollAuthority
-    ),
-    workloadGuard: MCPV5ReadBoolean(
-      entry, "Workload Guard", defaults.workloadGuard
-    ),
+    ...defaults,
     hookBudgetMs: MCPV5ReadInteger(
       entry,
       "Hook Budget Milliseconds",
@@ -1426,12 +1378,6 @@ function MCPV5SyncControls() {
       entry, "Diagnostics", defaults.diagnostics
     )
   };
-
-  if (compatibilityMode === "Strict") {
-    settings.authorityEnforcement = "Strict";
-  } else if (compatibilityMode === "Legacy Exact") {
-    settings.authorityEnforcement = "Advisory";
-  }
 
   const plan = MCPV5BuildPlan(enabled, settings);
   const status = plan.selected.length
@@ -1685,6 +1631,8 @@ function MCPV5CreateCardSandbox(moduleId) {
       moduleId === "story_card_extension" &&
       MCPV5HideFromStoryCardExtension(card)
     ) return false;
+    if ((moduleId === "auto_cards" || moduleId === "inner_self") &&
+        MCPV5SAECard(card)) return false;
     if (!isCooperative()) return true;
     const owner = MCPV5InventoryOwner(card.keys);
     if (!owner) {
@@ -2050,6 +1998,17 @@ function MCPV5CreateCardSandbox(moduleId) {
     const actualIndex = returnedRaw
       ? actualCards.indexOf(returnedRaw)
       : (Number.isInteger(result) ? result : -1);
+    // These legacy modules immediately find newly created cards by
+    // title. Preserve their intended titles if the runtime leaves them blank.
+    const created = actualIndex >= 0 ? actualCards[actualIndex] : returnedRaw;
+    if (created && !String(created.title || "").trim() &&
+        (((moduleId === "auto_cards" || moduleId === "inner_self") && keys === "%@%") ||
+         (moduleId === "story_arc_engine" && MCPV5SAECard(created)) ||
+         (moduleId === "true_auto_stats" && type === "Player Stats")) &&
+        typeof keys === "string" && keys.trim()) {
+      try { created.title = keys; } catch {}
+    }
+
     if (
       moduleId === "living_meters" &&
       actualIndex >= 0 &&
@@ -2778,13 +2737,14 @@ function MCPV5TrackSharedMemoryOwnership(base, records) {
   root.memoryOwnership = next;
 }
 
-function MCPV5FitContext(candidate, before) {
+function MCPV5FitContext(candidate, before, limit) {
   const next = MCPV5SafeText(candidate, before);
   if (!Number.isFinite(info && info.maxChars) || info.maxChars < 500) {
     return next;
   }
 
-  const budget = Math.max(500, Math.floor(info.maxChars));
+  const budget = Math.min(Math.max(500, Math.floor(info.maxChars)),
+    Number.isFinite(limit) ? limit : Infinity);
   if (next.length <= budget) return next;
 
   const base = MCPV5SafeText(before, "\u200B");
@@ -2918,11 +2878,12 @@ function MCPV5InventoryAuditSnapshot(moduleId) {
 }
 
 function MCPV5CanonicalInventoryFromState(moduleId) {
-  const items = {};
-  const currency = {};
+  const items = Object.create(null);
+  const currency = Object.create(null);
+  const itemOwners = Object.create(null);
   let initialized = false;
 
-  function addItem(name, quantity) {
+  function addItem(name, quantity, owner = "") {
     const label = String(name || "").trim();
     const qty = Math.floor(Number(quantity) || 0);
     if (!label || qty === 0) return;
@@ -2932,6 +2893,10 @@ function MCPV5CanonicalInventoryFromState(moduleId) {
     const key = existing || label;
     items[key] = (items[key] || 0) + qty;
     if (items[key] === 0) delete items[key];
+    if (owner) {
+      const owned = itemOwners[owner] || (itemOwners[owner] = Object.create(null));
+      owned[label] = (owned[label] || 0) + qty;
+    }
   }
 
   function addCurrency(name, quantity) {
@@ -2988,7 +2953,7 @@ function MCPV5CanonicalInventoryFromState(moduleId) {
       if (!inv || !Array.isArray(inv.item)) continue;
       for (let i = 0; i < inv.item.length; i++) {
         const qty = Array.isArray(inv.amt) ? inv.amt[i] : 1;
-        addItem(inv.item[i], qty);
+        addItem(inv.item[i], qty, players[p]);
       }
     }
   }
@@ -2997,7 +2962,8 @@ function MCPV5CanonicalInventoryFromState(moduleId) {
     initialized,
     items,
     currency,
-    hash: MCPV5HashString(JSON.stringify({ items, currency }))
+    itemOwners,
+    hash: MCPV5HashString(JSON.stringify({ items, currency, itemOwners }))
   };
 }
 
@@ -3021,7 +2987,7 @@ function MCPV5InventoryMapDelta(beforeMap, afterMap) {
   ingest(afterMap, "after");
   names.forEach((row, key) => {
     const delta = row.after - row.before;
-    if (delta) rows.push({ key, name: row.name, delta });
+    if (delta) rows.push({ key, name: row.name, delta, before: row.before, after: row.after });
   });
   rows.sort((a, b) => a.key.localeCompare(b.key));
   return rows;
@@ -3054,11 +3020,17 @@ function MCPV5RecordInventoryProposal(moduleId, before, after, plan) {
   const action = Number.isFinite(info && info.actionCount)
     ? info.actionCount
     : -1;
+  const perOwner = moduleId === "true_auto_stats"
+    ? MCPV5UniqueStrings(Object.keys(before.itemOwners || {}).concat(Object.keys(after.itemOwners || {})))
+      .flatMap(owner => MCPV5InventoryMapDelta(
+        (before.itemOwners || {})[owner], (after.itemOwners || {})[owner]
+      ).map(row => ({ ...row, owner })))
+    : MCPV5InventoryMapDelta(before.items, after.items);
   const proposal = {
     action,
     module: moduleId,
     authority: !!(plan && plan.inventoryAuthority === moduleId),
-    items: MCPV5InventoryMapDelta(before.items, after.items),
+    items: perOwner,
     currency: MCPV5InventoryMapDelta(before.currency, after.currency),
     beforeHash: before.hash,
     afterHash: after.hash,
@@ -3079,208 +3051,32 @@ function MCPV5RecordInventoryProposal(moduleId, before, after, plan) {
   root.inventoryLedger.recent = root.inventoryLedger.recent.slice(-20);
 }
 
-function MCPV5ApplyInventoryEvent(moduleId, event, amount) {
-  const delta = Number.isFinite(amount) ? amount : event.delta;
-  if (!delta) return false;
-
-  if (moduleId === "stackable_inventory") {
-    if (!state.vars || typeof state.vars !== "object") return false;
-
-    if (event.kind === "item") {
-      if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
-      const inventory = state.vars.inventory;
-      if (delta > 0) {
-        for (let i = 0; i < delta; i++) inventory.push(event.name);
-      } else {
-        let remaining = Math.abs(delta);
-        for (let i = inventory.length - 1; i >= 0 && remaining > 0; i--) {
-          if (String(inventory[i]).toLowerCase() === event.key) {
-            inventory.splice(i, 1);
-            remaining--;
-          }
-        }
-      }
-      return true;
-    }
-
-    if (!state.vars.wallet || typeof state.vars.wallet !== "object") {
-      state.vars.wallet = {};
-    }
-    const wallet = state.vars.wallet;
-    const existing = Object.keys(wallet).find(
-      key => key.toLowerCase() === event.key
-    );
-    const label = existing || event.name;
-    wallet[label] = (Number(wallet[label]) || 0) + delta;
-    return true;
-  }
-
-  if (moduleId === "realmheart") {
-    if (!state.ubis || typeof state.ubis !== "object") return false;
-
-    if (event.kind === "item") {
-      if (!state.ubis.inventory || typeof state.ubis.inventory !== "object") {
-        state.ubis.inventory = {};
-      }
-      const inventory = state.ubis.inventory;
-      const existing = Object.keys(inventory).find(
-        key => key.toLowerCase() === event.key
-      );
-      const label = existing || event.name;
-      inventory[label] = Math.max(0, (Number(inventory[label]) || 0) + delta);
-      if (inventory[label] <= 0) delete inventory[label];
-      return true;
-    }
-
-    state.ubis.balance = (Number(state.ubis.balance) || 0) + delta;
-    return true;
-  }
-
-  // TAS inventory is per-character. The host records it as a contributor but
-  // never guesses which character should receive a synchronized item.
-  return false;
-}
-
 function MCPV5FinalizeInventoryLedger(plan) {
   if (!plan || !plan.cooperative) return;
-
-  const root = MCPV5Root();
-  const ledger = root.inventoryLedger;
-  const action = Number.isFinite(info && info.actionCount)
-    ? info.actionCount
-    : -1;
+  const ledger = MCPV5Root().inventoryLedger;
+  const action = Number.isFinite(info && info.actionCount) ? info.actionCount : -1;
   const proposals = ledger.pending.filter(row => row.action === action);
   ledger.pending = ledger.pending.filter(row => row.action !== action);
 
-  if (!proposals.length) {
-    const authority = plan.inventoryAuthority;
-    if (authority) {
-      const snapshot = MCPV5CanonicalInventoryFromState(authority);
-      ledger.authority = authority;
-      ledger.action = action;
-      ledger.hash = snapshot.hash;
-      ledger.items = snapshot.items;
-      ledger.currency = snapshot.currency;
-    }
-    return;
-  }
-
-  const groups = new Map();
-  function addRows(kind, proposal, rows) {
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const groupKey = kind + "\u241F" + row.key;
-      if (!groups.has(groupKey)) {
-        groups.set(groupKey, {
-          kind,
-          key: row.key,
-          name: row.name,
-          rows: []
+  // A module has already committed its own state. Audit changes, never mirror
+  // them: matching item or currency names are not proof of a shared owner.
+  for (const proposal of proposals) {
+    for (const [kind, rows] of [["item", proposal.items], ["currency", proposal.currency]]) {
+      for (const row of (rows || [])) {
+        const id = MCPV5HashString(JSON.stringify([
+          action, proposal.module, kind, row.owner || "", row.key, row.delta,
+          proposal.beforeHash, proposal.afterHash
+        ]));
+        if (ledger.events.some(event => event.id === id)) continue;
+        ledger.events.push({
+          id, action, kind, key: row.key, name: row.name, delta: row.delta,
+          owner: row.owner || "", before: row.before, after: row.after,
+          authority: proposal.module, sources: [proposal.module]
         });
-      }
-      groups.get(groupKey).rows.push({
-        module: proposal.module,
-        delta: row.delta,
-        authority: proposal.authority
-      });
-    }
-  }
-
-  for (let i = 0; i < proposals.length; i++) {
-    addRows("item", proposals[i], proposals[i].items || []);
-    addRows("currency", proposals[i], proposals[i].currency || []);
-  }
-
-  const committed = [];
-  groups.forEach(group => {
-    let winner = group.rows.find(row => row.authority);
-    if (!winner) {
-      const counts = new Map();
-      for (let i = 0; i < group.rows.length; i++) {
-        const key = String(group.rows[i].delta);
-        counts.set(key, (counts.get(key) || 0) + 1);
-      }
-      winner = group.rows.slice().sort((a, b) => {
-        const countA = counts.get(String(a.delta)) || 0;
-        const countB = counts.get(String(b.delta)) || 0;
-        if (countA !== countB) return countB - countA;
-        return MCPV5AuthorityScore(b.module, plan) -
-          MCPV5AuthorityScore(a.module, plan);
-      })[0];
-    }
-    if (!winner || !winner.delta) return;
-
-    const event = {
-      id: MCPV5HashString(
-        action + "|" + group.kind + "|" + group.key + "|" + winner.delta
-      ),
-      action,
-      kind: group.kind,
-      key: group.key,
-      name: group.name,
-      delta: winner.delta,
-      authority: winner.module,
-      sources: MCPV5UniqueStrings(
-        group.rows
-          .filter(row => row.delta === winner.delta)
-          .map(row => row.module)
-      )
-    };
-
-    if (!ledger.events.some(old => old.id === event.id)) {
-      ledger.events.push(event);
-      committed.push(event);
-    }
-
-    if (group.rows.some(row => row.delta !== winner.delta)) {
-      MCPV5RecordDiagnostic(
-        "inventory-conflict-arbitrated",
-        event.name + " -> " + winner.delta + " by " +
-        MCPV5Name(winner.module)
-      );
-    }
-  });
-
-  ledger.events = ledger.events.slice(-80);
-
-  // Synchronize only the two unambiguous global inventory stores. TAS is
-  // intentionally excluded because its inventory belongs to a named player.
-  const syncTargets = ["stackable_inventory", "realmheart"].filter(
-    id => plan.effective[id] === true
-  );
-  for (let e = 0; e < committed.length; e++) {
-    const event = committed[e];
-    for (let t = 0; t < syncTargets.length; t++) {
-      const target = syncTargets[t];
-      const proposal = proposals.find(row => row.module === target);
-      const rows = proposal
-        ? (event.kind === "item" ? proposal.items : proposal.currency)
-        : [];
-      const reflected = rows.find(row => row.key === event.key);
-      const actual = reflected ? reflected.delta : 0;
-      let correction = event.delta - actual;
-
-      if (
-        actual !== 0 &&
-        actual !== event.delta &&
-        plan.authorityEnforcement !== "Strict"
-      ) {
-        MCPV5RecordDiagnostic(
-          "inventory-sync-deferred",
-          MCPV5Name(target) + " disagreed on " + event.name
-        );
-        continue;
-      }
-
-      if (correction && MCPV5ApplyInventoryEvent(target, event, correction)) {
-        MCPV5RecordDiagnostic(
-          "inventory-observer-synchronized",
-          MCPV5Name(target) + " / " + event.name + " / " + correction
-        );
+        if (ledger.events.length > 80) ledger.events.shift();
       }
     }
   }
-
   const authority = plan.inventoryAuthority;
   if (authority) {
     const snapshot = MCPV5CanonicalInventoryFromState(authority);
@@ -3403,6 +3199,12 @@ function MCPV5CommandHint(value, plan) {
   // preclaim or reinterpret them; original source handlers remain authoritative.
   if (effective.living_meters === true &&
       /^\/status(?:\s|$)/i.test(clean)) return "living_meters";
+  if (effective.story_arc_engine === true &&
+      (/^\/redo arc\s*$/i.test(clean) || /^\/help sae\s*$/i.test(clean) ||
+       (/^\/stop\s*$/i.test(clean) && state.unlockFeedAIPrompt === true)))
+    return "story_arc_engine";
+  if (effective.true_auto_stats === true && /^\/help (?:stats|skills|talents)\s*$/i.test(clean))
+    return "true_auto_stats";
   return "";
 }
 
@@ -3471,13 +3273,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
   const eligible = MCPV5EligibleModules(plan);
   // RealmHeart advances world time and recurring bills; unlike a lightweight
   // observer it must be scheduled on every ordinary narrative lifecycle.
-  const fixedOutput = eligible.filter(id => (
-    id === "realmheart" ||
-    id === "ar" ||
-    id === "usc_e" ||
-    id === "slow_burn" ||
-    id === plan.outcomeRollAuthority
-  ));
+  const fixedOutput = eligible.filter(id => id === "realmheart");
   const fixedOutputSet = new Set(fixedOutput);
   const ordinary = eligible.filter(id => !fixedOutputSet.has(id));
   const cursor = ordinary.length
@@ -3495,7 +3291,9 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
       ? Math.min(100, heartbeat[id].deferStreak) : 0
   }));
   aged.sort((a, b) => b.streak - a.streak || a.index - b.index);
-  const prioritized = aged.map(record => record.id);
+  const isDecoration = id => ["ar", "usc_e", "dice_roll", "coin_flip"].includes(id);
+  const prioritized = aged.filter(row => !isDecoration(row.id))
+    .concat(aged.filter(row => isDecoration(row.id))).map(row => row.id);
 
   let selected = rotated.slice();
   const skipped = [];
@@ -3514,7 +3312,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     )
   };
 
-  if (plan.cooperative && settings.workloadGuard && prioritized.length > 1) {
+  if (plan.cooperative && settings.workloadGuard && prioritized.length > 0) {
     selected = [];
     const limit = Math.max(
       250,
@@ -3534,7 +3332,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
         projected.output <= limit
       );
 
-      if (fits || selected.length === 0) {
+      if (fits) {
         selected.push(id);
         projectedTotals.input = projected.input;
         projectedTotals.context = projected.context;
@@ -3584,7 +3382,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
   // deferred. Inner Self owns its package whenever Inner Self is active.
   const commandHint = MCPV5CommandHint(inputText, plan);
   if (
-    (commandHint === "inner_self" || commandHint === "auto_cards") &&
+    commandHint &&
     !selected.includes(commandHint)
   ) {
     selected.push(commandHint);
@@ -3616,6 +3414,7 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
     projectedTotals,
     inputText: String(inputText || "").slice(0, 800),
     commandHint: MCPV5CommandHint(inputText, plan),
+    pauseAutomaticCards: !!(root.lastRun && root.lastRun.tab === "output" && root.lastRun.transaction),
     commandOwner: "",
     controlOutput: "",
     stages: { input: false, context: false, output: false },
@@ -3850,7 +3649,7 @@ function MCPV5AuthorityScore(moduleId, plan) {
   return score;
 }
 
-function MCPV5ComposeContextProposals(baseText, proposals, plan) {
+function MCPV5ComposeContextProposals(baseText, proposals, plan, limit) {
   const base = MCPV5SafeText(baseText, "\u200B");
   if (!Array.isArray(proposals) || !proposals.length) return base;
 
@@ -3967,7 +3766,44 @@ function MCPV5ComposeContextProposals(baseText, proposals, plan) {
   if (uniqueSuffixes.length) {
     out = out + "\n\n" + uniqueSuffixes.join("\n\n");
   }
-  return MCPV5FitContext(out, base);
+  return MCPV5FitContext(out, base, limit);
+}
+
+function MCPV5PreferFreshSpotlight(eligible, recentOwner) {
+  if (!recentOwner || eligible.length < 2) return eligible;
+  const fresh = eligible.filter(name => name !== recentOwner);
+  return fresh.length ? fresh : eligible;
+}
+
+function MCPV5FirewallContextLimit(base, proposals, plan, schedule) {
+  if (!plan.effective.information_firewall || schedule.commandOwner ||
+      !schedule.modules.includes("information_firewall") ||
+      /^\s*(?:>\s*)?(?:(?:[^\n,]{1,60}\s+says?,\s*["“]?)|["“])?\//i.test(schedule.inputText || "") ||
+      !Number.isFinite(info && info.maxChars)) return undefined;
+  const mem = state.informationFirewall;
+  if (!mem || !Array.isArray(mem.present) || !mem.present.length) return undefined;
+  const budget = Math.floor(info.maxChars);
+  const reserve = Math.min(600, budget - base.length);
+  if (reserve < 250) return undefined;
+  // Drop whole additive proposals rather than cutting protocol instructions.
+  let total = base.length;
+  for (const proposal of proposals) {
+    const edit = MCPV5AnalyzeProposal(base, proposal.text);
+    if (edit.mode !== "same" && edit.mode !== "additive") return undefined;
+    if (edit.mode === "additive") total += edit.prefix.trim().length + edit.suffix.trim().length + 4;
+  }
+  // Keep CC/IS/LC and all other substantive contributions intact. Only optional
+  // recall is traded for relevant knowledge guidance.
+  for (let i = proposals.length - 1; total > budget - reserve && i >= 0; i--) {
+    const proposal = proposals[i];
+    if (proposal.id !== "story_card_extension" || proposal.hasEvent) continue;
+    const edit = MCPV5AnalyzeProposal(base, proposal.text);
+    if (edit.mode !== "additive") continue;
+    total -= edit.prefix.trim().length + edit.suffix.trim().length + 4;
+    proposals.splice(i, 1);
+    MCPV5RecordDiagnostic("context-firewall-reserve", "Deferred optional Story Card Extension recall.");
+  }
+  return total <= budget - reserve ? budget - reserve : undefined;
 }
 
 function MCPV5SelectOutputProposal(baseText, proposals, plan, commandOwner) {
@@ -5104,13 +4940,19 @@ function MCPV5Create_inner_package() {
               return;
           } else {
 
-              const n = possibilities.length;
-
+              const firewall = MCPV5_ACTIVE_PLAN &&
+                MCPV5_ACTIVE_PLAN.effective.information_firewall === true
+                  ? state.informationFirewall : null;
+              const sceneNames = firewall && Array.isArray(firewall.present)
+                ? new Set(firewall.present.map(name => String(name).toLowerCase())) : null;
+              const onScene = sceneNames ? possibilities.filter(name => sceneNames.has(name.toLowerCase())) : [];
+              const pool = onScene.length ? onScene : possibilities;
+              const n = pool.length;
               const total = (n * (n + 1)) / 2;
               for (let [i, r] = [0, Math.random() * total]; i < n; i++) {
                   r -= (n - i);
                   if (r < 0) {
-                      IS.agent = possibilities[i];
+                      IS.agent = pool[i];
                       break;
                   }
               }
@@ -8724,6 +8566,7 @@ function MCPV5Create_inner_package() {
                       })().length);
                   }
                   function prepareMemoryCompression(titleKey) {
+                      if (MCPV5PauseAutomaticCards()) return false;
                       AC.compression.oldMemoryBank = isolateMemories(extractCardMemories().text);
                       if (AC.compression.oldMemoryBank.length === 0) {
                           return false;
@@ -8773,7 +8616,7 @@ function MCPV5Create_inner_package() {
                   promptCompression();
               } else if (AC.signal.recheckRetryOrErase) {
 
-              } else if ((AC.generation.cooldown <= 0) && (0 < AC.database.titles.candidates.length)) {
+              } else if (!MCPV5PauseAutomaticCards() && (AC.generation.cooldown <= 0) && (0 < AC.database.titles.candidates.length)) {
 
                   let selectedTitle = (function() {
                       if (AC.database.titles.candidates.length === 1) {
@@ -9091,6 +8934,7 @@ function MCPV5Create_inner_package() {
                   const textClone = prettifyEmDashes(text);
                   AC.chronometer.amnesia = 0;
                   AC.generation.completed++;
+                  AC.generation.permitted = Math.min(10, AC.generation.permitted || 10);
                   const generationsRemaining = (function() {
                       if (
                           textClone.includes("\"")
@@ -9206,7 +9050,16 @@ function MCPV5Create_inner_package() {
                       AC.generation.permitted,
                       AC.generation.completed + generationsRemaining
                   ));
-                  if (generationsRemaining <= 0) {
+                  if (generationsRemaining <= 0 &&
+                      formatEntry(AC.generation.workpiece.entry).trim().length < 40) {
+                      notify("Auto-Cards stopped creating \"" + AC.generation.workpiece.title +
+                          "\" because it could not get a usable entry.");
+                      AC.generation.cooldown = AC.config.addCardCooldown;
+                      AC.generation.completed = 0;
+                      AC.generation.permitted = 34;
+                      AC.generation.workpiece = O.f({});
+                      clearTransientTitles();
+                  } else if (generationsRemaining <= 0) {
                       notify("\"" + AC.generation.workpiece.title + "\" was successfully added to your story cards!");
                       constructCard(O.f({
                           type: AC.generation.workpiece.type,
@@ -9265,6 +9118,7 @@ function MCPV5Create_inner_package() {
                   const textClone = prettifyEmDashes(text);
                   AC.chronometer.amnesia = 0;
                   AC.compression.completed++;
+                  let failedCompression = false;
                   const compressionsRemaining = (function() {
                       const newMemory = (textClone
 
@@ -9276,7 +9130,10 @@ function MCPV5Create_inner_package() {
                           .replace(/\s+/g, " ")
                       );
                       if ((AC.compression.oldMemoryBank.length - 1) <= AC.compression.lastConstructIndex) {
-                          // Terminate this compression cycle; the memory construct cannot grow any further
+                          if (!newMemory || newMemory.length >= buildMemoryConstruct().length) {
+                              failedCompression = true;
+                              return 0;
+                          }
                           AC.compression.newMemoryBank.push(newMemory);
                           return 0;
                       } else if ((newMemory.trim() !== "") && (newMemory.length < buildMemoryConstruct().length)) {
@@ -9291,7 +9148,11 @@ function MCPV5Create_inner_package() {
                       return boundInteger(1, joinMemoryBank(AC.compression.oldMemoryBank).length) / AC.compression.responseEstimate;
                   })();
                   postOutputMessage(AC.compression.completed / (AC.compression.completed + compressionsRemaining));
-                  if (compressionsRemaining <= 0) {
+                  if (failedCompression || (compressionsRemaining > 0 && AC.compression.completed >= 8)) {
+                      notify("Auto-Cards stopped summarizing \"" + AC.compression.vanityTitle +
+                          "\" and kept the original memories.");
+                      resetCompressionProperties();
+                  } else if (compressionsRemaining <= 0) {
                       const card = getAutoCard(AC.compression.titleKey);
                       if (card === null) {
                           notify(
@@ -9332,8 +9193,13 @@ function MCPV5Create_inner_package() {
               })())
               function postOutputMessage(ratio) {
                   if (permitOutput()) {
+                      const creating = isPendingGeneration();
+                      const job = creating ? AC.generation : AC.compression;
+                      const target = String(creating ? job.workpiece.title : job.vanityTitle)
+                          .replace(/[<>\r\n]/g, " ").slice(0, 80);
+                      const status = creating ? "Creating " : "Summarizing memories for ";
                       CODOMAIN.initialize(
-                          getPrecedingNewlines() + ">>> please select \"continue\" (" + Math.round(ratio * 100) + "%) <<<\n\n"
+                          getPrecedingNewlines() + ">>> please select \"continue\" (" + Math.round(ratio * 100) + "%) — " + status + target + " (attempt " + job.completed + ") <<<\n\n"
                       );
                   }
                   return;
@@ -13158,10 +13024,6 @@ function MCPV5Create_living_characters() {
 
         const owner = resolve(ownerRaw);
         if (!owner) { notes.push("ignored (unresolved owner \"" + (cleanName(ownerRaw) || "?") + "\" -- set PROTAGONIST_NAME to use You/Protagonist)"); continue; }
-        const target = resolve(targetRaw);
-        if (!target) { notes.push("ignored (unresolved target \"" + (cleanName(targetRaw) || "?") + "\" for " + owner + ")"); continue; }
-        if (target === owner) { notes.push("ignored (self-target): " + owner); continue; }
-
         let pressures = null;
         if (listRaw != null) {
           const parts = String(listRaw).split(",");
@@ -13171,22 +13033,30 @@ function MCPV5Create_living_characters() {
             if (pr && list.indexOf(pr) === -1) list.push(pr);
           }
           if (list.length) pressures = list;
-          else notes.push("empty pressure list (global pool used): " + owner + " > " + target);
         }
 
-        if (!rules[owner]) rules[owner] = [];
-        let replaced = false;
-        for (let j = 0; j < rules[owner].length; j++) {
-          if (rules[owner][j].target === target) {
-            rules[owner][j] = { target: target, pressures: pressures, weight: weight };
-            notes.push("duplicate pair (last rule used): " + owner + " > " + target);
-            replaced = true;
-            break;
+        const seenTargets = new Set();
+        for (const label of targetRaw.split(",")) {
+          const target = resolve(label);
+          if (!target) { notes.push("ignored (unresolved target \"" + (cleanName(label) || "?") + "\" for " + owner + ")"); continue; }
+          if (target === owner) { notes.push("ignored (self-target): " + owner); continue; }
+          if (seenTargets.has(target)) continue;
+          seenTargets.add(target);
+          if (listRaw != null && !pressures) notes.push("empty pressure list (global pool used): " + owner + " > " + target);
+          if (!rules[owner]) rules[owner] = [];
+          let replaced = false;
+          for (let j = 0; j < rules[owner].length; j++) {
+            if (rules[owner][j].target === target) {
+              rules[owner][j] = { target: target, pressures: pressures && pressures.slice(), weight: weight };
+              notes.push("duplicate pair (last rule used): " + owner + " > " + target);
+              replaced = true;
+              break;
+            }
           }
-        }
-        if (!replaced) {
-          rules[owner].push({ target: target, pressures: pressures, weight: weight });
-          count++;
+          if (!replaced) {
+            rules[owner].push({ target: target, pressures: pressures && pressures.slice(), weight: weight });
+            count++;
+          }
         }
       }
       while (notes.length > 12) notes.pop();
@@ -13262,7 +13132,13 @@ function MCPV5Create_living_characters() {
         for (let i = 0; i < rules.length; i++) {
           if (pool.indexOf(rules[i].target) !== -1) pairs.push([rules[i].target, rules[i].weight || 1]);
         }
-        return pairs.length ? weightedChoice(pairs) : "";
+        const target = pairs.length ? weightedChoice(pairs) : "";
+        if (target && MCPV5Root().settings.diagnostics === true) {
+          const rule = ruleFor(actor, target);
+          MCPV5RecordDiagnostic("lc-relationship-selection", actor + " > " + target +
+            (rule && rule.pressures ? " = " + rule.pressures.join(", ").slice(0, 100) : ""));
+        }
+        return target;
       }
       const protagInPool = !!p && pool.indexOf(p) !== -1;
 
@@ -13442,7 +13318,10 @@ function MCPV5Create_living_characters() {
       removeStoryCardByKeys(wasEvent ? CFG.EVENT_BUCKET_KEY : storyCardIdToken(bucket.owner));
     }
 
-    function pickSeedPair(pool, mode, scene, p) {
+    function pickSeedPair(pool, mode, scene, p, recentOwner) {
+      function chooseOwner(eligible) {
+        return choose(MCPV5PreferFreshSpotlight(eligible, recentOwner));
+      }
       if (!pool || !pool.length) return null;
       if (mode === "strict" || mode === "hybrid") {
         const sceneNPCs = unique(npcRoster()).filter(function(n) { return n !== p && scene.indexOf(n) !== -1; });
@@ -13451,10 +13330,11 @@ function MCPV5Create_living_characters() {
 
           const anchorCanOwn = pool.indexOf(anchor) !== -1 && hasLegalRuleTarget(anchor);
           const otherOwners = pool.filter(function(n) { return n !== anchor && canTarget(n, anchor); });
-          const anchorAsOwner = anchorCanOwn && (LC.protagonistInvolvement === "always" || otherOwners.length === 0 || Math.random() < 0.5);
+          const anchorAsOwner = anchorCanOwn && (!otherOwners.length || anchor !== recentOwner ||
+            otherOwners.every(name => name === recentOwner)) && (LC.protagonistInvolvement === "always" || otherOwners.length === 0 || Math.random() < 0.5);
           let actor = null, target = null;
           if (anchorAsOwner) { actor = anchor; target = chooseTarget(actor); }
-          else if (otherOwners.length) { target = anchor; actor = choose(otherOwners); }
+          else if (otherOwners.length) { target = anchor; actor = chooseOwner(otherOwners); }
           else if (anchorCanOwn) { actor = anchor; target = chooseTarget(actor); }
           if (actor && target) return { actor: actor, target: target, seedSource: "sceneActors" };
         }
@@ -13463,7 +13343,7 @@ function MCPV5Create_living_characters() {
       }
       const seedable = pool.filter(hasLegalRuleTarget);
       if (!seedable.length) return null;
-      const actor = choose(seedable);
+      const actor = chooseOwner(seedable);
       const target = chooseTarget(actor);
       if (!target) return null;
       return { actor: actor, target: target, seedSource: "fullRoster" };
@@ -13528,7 +13408,10 @@ function MCPV5Create_living_characters() {
         }
 
         const pool = (seat === "relationship") ? ruledPool : randomPool;
-        const pick = pickSeedPair(pool, mode, scene, p);
+        const spotlight = cg.lastSpotlight;
+        const recentOwner = spotlight && Number.isFinite(spotlight.turn) &&
+          cg.turn >= spotlight.turn && cg.turn - spotlight.turn <= 6 ? spotlight.actor : "";
+        const pick = pickSeedPair(pool, mode, scene, p, recentOwner);
         if (!pick) continue;
 
         const actor = pick.actor, target = pick.target, seedSource = pick.seedSource;
@@ -13573,6 +13456,7 @@ function MCPV5Create_living_characters() {
         if (cg.seedRule) cg.seedReason += " | " + cg.seedRule;
 
         cg.pendingSeed = seed;
+        cg.lastSpotlight = { actor: actor.slice(0, 120), turn: cg.turn };
         cg.lastSeedAttemptTurn = cg.turn;
         cg.seedCycleIndex = (idx + 1) % cycle.length;
         cg.lastRoll = "LIFE CARD " + actor + " -> " + target + " [" + pressure + "/" + intensity + "]";
@@ -16429,7 +16313,8 @@ function MCPV5Create_true_auto_stats() {
 
       📐 Scaling & Calculations
 
-      - 🧠 Mana scales with INTL.
+      - 🧠 Mana scales with INT (formerly INTL).
+      - ⚡ EN is Energy (Stamina). STR, DEX, VIT, END, WIL, and WIS are editable attributes; they do not change the original formulas.
       - 🛡️ X DEF = X/2 % damage reduction. DEF above 100 reduces damage by an extra 0.01% per 10 points.
       - 🍀 Each point in LCK gives a 1% chance of a lucky boost.
       >>
@@ -18008,6 +17893,10 @@ function MCPV5Create_true_auto_stats() {
     }
   }
 
+  const tasExtraAttributes = ["str", "dex", "vit", "end", "wil", "wis"];
+  function tasAttributeCap(key) {
+    return "max" + key[0].toUpperCase() + key.slice(1);
+  }
   function storeStatsToSC() {
     state.playerList.forEach(plr => {
 
@@ -18025,14 +17914,19 @@ function MCPV5Create_true_auto_stats() {
 
           statName = key.substring(3).toUpperCase();
 
-          statFormatPart = `${statName}: ${state.players[plr].stats[statName.toLowerCase()]}/${state.players[plr].stats[key]}\n`;
+          statFormatPart = `${statName === "EP" ? "EN" : statName === "INTL" ? "INT" : statName}: ${state.players[plr].stats[statName.toLowerCase()]}/${state.players[plr].stats[key]}\n`;
         }
 
         formatForSC.push(statFormatPart);
       });
-
+      const stats = state.players[plr].stats;
+      for (const attr of tasExtraAttributes) {
+        const cap = tasAttributeCap(attr);
+        if (!Number.isFinite(stats[cap])) stats[cap] = Math.max(1, Number(stats.maxLvl) || 1);
+        if (!Number.isFinite(stats[attr])) stats[attr] = 1;
+        formatForSC.push(`${attr.toUpperCase()}: ${stats[attr]}/${stats[cap]}\n`);
+      }
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
-
       statSC.entry = String(formatForSC).replace(/,/g, '');
 
       if (statSC.description.length > 3000) {
@@ -18057,6 +17951,7 @@ function MCPV5Create_true_auto_stats() {
         spd: 'maxSpd',
         lck: 'maxLck',
         intl: 'maxIntl',
+        ...Object.fromEntries(tasExtraAttributes.map(key => [key, tasAttributeCap(key)])),
       };
 
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
@@ -18091,11 +17986,13 @@ function MCPV5Create_true_auto_stats() {
         const match = entry.trim().match(/^([a-zA-Z]+)\s*:\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
 
         if (match) {
-          const statName = match[1].toLowerCase();
+          const label = match[1].toLowerCase();
+          const statName = label === "en" ? "ep" : label === "int" ? "intl" : label;
           const statValue = Number(match[2]);
           const maxStatValue = Number(match[3]);
 
-          if (statMappings[statName]) {
+          if (Object.prototype.hasOwnProperty.call(statMappings, statName) &&
+              Number.isFinite(statValue) && Number.isFinite(maxStatValue)) {
 
             state.players[plr].stats[statName] = statValue ?? state.players[plr].stats[statName];
             state.players[plr].stats[statMappings[statName]] = maxStatValue ?? state.players[plr].stats[statMappings[statName]];
@@ -21184,19 +21081,18 @@ function MCPV5Create_story_arc_engine() {
   function saveStoryArc(text){
     if(state.saveOutput){
 
-      outputtedArc = text;
+      const arcItems = [];
+      for (const line of String(text).slice(0, 12000).split(/\r?\n/)) {
+        const item = /^\s*(?:[-*]\s+)?(?:\*\*)?(\d{1,2})[.)](?:\*\*)?\s+(.+?)\s*$/.exec(line);
+        if (!item) continue;
+        if (Number(item[1]) !== arcItems.length + 1 || !item[2].trim()) break;
+        arcItems.push(item[1] + ". " + item[2]);
+        if (arcItems.length === 30) break;
+      }
+      outputtedArc = arcItems.join("\n");
 
-      log("Before: ", outputtedArc);
-      outputtedArc = outputtedArc.replace(/\n?\d+\.\s*$/, '');
-      outputtedArc = outputtedArc
-        .split('\n')
-        .filter(line => /^\d+\.\s/.test(line.trim()))
-        .join('\n');
-      log("After: ", outputtedArc);
-
-      if (!/[89]/.test(outputtedArc)) {
-
-        if (state.attemptCounter == state.attemptLimit) {
+      if (arcItems.length < 8 || outputtedArc.length > 1950) {
+        if (state.attemptCounter >= state.attemptLimit) {
           state.saveOutput = false;
 
           state.attemptCounter = 0;
@@ -21210,7 +21106,7 @@ function MCPV5Create_story_arc_engine() {
 
           state.attemptCounter += 1;
 
-          text = `\n<< ⏳ Generating Story Arc (Attempt ${state.attemptCounter}/${state.attemptLimit})... Click 'Continue' or type '/stop'. >>`;
+          text = `\n<< ⏳ Generating Story Arc (Attempt ${state.attemptCounter}/${state.attemptLimit}): expected at least 8 numbered beats in order within the card limit. Click 'Continue' or type '/stop'. >>`;
         }
       }
 
@@ -21455,7 +21351,8 @@ function MCPV5Create_narrative_governor() {
             state.storyTemperature = state.initialTemperatureValue
           }
           const lowerText = text.toLowerCase()
-          const words = lowerText.split(/\s+/)
+          const dialogue = /["“][^"”]*["”]/g;
+          const words = lowerText.replace(dialogue, " ").split(/\s+/)
           let conflictCount = 0
           let calmingCount = 0
 
@@ -21696,7 +21593,14 @@ function MCPV5Create_narrative_governor() {
     if (tab === "context") {
       return (function () {
         const modifier = (text) => {
-          text = text + "\n\n" + (typeof state.originalAuthorsNote === "string" ? state.originalAuthorsNote : "")
+          const note = typeof state.originalAuthorsNote === "string" ? state.originalAuthorsNote : "";
+          const hasArcEngine = MCPV5_ACTIVE_PLAN && MCPV5_ACTIVE_PLAN.effective.story_arc_engine === true;
+          const guidance = hasArcEngine
+            ? "Current scene only: keep tension " +
+              (state.storyTemperature >= 8 ? "high" : state.storyTemperature >= 4 ? "moderate" : "low") +
+              ". Let the existing story arc guide larger plot changes."
+            : note;
+          text = text + "\n\n" + guidance
           return { text }
         }
 
@@ -21756,7 +21660,8 @@ function MCPV5Create_narrative_governor() {
 
         const modifier = (text) => {
           const lowerText = text.toLowerCase()
-          const words = lowerText.split(/\s+/)
+          const dialogue = /["“][^"”]*["”]/g;
+          const words = lowerText.replace(dialogue, " ").split(/\s+/)
           let conflictCount = 0
           let calmingCount = 0
 
@@ -23919,9 +23824,9 @@ const CHARACTER_CONTINUITY_STABLE_SETTINGS = {
 // so a failure there cannot be reported through the Status card -- but it must
 // still not break the player's turn. Returning the platform's own text is a valid
 // result for every hook, and is trivially append-only for contextAppend.
-function CharacterContinuity(hook, incomingText) {
+function CharacterContinuity(hook, incomingText, filterStory) {
   try {
-    return characterContinuityRun(hook, incomingText);
+    return characterContinuityRun(hook, incomingText, filterStory);
   } catch (error) {
     try {
       log("[Character Continuity Stable] The " + hook + " hook failed before it could report: "
@@ -23933,7 +23838,7 @@ function CharacterContinuity(hook, incomingText) {
   }
 }
 
-function characterContinuityRun(hook, incomingText) {
+function characterContinuityRun(hook, incomingText, filterStory) {
   const settings = CHARACTER_CONTINUITY_STABLE_SETTINGS;
   const originalText = incomingText;
   const appendOnlyContext = hook === "contextAppend";
@@ -43458,8 +43363,11 @@ function characterContinuityRun(hook, incomingText) {
     CC.last.protocol = cleanupNotes.length && parsed.candidate
       ? cleanupNotes.join(" ") + " " + protocolSummary
       : protocolSummary;
-    const story = parsed.story.trim();
-    if (!hasTerminallyPunctuatedStory(story)) {
+    const parsedStory = parsed.story.trim();
+    const story = parsedStory && typeof filterStory === "function"
+      ? filterStory(parsedStory).trim()
+      : parsedStory;
+    if (!hasTerminallyPunctuatedStory(parsedStory) || !hasTerminallyPunctuatedStory(story)) {
       const owner = characters.find(character => character.key === plan.ownerKey) || null;
 
       CC.recoveryPending = true;
@@ -44707,7 +44615,7 @@ function characterContinuityRun(hook, incomingText) {
   return finish(originalText);
 }
 
-  function run(tab) {
+  function run(tab, filterStory) {
     const currentText = MCPV5SafeText(globalThis.text, "\u200B");
     if (tab === "input") {
       return { text: CharacterContinuity("input", currentText) };
@@ -44723,7 +44631,7 @@ function characterContinuityRun(hook, incomingText) {
       return { text: CharacterContinuity(hookName, currentText) };
     }
     if (tab === "output") {
-      return { text: CharacterContinuity("output", currentText) };
+      return { text: CharacterContinuity("output", currentText, filterStory) };
     }
     return { text: currentText };
   }
@@ -45957,7 +45865,8 @@ const RM = (function () {
   function catchUp(s, hook) {
     const n = turnsPassed(s, hook);
     if (n <= 0) return 0;
-    tick(s, n);
+    const changes = tick(s, n);
+    if (changes.length) s.lastAdjustment = n > 1 ? "catch-up drift (" + n + " turns)" : "turn drift";
     announce(s);
     return n;
   }
@@ -45987,6 +45896,7 @@ const RM = (function () {
         if (r && r.before !== r.after) changes.push(r);
       }
     }
+    if (changes.length) s.lastAdjustment = phase + " trigger";
     return changes;
   }
 
@@ -46260,7 +46170,11 @@ const RM = (function () {
     const cmd = parts[0].toLowerCase();
 
     if (cmd === "help") return helpText();
-    if (cmd === "status") return statusBlock(s) || "No resources are being tracked.";
+    if (cmd === "status") {
+      const block = statusBlock(s);
+      const reason = typeof s.lastAdjustment === "string" ? s.lastAdjustment.slice(0, 64) : "";
+      return block ? block + (reason ? "\n\nLatest adjustment: " + reason : "") : "No resources are being tracked.";
+    }
 
     if (cmd === "set") {
       const key = parts[1];
@@ -47714,6 +47628,13 @@ function StoryCardExtensionContext(text) {
 
     if (config.contextRecallEnabled && regularCards.length > 0) {
         let candidates = selectRecallCandidates(text, allCards, regularCards, config);
+        const normalizeRecall = value => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+        const existingRecall = normalizeRecall(text);
+        candidates = candidates.filter(candidate => {
+            if (candidate.type !== "single" || !candidate.card) return true;
+            const entry = normalizeRecall(candidate.card.entry);
+            return entry.length < 24 || !existingRecall.includes(entry);
+        });
 
         let ancestorTitles = new Set();
         for (let cand of candidates) {
@@ -47854,6 +47775,13 @@ function StoryCardExtensionContext(text) {
         newText = newText + '\n\n' + block;
     }
 
+    const eventHost = state;
+    const eventAction = Number.isSafeInteger(info && info.actionCount) ? info.actionCount : -1;
+    const recentEvents = Array.isArray(eventHost.sceEventCooldown)
+        ? eventHost.sceEventCooldown.filter(item => item && typeof item.title === "string" &&
+            item.at <= eventAction && eventAction - item.at <= 3).slice(-12)
+        : [];
+    eventHost.sceEventCooldown = recentEvents;
     if (state.currentEvent.duration > 0) {
         if (state.currentEvent.text) {
             let eventTitle = state.currentEvent.title;
@@ -47865,6 +47793,10 @@ function StoryCardExtensionContext(text) {
         if (!state.isRetry) {
             state.currentEvent.duration--;
             if (state.currentEvent.duration === 0) {
+                if (eventAction >= 0 && state.currentEvent.title) {
+                    recentEvents.push({ title: String(state.currentEvent.title).slice(0, 160), at: eventAction });
+                    if (recentEvents.length > 12) recentEvents.shift();
+                }
                 state.currentEvent = { text: null, title: null, duration: 0 };
                 config.currentEventTitle = "";
                 config.currentEventDurationLeft = 0;
@@ -47875,10 +47807,14 @@ function StoryCardExtensionContext(text) {
             }
         }
     } else {
-        if (eventCards.length > 0 && Math.random() < config.randomEventChance) {
+        const eligibleEvents = eventCards.filter(card => !recentEvents.some(
+            item => item.title === String(getCardTitle(card)).slice(0, 160)));
+        const alreadyRolled = eventAction >= 0 && state.lastEventRollAction === eventAction;
+        if (eligibleEvents.length > 0 && !alreadyRolled && eventAction >= 0) state.lastEventRollAction = eventAction;
+        if (!alreadyRolled && eligibleEvents.length > 0 && Math.random() < config.randomEventChance) {
             let selectedCard = config.useEventWeights
-                ? selectEventByWeight(eventCards)
-                : eventCards[Math.floor(Math.random() * eventCards.length)];
+                ? selectEventByWeight(eligibleEvents)
+                : eligibleEvents[Math.floor(Math.random() * eligibleEvents.length)];
             if (selectedCard) {
                 let title = getCardTitle(selectedCard);
                 if (!usedCardTitles.has(title)) {
@@ -48599,7 +48535,7 @@ function MCPV5Create_ar() {
       let working = original
       let exactRemoved = 0
 
-      if (Array.isArray(history)) {
+      if (Array.isArray(history) && !/["“”]/.test(original)) {
         for (let i = history.length - 1; i >= 0; i--) {
           const action = history[i]
 
@@ -48632,6 +48568,7 @@ function MCPV5Create_ar() {
 
       for (const segment of segments) {
         segment.pieces = splitPieces(segment.text)
+        if (segment.kind === "quote") continue
 
         for (const piece of segment.pieces) {
           const candidate = piece.raw.trim()
@@ -49184,7 +49121,7 @@ function MCPV5Create_usc_e() {
       const seenAggressive = new Set();
       const seenPrecise = new Set();
 
-      for (const phrase of INTERNAL_CLICHE_DEFAULTS.aggressive.concat(userConfig.aggressive)) {
+      for (const phrase of userConfig.aggressive) {
         const value = String(phrase || "").trim();
         const key = value.toLowerCase();
 
@@ -49194,7 +49131,7 @@ function MCPV5Create_usc_e() {
         aggressive.push(value);
       }
 
-      for (const phrase of INTERNAL_CLICHE_DEFAULTS.precise.concat(userConfig.precise)) {
+      for (const phrase of INTERNAL_CLICHE_DEFAULTS.precise.concat(INTERNAL_CLICHE_DEFAULTS.aggressive, userConfig.precise)) {
         const value = String(phrase || "").trim();
         const key = value.toLowerCase();
 
@@ -49256,6 +49193,10 @@ function MCPV5Create_usc_e() {
 
       result = result.replace(/\s+([,.;!?])/g, "$1");
 
+      if (result !== text && MCPV5Root().settings.diagnostics === true) {
+        MCPV5RecordDiagnostic("usc-e-cleanup", "Output changed by " +
+          Math.max(0, text.length - result.length) + " characters.");
+      }
       return result;
     } catch (e) {
       log("delete_cliches error:", e);
@@ -49345,18 +49286,24 @@ function SLOWBURN(type, textString = "") {
   // 3. SCORING LOGIC (Only runs during Output)
   // Scoring only triggers if 'textString' is provided (the AI's response)
   if (type === "output" && textString) {
-    const aiText = textString.toLowerCase();
-    
-    // Interaction Filter: Only score if the NPC is talking to the player
-    if (aiText.includes("you") || aiText.includes("your")) {
+    const companion = escapeSlowBurnRegExp(state.npc.name);
+    const subject = new RegExp("^(?:then\\s+)?" + companion + "(?![\\p{L}\\p{N}_'-])", "iu");
+    const relevant = (String(textString).slice(0, 10000).match(/[^.!?\n]+/g) || [])
+      .map(sentence => sentence.trim()).filter(sentence =>
+        subject.test(sentence) && /\b(?:you|your)\b/i.test(sentence) &&
+        !/\b(?:not|never|no|cannot|without|could|would|might)\b|n['’]t\b/i.test(sentence));
+    if (relevant.length) {
       const pos = ["nod", "agree", "thank", "polite", "helpful", "share", "listen", "patience", "respect", "kindly", "calm", "pleasant", "thoughtful", "admire", "honest", "cooperate", "assist", "welcome", "comfort", "reassure", "friendly", "softly", "laugh", "chuckled", "curious", "interest", "civility", "courteous", "stable", "blush", "smile", "yield", "soften", "lean", "whisper", "tremble", "warm", "accept", "nuzzle", "giggle", "sigh", "purr", "moan", "relax", "melt", "cuddle", "hug", "kiss", "blossom", "trust", "eager", "comply", "obey", "shiver", "stroke", "caress", "devotion", "flutter", "glow", "radiate"];
       const neg = ["recoil", "cold", "stern", "angry", "refuse", "snap", "distant", "harsh", "glare", "tense", "shove", "push", "slap", "hiss", "growl", "sneer", "scowl", "scoff", "resist", "struggle", "flinch", "avoid", "ignore", "disdain", "disgust", "revolt", "cringe", "stiffen", "withdraw", "shout", "yell", "threaten", "spite", "bitter", "rude", "insult"];
 
       let change = 0;
       // Unique Word Check: .includes() only checks if the word exists once in the string,
       // preventing "sigh sigh sigh" from being counted multiple times.
-      pos.forEach(word => { if (aiText.includes(word)) change += gainRate; });
-      neg.forEach(word => { if (aiText.includes(word)) change -= drainRate; });
+      const words = new Set((relevant.join(" ").toLowerCase().match(/\b[a-z]+\b/g) || []));
+      const used = word => words.has(word) || words.has(word + "s") ||
+        words.has(word + "ed") || (word.endsWith("e") && words.has(word + "d"));
+      pos.forEach(word => { if (used(word) && Number.isFinite(gainRate)) change += gainRate; });
+      neg.forEach(word => { if (used(word) && Number.isFinite(drainRate)) change -= drainRate; });
       
       state.npc.level = Math.max(0, Math.min(100, state.npc.level + change));
     }
@@ -49684,6 +49631,604 @@ function MCPV5Create_coin_flip() {
   return { run };
 }
 
+// LivingNarratives Information Firewall, adapted for MMS hook isolation.
+function MCPV5Create_information_firewall() {
+  var IF_CONFIG = {
+    MAX_CONVERSATIONS: 60,
+    MAX_FACTS: 80,
+    MAX_NAMES: 24,
+    MAX_FACT_TEXT: 130,
+    MAX_CONVERSATION_TEXT: 180,
+    MAX_PACKET_CHARS: 2600,
+    PLAYER_NAME: "Player",
+    REPAIR_EMPTY_OUTPUT: "The scene continues without anyone bringing that up.",
+    DEBUG: false
+  };
+
+  var STOP_NAMES = {
+    You: true, Your: true, Yours: true, The: true, A: true, An: true, And: true, But: true,
+    Or: true, He: true, She: true, They: true, Them: true, His: true, Her: true, Their: true,
+    It: true, This: true, That: true, Then: true, There: true, Here: true, In: true, On: true,
+    At: true, To: true, From: true, With: true, Into: true, Through: true, Chapter: true,
+    Story: true, Note: true, System: true, Context: true, Information: true, Firewall: true,
+    I: true, Me: true, My: true, Mine: true, We: true, Us: true, Our: true
+  };
+
+  function getStateRoot() {
+    if (typeof state === "undefined" || !state) return null;
+    if (!state.informationFirewall || typeof state.informationFirewall !== "object" ||
+        Array.isArray(state.informationFirewall)) {
+      state.informationFirewall = {
+        version: 1,
+        turn: 0,
+        location: "unknown location",
+        present: [],
+        knownCharacters: [],
+        conversations: [],
+        facts: [],
+        recentRepairs: []
+      };
+    }
+    if (state.informationFirewall.witnessSchema !== 2) {
+      Object.assign(state.informationFirewall, {
+        witnessSchema: 2, present: [], conversations: [], facts: [], recentRepairs: []
+      });
+    }
+    if (!Array.isArray(state.informationFirewall.conversations)) state.informationFirewall.conversations = [];
+    else if (state.informationFirewall.conversations.length > 60)
+      state.informationFirewall.conversations = state.informationFirewall.conversations.slice(-60);
+    if (!Array.isArray(state.informationFirewall.facts)) state.informationFirewall.facts = [];
+    else if (state.informationFirewall.facts.length > 80)
+      state.informationFirewall.facts = state.informationFirewall.facts.slice(-80);
+    if (!Array.isArray(state.informationFirewall.present)) state.informationFirewall.present = [];
+    else if (state.informationFirewall.present.length > 24)
+      state.informationFirewall.present = state.informationFirewall.present.slice(-24);
+    if (!Array.isArray(state.informationFirewall.knownCharacters)) state.informationFirewall.knownCharacters = [];
+    else if (state.informationFirewall.knownCharacters.length > 24)
+      state.informationFirewall.knownCharacters = state.informationFirewall.knownCharacters.slice(-24);
+    if (!Array.isArray(state.informationFirewall.recentRepairs)) state.informationFirewall.recentRepairs = [];
+    else if (state.informationFirewall.recentRepairs.length > 8)
+      state.informationFirewall.recentRepairs = state.informationFirewall.recentRepairs.slice(-8);
+    if (!Number.isSafeInteger(state.informationFirewall.turn)) state.informationFirewall.turn = 0;
+    return state.informationFirewall;
+  }
+
+  function clampText(value, maxLen) {
+    var clean = String(value || "").replace(/\s+/g, " ").trim();
+    if (clean.length <= maxLen) return clean;
+    return clean.slice(0, maxLen - 1).replace(/\s+\S*$/, "") + "...";
+  }
+
+  function uniq(list) {
+    var seen = Object.create(null);
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var name = normalizeName(list[i]);
+      if (!name || seen[name.toLowerCase()]) continue;
+      seen[name.toLowerCase()] = true;
+      out.push(name);
+    }
+    return out;
+  }
+
+  function normalizeName(name) {
+    name = String(name || "").replace(/[^A-Za-z0-9 _'-]/g, "").replace(/\s+/g, " ").trim();
+    if (!name || STOP_NAMES[name]) return "";
+    if (name.length < 2 || name.length > 32) return "";
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  function addKnownCharacters(mem, names) {
+    mem.knownCharacters = uniq((mem.knownCharacters || []).concat(names || [])).slice(0, IF_CONFIG.MAX_NAMES);
+  }
+
+  function splitRosterNames(value) {
+    var clean = String(value || "").replace(/\band\b/gi, ",");
+    var parts = clean.split(/[,;\n]/);
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var name = normalizeName(parts[i]);
+      if (name) out.push(name);
+    }
+    return uniq(out);
+  }
+
+  function extractRosterMarkers(textValue) {
+    var textBlock = String(textValue || "");
+    var out = [];
+    var patterns = [
+      /\[(?:roster|cast|characters|npcs)\s*:\s*([^\]]{2,240})\]/gi,
+      /\bIF_ROSTER\s*:\s*([^\n]{2,240})/gi,
+      /\b(?:Characters|Cast|NPCs)\s*:\s*([^\n]{2,240})/g
+    ];
+    for (var p = 0; p < patterns.length; p++) {
+      var match;
+      while ((match = patterns[p].exec(textBlock))) out = out.concat(splitRosterNames(match[1]));
+    }
+    return uniq(out);
+  }
+
+  function extractCharacterCardName(card) {
+    var out = [];
+    var entry = String((card && card.entry) || "");
+    var keys = String((card && card.keys) || "");
+    var match = /\b(?:Name|Character|NPC)\s*:\s*([A-Z][A-Za-z0-9 _'-]{1,31})/i.exec(entry);
+    if (match) out.push(match[1]);
+    if (keys) out = out.concat(splitRosterNames(keys));
+    return uniq(out);
+  }
+
+  function refreshKnownCharacters(mem) {
+    var found = [];
+    if (typeof storyCards !== "undefined" && storyCards && storyCards.length) {
+      var cards = storyCards.slice(0, 512);
+      for (var i = 0; i < cards.length; i++) {
+        var card = cards[i] || {};
+        var type = String(card.type || "");
+        var entry = String(card.entry || "").slice(0, 5000);
+        found = found.concat(extractRosterMarkers(entry));
+        if (/character|npc|cast|roster/i.test(type)) found = found.concat(extractCharacterCardName(card));
+      }
+    }
+    if (typeof info !== "undefined" && info && info.characterNames && info.characterNames.length) {
+      found = found.concat(info.characterNames);
+    }
+    if (found.length) addKnownCharacters(mem, found);
+  }
+
+  function addPresent(mem, names) {
+    mem.present = uniq((mem.present || []).concat(names || [])).slice(0, IF_CONFIG.MAX_NAMES);
+  }
+
+  function setPresent(mem, names) {
+    mem.present = uniq(names || []).slice(0, IF_CONFIG.MAX_NAMES);
+  }
+
+  function extractNames(textValue, mem) {
+    var textBlock = String(textValue || "");
+    var out = [];
+    var roster = (mem && mem.knownCharacters) || [];
+    for (var i = 0; i < roster.length; i++) {
+      var name = normalizeName(roster[i]);
+      if (!name) continue;
+      var re = new RegExp("(^|[^A-Za-z0-9_'-])" + escapeRegExp(name) + "([^A-Za-z0-9_'-]|$)", "i");
+      if (re.test(textBlock)) out.push(name);
+    }
+    return uniq(out);
+  }
+
+  function extractDirectRecipients(value, mem) {
+    const line = String(value || "").trim().replace(/^>\s*/, "");
+    return extractNames(line, mem).filter(name => new RegExp(
+      "^(?:you\\s+)?(?:tell|ask|say to|whisper to|explain to|speak to)\\s+" +
+      escapeRegExp(name) + "(?=\\s|[,:\"“.!?]|$)", "i").test(line));
+  }
+
+  function stripInputWrapper(inputText) {
+    var t = String(inputText || "").trim();
+    t = t.replace(/^>\s*/, "");
+    t = t.replace(/^[A-Z][A-Za-z0-9 _'-]*\s+says?,\s*/i, "");
+    t = t.replace(/^You\s+says?,\s*/i, "");
+    t = t.replace(/^You\s+/i, "");
+    t = t.replace(/^["']|["']$/g, "");
+    t = t.replace(/[.!?]\s*$/g, "");
+    return t.trim();
+  }
+
+  function detectLocation(inputText, priorLocation) {
+    var t = stripInputWrapper(inputText);
+    var patterns = [
+      /\b(?:go|walk|head|move|return|enter|step|come)\s+(?:back\s+)?(?:to|into|inside|in)\s+(?:the\s+)?([a-z][a-z0-9 '-]{2,40})\b/i,
+      /\b(?:arrive|arrives)\s+(?:at|in)\s+(?:the\s+)?([a-z][a-z0-9 '-]{2,40})\b/i,
+      /\b(?:in|inside|at)\s+(?:the\s+)?([a-z][a-z0-9 '-]{2,40})\b/i
+    ];
+    for (var i = 0; i < patterns.length; i++) {
+      var match = patterns[i].exec(t);
+      if (match) {
+        var loc = match[1].replace(/\b(?:and|where|then|with|alone|again)\b.*$/i, "").trim();
+        loc = loc.replace(/[,.!?].*$/, "").trim();
+        if (loc) return loc;
+      }
+    }
+    return priorLocation || "unknown location";
+  }
+
+  function looksLikeMovement(inputText) {
+    var t = stripInputWrapper(inputText);
+    return /\b(go|walk|head|move|return|enter|step|come|leave|exit|arrive)\b/i.test(t);
+  }
+
+  function compactTopic(topic) {
+    topic = String(topic || "").toLowerCase().replace(/[^a-z0-9 '-]/g, " ").replace(/\s+/g, " ").trim();
+    topic = topic.replace(/^(a|an|the|some|any|that|this|those|these)\s+/i, "");
+    return clampText(topic, 48);
+  }
+
+  function extractTopicTokens(textValue) {
+    var t = String(textValue || "").toLowerCase().replace(/[^a-z0-9 '-]/g, " ");
+    var raw = t.replace(/\s+/g, " ").split(" ");
+    var stop = {
+      the: true, and: true, but: true, you: true, your: true, yours: true, about: true,
+      "with": true, from: true, into: true, that: true, "this": true, these: true, those: true,
+      said: true, says: true, tell: true, told: true, telling: true, asked: true, asks: true,
+      like: true, likes: true, liked: true, love: true, loves: true, hated: true, hate: true,
+      know: true, knows: true, knew: true, heard: true, hear: true, room: true, hall: true,
+      "break": true, mess: true, then: true, there: true, here: true, have: true, has: true,
+      was: true, were: true, are: true, "for": true, she: true, her: true, his: true, him: true,
+      they: true, them: true, player: true
+    };
+    var out = [];
+    var seen = Object.create(null);
+    for (var i = 0; i < raw.length; i++) {
+      var word = raw[i];
+      if (!word || word.length < 4 || stop[word] || seen[word]) continue;
+      seen[word] = true;
+      out.push(word);
+      if (out.length >= 10) break;
+    }
+    return out;
+  }
+
+  function extractImportantFacts(inputText) {
+    var t = stripInputWrapper(inputText);
+    var facts = [];
+    var patterns = [
+      { re: /\[(?:fact|important|if_fact)\s*:\s*([^\]]{2,140})\]/gi, label: "marked important fact" },
+      { re: /\bimportant fact\s*:\s*([^.!?\n]{2,140})/gi, label: "marked important fact" },
+      { re: /\bremember this\s*:\s*([^.!?\n]{2,140})/gi, label: "marked important fact" }
+    ];
+    for (var p = 0; p < patterns.length; p++) {
+      var match;
+      while ((match = patterns[p].re.exec(t))) {
+        var raw = match[1];
+        raw = raw.replace(/\b(?:to|with|around|near)\s+[A-Z][a-z]+.*$/g, "").trim();
+        var topic = compactTopic(raw);
+        if (!topic || topic.length < 2) continue;
+        facts.push({
+          topic: topic,
+          label: patterns[p].label,
+          text: clampText(t, IF_CONFIG.MAX_FACT_TEXT)
+        });
+      }
+    }
+    return facts;
+  }
+
+  function addConversation(mem, participants, textValue, source) {
+    participants = uniq((participants || []).concat([IF_CONFIG.PLAYER_NAME]));
+    var clean = clampText(stripInputWrapper(textValue), IF_CONFIG.MAX_CONVERSATION_TEXT);
+    if (!clean) return;
+    var topics = extractTopicTokens(clean);
+    mem.conversations.push({
+      id: "conv_" + mem.turn + "_" + (mem.conversations.length + 1),
+      location: mem.location || "unknown location",
+      participants: participants,
+      text: clean,
+      topics: topics,
+      source: source || "scene conversation",
+      created: mem.turn,
+      lastSeen: mem.turn
+    });
+    while (mem.conversations.length > IF_CONFIG.MAX_CONVERSATIONS) mem.conversations.shift();
+  }
+
+  function factMatchesText(fact, textValue) {
+    var t = String(textValue || "").toLowerCase();
+    var topic = String(fact.topic || "").toLowerCase();
+    if (!topic) return false;
+    if (t.indexOf(topic) !== -1) return true;
+    var words = topic.split(/\s+/).filter(function (w) { return w.length >= 4; });
+    for (var i = 0; i < words.length; i++) {
+      if (new RegExp("\\b" + escapeRegExp(words[i]) + "\\b", "i").test(t)) return true;
+    }
+    return false;
+  }
+
+  function nameInList(name, list) {
+    for (var i = 0; i < (list || []).length; i++) {
+      if (list[i] === name) return true;
+    }
+    return false;
+  }
+
+  function conversationMatchesText(conversation, textValue) {
+    var t = String(textValue || "").toLowerCase();
+    var topics = conversation.topics || [];
+    for (var i = 0; i < topics.length; i++) {
+      if (new RegExp("\\b" + escapeRegExp(topics[i]) + "\\b", "i").test(t)) return true;
+    }
+    var clean = String(conversation.text || "").toLowerCase();
+    if (clean && clean.length > 8 && t.indexOf(clean) !== -1) return true;
+    return false;
+  }
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function addFact(mem, fact, knowers, source) {
+    knowers = uniq((knowers || []).concat([IF_CONFIG.PLAYER_NAME]));
+    for (var i = 0; i < mem.facts.length; i++) {
+      if (mem.facts[i].topic === fact.topic) {
+        mem.facts[i].knowers = uniq((mem.facts[i].knowers || []).concat(knowers));
+        mem.facts[i].lastSeen = mem.turn;
+        return;
+      }
+    }
+    mem.facts.push({
+      id: "if_" + mem.turn + "_" + (mem.facts.length + 1),
+      topic: fact.topic,
+      label: fact.label,
+      text: fact.text,
+      location: mem.location || "unknown location",
+      knowers: knowers,
+      source: source || "player statement",
+      created: mem.turn,
+      lastSeen: mem.turn
+    });
+    while (mem.facts.length > IF_CONFIG.MAX_FACTS) mem.facts.shift();
+  }
+
+  function sceneNames(value, mem, entered) {
+    const line = String(value || "").replace(/^>\s*/, "").split(/["“]/, 1)[0].trim();
+    return extractNames(line, mem).filter(name => {
+      const escaped = escapeRegExp(name);
+      return new RegExp(
+        (entered ? "\\bwith\\s+" + escaped + "(?=[\\s,.!?]|$)|" : "") +
+        "^" + escaped + "\\s+(?:arrives?|enters?|joins?|is here|stands nearby)\\b", "i"
+      ).test(line);
+    });
+  }
+
+  function processInput(mem, inputText) {
+    mem.turn += 1;
+    refreshKnownCharacters(mem);
+    const line = String(inputText || "").trim().replace(/^>\s*/, "");
+    const recipients = extractDirectRecipients(line, mem);
+    const moved = /^(?:you\s+)?(?:go|walk|head|move|return|enter|step|come|leave|exit|arrive)\b/i.test(line);
+    if (moved) {
+      const destination = detectLocation(line.split(/["“]/, 1)[0], "");
+      if (destination !== mem.location || /\b(?:leave|exit|alone)\b/i.test(line)) {
+        mem.location = destination;
+        setPresent(mem, sceneNames(line, mem, true));
+      }
+    }
+    addPresent(mem, recipients.concat(sceneNames(line, mem, false)));
+    const witnesses = /^(?:you\s+)?whisper\b/i.test(line)
+      ? recipients : uniq(mem.present.concat(recipients));
+    if (/^(?:you\s+)?(?:say|says|tell|ask|whisper|explain|talk|discuss|mention)\b/i.test(line)) {
+      addConversation(mem, witnesses, inputText, "player conversation");
+    }
+    for (const fact of extractImportantFacts(inputText)) {
+      addFact(mem, fact, witnesses, "player said this in-scene");
+    }
+  }
+
+  function splitSentences(textValue) {
+    return String(textValue || "").match(/[\s\S]+?(?:[.!?]+["”’')\]]*(?=\s|$)|\r?\n|$)/g) || [];
+  }
+
+  function attribution(mem, sentence) {
+    const line = String(sentence || "").trim();
+    const names = extractNames(line, mem).sort((a, b) => b.length - a.length);
+    for (const name of names) {
+      const start = new RegExp("^" + escapeRegExp(name) +
+        "\\s+(?:says?|said|asks?|asked|comments?|remarks?|mentions?|knows?|knew|remembers?|tells?|told|shares?|whispers?|explains?)\\b", "i").exec(line);
+      if (!start) continue;
+      const tail = line.slice(start[0].length);
+      const transfer = /\s(?:tells?|told|shares?|whispers?|explains?|mentions?)$/i.test(start[0]);
+      const recipient = transfer ? names.find(other => other !== name &&
+        new RegExp("^\\s+(?:to\\s+)?" + escapeRegExp(other) +
+          "(?=[\\s,.!?\"“:]|$)", "i").test(tail)) : "";
+      return { name, recipient, tail };
+    }
+    return null;
+  }
+
+  function processOutputScene(mem, outputText) {
+    for (const sentence of splitSentences(outputText).slice(0, 96)) {
+      const line = sentence.trim();
+      addPresent(mem, sceneNames(line, mem, false));
+      mem.present = mem.present.filter(name => !new RegExp(
+        "^" + escapeRegExp(name) + "\\s+(?:leaves?|exits?|walks away)\\b", "i").test(line));
+    }
+  }
+
+  function isUnauthorizedSentence(mem, sentence) {
+    const actor = attribution(mem, sentence);
+    if (!actor) return false;
+    const mentioned = actor.tail.toLowerCase();
+    const matched = mem.facts.filter(item => {
+      const topic = String(item.topic || "").toLowerCase();
+      return topic.length >= 5 && mentioned.includes(topic);
+    }).map(item => [item, "knowers"]).concat(mem.conversations.filter(item => {
+      const topics = (item.topics || []).filter(word => !mem.knownCharacters.some(
+        name => name.toLowerCase().split(" ").includes(word)));
+      let hits = 0;
+      for (const word of topics) {
+        if (new RegExp("\\b" + escapeRegExp(word) + "\\b", "i").test(mentioned) && ++hits >= 2) return true;
+      }
+      return false;
+    }).map(item => [item, "participants"]));
+    const denied = matched.find(([item, field]) => !nameInList(actor.name, item[field]));
+    if (denied) {
+      mem.recentRepairs.push({turn: mem.turn, blockedName: actor.name,
+        topic: denied[0].topic || (denied[0].topics || []).join(", ")});
+      if (mem.recentRepairs.length > 8) mem.recentRepairs.shift();
+      return true;
+    }
+    if (actor.recipient && !/\b(?:not|never|might|could|would)\b/i.test(actor.tail.split(/["“]/,1)[0])) {
+      for (const [item, field] of matched) {
+        item[field] = uniq(item[field].concat(actor.recipient)).slice(0, IF_CONFIG.MAX_NAMES + 1);
+        item.lastSeen = mem.turn;
+      }
+    }
+    return false;
+  }
+
+  function cleanOutput(mem, outputText) {
+    var chunks = splitSentences(outputText);
+    var kept = [];
+    var blocked = false;
+    for (var i = 0; i < chunks.length; i++) {
+      if (i >= 96 || !isUnauthorizedSentence(mem, chunks[i])) kept.push(chunks[i]);
+      else blocked = true;
+    }
+    if (!blocked) return outputText;
+    var cleaned = kept.join("");
+    return MCPV5HasVisibleText(cleaned) ? cleaned : IF_CONFIG.REPAIR_EMPTY_OUTPUT;
+  }
+
+  function knownFactsForName(mem, name) {
+    var out = [];
+    for (var i = 0; i < mem.facts.length; i++) {
+      var fact = mem.facts[i];
+      for (var k = 0; k < fact.knowers.length; k++) {
+        if (fact.knowers[k] === name) {
+          out.push(fact);
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  function unknownRelevantFactsForName(mem, name) {
+    var out = [];
+    for (var i = 0; i < mem.facts.length; i++) {
+      var fact = mem.facts[i];
+      var knows = false;
+      for (var k = 0; k < fact.knowers.length; k++) {
+        if (fact.knowers[k] === name) knows = true;
+      }
+      if (!knows) out.push(fact);
+    }
+    return out;
+  }
+
+  function conversationsForName(mem, name, shouldKnow) {
+    var out = [];
+    for (var i = 0; i < mem.conversations.length; i++) {
+      var conversation = mem.conversations[i];
+      var knows = nameInList(name, conversation.participants);
+      if ((shouldKnow && knows) || (!shouldKnow && !knows)) out.push(conversation);
+    }
+    return out;
+  }
+
+  function buildPacket(mem, budget) {
+    refreshKnownCharacters(mem);
+    var present = uniq(mem.present || []);
+    var lines = [];
+    lines.push("[LIVINGNARRATIVES INFORMATION FIREWALL - obey strictly]");
+    lines.push("Current location: " + (mem.location || "unknown location") + ".");
+    lines.push("Current visible NPCs inferred by script: " + (present.length ? present.join(", ") : "none confirmed") + ".");
+    lines.push("Primary rule: knowledge is scene-scoped. A character may reference a prior conversation only if they were present for it or a knowing character explicitly tells them on-screen.");
+    lines.push("Do not make NPCs omniscient. Conversations in one room do not travel to another room automatically. General information is still private to witnesses until shared.");
+    lines.push("Marked important facts are a secondary safety layer, not the main memory system.");
+
+    if (!present.length) {
+      lines.push("No NPC has confirmed permission to reference private or recently stated facts.");
+    }
+
+    for (var p = 0; p < present.length; p++) {
+      var name = present[p];
+      var knownConversations = conversationsForName(mem, name, true);
+      var unknownConversations = conversationsForName(mem, name, false);
+      lines.push(name + " may reference conversations they witnessed or were told:");
+      if (knownConversations.length) {
+        for (var kc = Math.max(0, knownConversations.length - 6); kc < knownConversations.length; kc++) {
+          lines.push("- " + knownConversations[kc].text + " (" + knownConversations[kc].location + ")");
+        }
+      } else {
+        lines.push("- No tracked prior conversations.");
+      }
+      if (unknownConversations.length) {
+        var blocked = [];
+        for (var uc = Math.max(0, unknownConversations.length - 6); uc < unknownConversations.length; uc++) {
+          blocked.push(unknownConversations[uc].topics && unknownConversations[uc].topics.length ? unknownConversations[uc].topics.join("/") : unknownConversations[uc].text);
+        }
+        lines.push(name + " must NOT reference these unwitnessed conversation topics: " + blocked.join("; ") + ".");
+      }
+
+      var known = knownFactsForName(mem, name);
+      if (known.length) {
+        lines.push(name + " marked important facts:");
+        for (var k = Math.max(0, known.length - 8); k < known.length; k++) {
+          lines.push("- " + known[k].topic + " (" + known[k].source + " at " + known[k].location + ")");
+        }
+      }
+      var unknown = unknownRelevantFactsForName(mem, name);
+      if (unknown.length) {
+        var topics = [];
+        for (var u = Math.max(0, unknown.length - 8); u < unknown.length; u++) topics.push(unknown[u].topic);
+        lines.push(name + " must NOT know or comment on: " + topics.join("; ") + ".");
+      }
+    }
+
+    if (mem.recentRepairs && mem.recentRepairs.length) {
+      var repair = mem.recentRepairs[mem.recentRepairs.length - 1];
+      lines.push("Recent correction: " + repair.blockedName + " was blocked from referencing '" + repair.topic + "' because they did not know it.");
+    }
+
+    var closing = "[/LIVINGNARRATIVES INFORMATION FIREWALL]";
+    var packet = lines[0] + "\n" + lines[3];
+    if (packet.length + closing.length + 1 > budget) return "";
+    for (var j = 1; j < lines.length; j++) {
+      if (j !== 3 && packet.length + lines[j].length + closing.length + 2 <= budget) {
+        packet += "\n" + lines[j];
+      }
+    }
+    return packet + "\n" + closing;
+  }
+
+  function run(tab) {
+    const original = text;
+    if (tab !== "context" && (!MCPV5HasVisibleText(original) || original.length > 12000))
+      return { text: original };
+
+    const mem = getStateRoot();
+    if (!mem) return { text: original };
+
+    if (tab === "input") {
+      const action = Number.isFinite(info && info.actionCount) ? info.actionCount : -1;
+      const inputKey = action + ":" + original.length + ":" + MCPV5HashString(original);
+      if (action < 0 || mem.lastInput !== inputKey) {
+        processInput(mem, original.slice(0, 4000));
+        mem.lastInput = inputKey;
+      }
+      return { text: original };
+    }
+    if (tab === "context") {
+      mem.lastPacket = "";
+      const budget = Number.isFinite(info && info.maxChars)
+        ? Math.min(IF_CONFIG.MAX_PACKET_CHARS, Math.floor(info.maxChars) - original.length - 2)
+        : 0;
+      if (budget < 250) return { text: original };
+      const packet = buildPacket(mem, budget);
+      if (!packet) return { text: original };
+      mem.lastPacket = packet;
+      return { text: packet + "\n\n" + original };
+    }
+    if (tab === "output") {
+      refreshKnownCharacters(mem);
+      let story = original;
+      if (typeof mem.lastPacket === "string" && mem.lastPacket.length &&
+          mem.lastPacket.length <= IF_CONFIG.MAX_PACKET_CHARS && story.includes(mem.lastPacket)) {
+        story = story.split(mem.lastPacket).join("");
+        if (!MCPV5HasVisibleText(story)) story = IF_CONFIG.REPAIR_EMPTY_OUTPUT;
+      }
+      mem.lastPacket = "";
+      const cleaned = cleanOutput(mem, story);
+      if (cleaned !== IF_CONFIG.REPAIR_EMPTY_OUTPUT) processOutputScene(mem, cleaned);
+      return { text: cleaned };
+    }
+    return { text: original };
+  }
+
+  return { run };
+}
+
 const MCPV5_FACTORIES = {
   inner_package: MCPV5Create_inner_package,
   living_characters: MCPV5Create_living_characters,
@@ -49699,7 +50244,8 @@ const MCPV5_FACTORIES = {
   ar: MCPV5Create_ar,
   usc_e: MCPV5Create_usc_e,
   dice_roll: MCPV5Create_dice_roll,
-  coin_flip: MCPV5Create_coin_flip
+  coin_flip: MCPV5Create_coin_flip,
+  information_firewall: MCPV5Create_information_firewall
 };
 
 function MCPV5FactoryKey(id) {
@@ -49831,12 +50377,12 @@ function MCPV5StripRealmHeartContextLeak(value, plan) {
     );
     return cleaned;
   } catch (error) {
-    log("MCP V5.4.0 RealmHeart leak guard error:", error);
+    log("MCP V5.4.3 RealmHeart leak guard error:", error);
     return original;
   }
 }
 
-function MCPV5RunProfile(id, tab, incomingText, plan) {
+function MCPV5RunProfile(id, tab, incomingText, plan, filterStory) {
   const original = MCPV5SafeText(incomingText, "\u200B");
   const root = MCPV5Root();
   const oldText = globalThis.text;
@@ -49902,7 +50448,7 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
     } else if (id === "auto_cards") {
       result = module.runAutoCards(tab);
     } else {
-      result = module.run(tab);
+      result = module.run(tab, filterStory);
     }
 
     if (
@@ -49968,7 +50514,7 @@ function MCPV5RunProfile(id, tab, incomingText, plan) {
       MCPV5Name(id) + " / " + tab + " / " +
       String(error && error.message ? error.message : error)
     );
-    log("MCP V5.4.0 module error:", MCPV5Name(id), tab, error);
+    log("MCP V5.4.3 module error:", MCPV5Name(id), tab, error);
     return { text: original, __mcpOk: false };
   } finally {
     MCPV5RestoreModuleGlobals(globalSnapshot);
@@ -50141,7 +50687,9 @@ function MCPV5Run(tab, incomingText) {
     settings,
     tab === "input" ? original : ""
   );
-  const order = MCPV5ExecutionOrder(tab, plan, schedule);
+  if (plan.effective.auto_cards === true) MCPV5CancelSAECardCompression();
+  const firewallId = "information_firewall";
+  const order = MCPV5ExecutionOrder(tab, plan, schedule).filter(id => id !== firewallId);
   if (tab === "input" && MCPV5CommandAmbiguous(original, plan)) {
     MCPV5RecordDiagnostic("ambiguous-command",
       "Original module handlers will resolve " + original.slice(0, 60));
@@ -50157,13 +50705,13 @@ function MCPV5Run(tab, incomingText) {
   const failed = [];
   let stopped = false;
 
-  function execute(id, inputText) {
+  function execute(id, inputText, filterStory) {
     if (plan.cooperative && sharedBase) {
       MCPV5RestoreSharedState(sharedBase);
     }
 
     const moduleStarted = Date.now();
-    const result = MCPV5RunProfile(id, tab, inputText, plan);
+    const result = MCPV5RunProfile(id, tab, inputText, plan, filterStory);
     MCPV5UpdateTiming(tab, id, Date.now() - moduleStarted);
 
     if (plan.cooperative && sharedBase) {
@@ -50185,6 +50733,19 @@ function MCPV5Run(tab, incomingText) {
   }
 
   let current = original;
+  let firewallRan = false;
+
+  function runFirewall() {
+    if (firewallRan || stopped || transaction || schedule.commandOwner ||
+        !plan.effective[firewallId] || !schedule.modules.includes(firewallId)) return;
+    const actionText = tab === "input" ? original : schedule.inputText;
+    if (/^\s*(?:>\s*)?(?:(?:[^\n,]{1,60}\s+says?,\s*["“]?)|["“])?\//i.test(actionText || "")) return;
+    firewallRan = true;
+    const result = execute(firewallId, tab === "input" ? original : current);
+    if (result && result.__mcpOk === true && tab !== "input") {
+      current = MCPV5SafeText(result.text, current);
+    }
+  }
 
   const realmheartControlStage = !!(
     tab !== "input" && schedule && schedule.commandOwner === "realmheart"
@@ -50346,6 +50907,8 @@ function MCPV5Run(tab, incomingText) {
 
       for (let i = 0; i < order.length; i++) {
         const id = order[i];
+        const hadEvent = id === "story_card_extension" &&
+          !!(state.mcpStoryCardExtension && state.mcpStoryCardExtension.currentEvent?.duration > 0);
         const result = execute(id, original);
         if (
           result &&
@@ -50382,7 +50945,9 @@ function MCPV5Run(tab, incomingText) {
           proposals.push({
             id,
             index: i,
-            text: result.text
+            text: result.text,
+            hasEvent: id === "story_card_extension" && (hadEvent ||
+              !!(state.mcpStoryCardExtension && state.mcpStoryCardExtension.currentEvent?.duration > 0))
           });
         }
       }
@@ -50392,7 +50957,8 @@ function MCPV5Run(tab, incomingText) {
         : MCPV5ComposeContextProposals(
             original,
             proposals,
-            plan
+            plan,
+            MCPV5FirewallContextLimit(original, proposals, plan, schedule)
           );
     }
   } else if (tab === "output") {
@@ -50451,7 +51017,8 @@ function MCPV5Run(tab, incomingText) {
         "story_arc_engine",
         "character_continuity"
       ]);
-      const protocol = order.filter(id => protocolSet.has(id));
+      const protocol = order.filter(id => protocolSet.has(id) && id !== "character_continuity");
+      if (order.includes("character_continuity")) protocol.push("character_continuity");
       const finalFilterOrder = ["ar", "usc_e"].filter(id => order.includes(id));
       const finalFilterSet = new Set(finalFilterOrder);
       const slowBurnSelected = order.includes("slow_burn");
@@ -50467,58 +51034,12 @@ function MCPV5Run(tab, incomingText) {
         id !== "coin_flip"
       ));
 
-      // Protocol consumers are intentionally chained: each removes only its
-      // own machine envelope before the next consumer sees the response.
-      let protocolText = original;
-      for (let i = 0; i < protocol.length; i++) {
-        const id = protocol[i];
-        const before = protocolText;
-        const result = execute(id, protocolText);
-        if (
-          result &&
-          result.__mcpOk === true &&
-          typeof result.text === "string"
-        ) {
-          protocolText = MCPV5ApplyOutputGuard(
-            id,
-            result.text,
-            before,
-            original
-          );
-          if (result.stop === true) {
-            stopped = true;
-            break;
-          }
-        }
-      }
+      let filteredStory = null;
+      const cardApiKeys = ["storyCards", "addStoryCard", "updateStoryCard", "removeStoryCard"];
+      const platformCards = cardApiKeys.map(key => globalThis[key]);
 
-      const proposals = [];
-      if (!stopped) {
-        for (let i = 0; i < observers.length; i++) {
-          const id = observers[i];
-          const result = execute(id, protocolText);
-          if (
-            result &&
-            result.__mcpOk === true &&
-            typeof result.text === "string"
-          ) {
-            proposals.push({
-              id,
-              index: i,
-              text: result.text
-            });
-            if (result.stop === true) stopped = true;
-          }
-        }
-      }
-
-      current = MCPV5SelectOutputProposal(
-        protocolText,
-        proposals,
-        plan,
-        schedule.commandOwner || ""
-      );
-
+      function cleanVisibleStory(story) {
+        current = story;
       // RealmHeart's world-state block is hidden Context. If the model ever
       // echoes the exact block anyway, remove only that stored block before
       // visible-text cleanup filters run.
@@ -50533,6 +51054,12 @@ function MCPV5Run(tab, incomingText) {
       if (!stopped) {
         for (let i = 0; i < finalFilterOrder.length; i++) {
           const id = finalFilterOrder[i];
+          if (settings.workloadGuard &&
+              Date.now() - startedAt + MCPV5ExpectedTiming("output", id) >
+              settings.hookBudgetMs - settings.hookSafetyMarginMs) {
+            MCPV5RecordDiagnostic("optional-output-deferred", MCPV5Name(id));
+            continue;
+          }
           const before = current;
           const result = execute(id, current);
           if (
@@ -50554,11 +51081,87 @@ function MCPV5Run(tab, incomingText) {
         }
       }
 
+        runFirewall();
+        return current;
+      }
+
+      function filterContinuityStory(story) {
+        const scopedCards = cardApiKeys.map(key => globalThis[key]);
+        const scopedShared = MCPV5SnapshotSharedState();
+        try {
+          cardApiKeys.forEach((key, i) => { globalThis[key] = platformCards[i]; });
+          filteredStory = cleanVisibleStory(story);
+          return filteredStory;
+        } finally {
+          cardApiKeys.forEach((key, i) => { globalThis[key] = scopedCards[i]; });
+          MCPV5RestoreSharedState(scopedShared);
+        }
+      }
+
+      // Protocol consumers are intentionally chained: each removes only its
+      // own machine envelope before the next consumer sees the response.
+      let protocolText = original;
+      for (let i = 0; i < protocol.length; i++) {
+        const id = protocol[i];
+        const before = protocolText;
+        const result = execute(id, protocolText,
+          id === "character_continuity" ? filterContinuityStory : undefined);
+        if (
+          result &&
+          result.__mcpOk === true &&
+          typeof result.text === "string"
+        ) {
+          protocolText = MCPV5ApplyOutputGuard(
+            id,
+            filteredStory !== null && result.text === before ? filteredStory : result.text,
+            before,
+            original
+          );
+          if (result.stop === true) {
+            stopped = true;
+            break;
+          }
+        }
+      }
+
+      current = filteredStory === null
+        ? cleanVisibleStory(protocolText)
+        : protocolText;
+      const visibleStory = current;
+      const proposals = [];
+      if (!stopped) {
+        for (let i = 0; i < observers.length; i++) {
+          const id = observers[i];
+          const result = execute(id, visibleStory);
+          if (
+            result &&
+            result.__mcpOk === true &&
+            typeof result.text === "string"
+          ) {
+            proposals.push({
+              id,
+              index: i,
+              text: result.text
+            });
+            if (result.stop === true) stopped = true;
+          }
+        }
+      }
+
+      current = MCPV5SelectOutputProposal(
+        visibleStory,
+        proposals,
+        plan,
+        schedule.commandOwner || ""
+      );
+
+
+
       // Slow Burn scores only the cleaned visible narrative. Its host wrapper
       // keeps state.npc private and publishes only its owned Author's Note marker.
       if (!stopped && slowBurnSelected) {
         const before = current;
-        const result = execute("slow_burn", current);
+        const result = execute("slow_burn", visibleStory);
         if (
           result &&
           result.__mcpOk === true &&
@@ -50566,7 +51169,7 @@ function MCPV5Run(tab, incomingText) {
         ) {
           current = MCPV5ApplyOutputGuard(
             "slow_burn",
-            result.text,
+            before,
             before,
             original
           );
@@ -50583,7 +51186,10 @@ function MCPV5Run(tab, incomingText) {
         gambleRecord.action === schedule.action &&
         gambleRecord.signature === schedule.signature
       );
-      if (!stopped && outcomeRollId && !realmheartGambleTurn) {
+      if (!stopped && outcomeRollId && !realmheartGambleTurn &&
+          (!settings.workloadGuard ||
+           Date.now() - startedAt + MCPV5ExpectedTiming("output", outcomeRollId) <=
+             settings.hookBudgetMs - settings.hookSafetyMarginMs)) {
         const before = current;
         const result = execute(outcomeRollId, current);
         if (
@@ -50612,6 +51218,8 @@ function MCPV5Run(tab, incomingText) {
   ) {
     current = MCPV5StripRealmHeartContextLeak(current, plan);
   }
+
+  if (tab !== "output" || !plan.cooperative) runFirewall();
 
   if (plan.cooperative && sharedBase) {
     MCPV5RestoreSharedState(sharedBase);
@@ -50652,10 +51260,10 @@ function MCPV5Run(tab, incomingText) {
     tab,
     elapsedMs: Math.max(0, Date.now() - startedAt),
     transaction: transaction ? transaction.name : "",
-    ran: ran.slice(0, 16),
-    failed: failed.slice(0, 16),
-    skipped: skipped.slice(0, 16),
-    actionModules: schedule.modules.slice(0, 16),
+    ran: ran.slice(0, MCPV5_PROFILE_ORDER.length),
+    failed: failed.slice(0, MCPV5_PROFILE_ORDER.length),
+    skipped: skipped.slice(0, MCPV5_PROFILE_ORDER.length),
+    actionModules: schedule.modules.slice(0, MCPV5_PROFILE_ORDER.length),
     commandOwner: schedule.commandOwner || "",
     commandHint: schedule.commandHint || ""
   };
@@ -50679,5 +51287,5 @@ function MCPV5Run(tab, incomingText) {
 try {
   MCPV5SyncControls();
 } catch (error) {
-  log("MCP V5.4.0 initialization error:", error);
+  log("MCP V5.4.6 initialization error:", error);
 }
