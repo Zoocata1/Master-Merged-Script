@@ -10,6 +10,18 @@
 <details>
 <summary><b>(click to expand)</b></summary>
 
+### 5.4.6
+- Simpler controls and cleaner MCP Story Card
+- Easier character relationships: Set the same relationship for several characters at once, and give more of the cast a chance in the spotlight.
+- Clearer Auto-Cards updates: See which card is being created or summarized. If a summary fails, the original memories are kept. Auto-Cards also leaves Story Arc settings alone.
+- More reliable story arcs: If the AI can’t make a usable new outline, the game keeps the last good one.
+- Fewer NPCs knowing things they shouldn’t: The optional Information Firewall helps keep private conversations private. Mentioning someone no longer counts as them being there, and removed dialogue is less likely to be remembered as part of the story.
+- More character stats: The Stats card adds Strength, Dexterity, Vitality, Endurance, Willpower, and Wisdom without changing how your existing stats work.
+- Separate wallets and inventories: A change to one wallet or inventory no longer gets copied into another.
+- Better pacing and recall: Finished events get a break before they can return, repeated lore is skipped, and scene guidance stays focused on what’s happening now.
+- More relevant updates: Characters in the scene can get more attention, companion relationships are less likely to change because of unrelated events, and meters can explain why a value went up or down.
+- Gentler story cleanup: Less story text gets cut, and important updates take priority over optional cleanup when several features are running.
+
 ### 5.4.0
 - All 16 scripts work together more smoothly, with fewer conflicts.
 - Resolved an issue that could prevent Auto-Cards from working alongside certain scripts.
