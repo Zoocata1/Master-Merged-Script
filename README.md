@@ -71,6 +71,8 @@
 <details>
 <summary><b>(click to expand)</b></summary>
 
+### ALL CODE FOR VERSION 4 CAN BE FOUND IN THE 'src' FOLDER
+
 ### 4.0.3
 - Updated Character Continuity to v1.0.80
 - Added Living Meters v1
@@ -134,20 +136,27 @@ MMS Version 5 is the remedy to version 4. V5 aims to merge all current scripts i
 7. Delete all code within said tab
 8. Copy and paste the following code into your empty `Input` tab:
 ```javascript
-// Your "Input" tab should look like this
+// MASTER SCRIPT V5.4.6 — Input
 const modifier = (text) => {
-  const original = typeof text === "string" && text.length ? text : "\u200B";
+  const original = (
+    typeof text === "string" && text.length
+  ) ? text : "\u200B";
 
   try {
-    const result = MCPCollectionRun("input", original);
-    return (
+    const result = MCPV5Run("input", original);
+    if (
       result &&
       typeof result === "object" &&
       typeof result.text === "string" &&
       result.text.length
-    ) ? result : { text: original };
+    ) {
+      return result.stop === true
+        ? { text: String(result.text), stop: true }
+        : { text: String(result.text) };
+    }
+    return { text: original };
   } catch (error) {
-    log("MCP input error:", error);
+    log("MCP V5.4.6 input error:", error);
     return { text: original };
   }
 }
@@ -158,20 +167,27 @@ modifier(text)
 10. Delete all code within said tab
 11. Copy and paste the following code into your empty `Context` tab:
 ```javascript
-// Your "Context" tab should look like this
+// MASTER SCRIPT V5.4.6 — Context
 const modifier = (text) => {
-  const original = typeof text === "string" && text.length ? text : "\u200B";
+  const original = (
+    typeof text === "string" && text.length
+  ) ? text : "\u200B";
 
   try {
-    const result = MCPCollectionRun("context", original);
-    return (
+    const result = MCPV5Run("context", original);
+    if (
       result &&
       typeof result === "object" &&
       typeof result.text === "string" &&
       result.text.length
-    ) ? result : { text: original };
+    ) {
+      return result.stop === true
+        ? { text: String(result.text), stop: true }
+        : { text: String(result.text) };
+    }
+    return { text: original };
   } catch (error) {
-    log("MCP context error:", error);
+    log("MCP V5.4.6 context error:", error);
     return { text: original };
   }
 }
@@ -182,21 +198,37 @@ modifier(text)
 13. Delete all code within said tab
 14. Copy and paste the following code into your empty `Output` tab:
 ```javascript
-// Your "Output" tab should look like this
+// MASTER SCRIPT V5.4.6 — Output
 const modifier = (text) => {
-  const original = typeof text === "string" && text.length ? text : "\u200B";
+  const original = (
+    typeof text === "string" && text.length
+  ) ? text : "\u200B";
+
+  // Final presentation boundary only. No module sees this added space.
+  const withLeadingSpace = (value) => {
+    const safe = (
+      typeof value === "string" && value.length
+    ) ? value : original;
+    return safe.startsWith(" ") ? safe : ` ${safe}`;
+  };
 
   try {
-    const result = MCPCollectionRun("output", original);
-    return (
+    const result = MCPV5Run("output", original);
+    if (
       result &&
       typeof result === "object" &&
       typeof result.text === "string" &&
       result.text.length
-    ) ? result : { text: original };
+    ) {
+      const finalText = withLeadingSpace(String(result.text));
+      return result.stop === true
+        ? { text: finalText, stop: true }
+        : { text: finalText };
+    }
+    return { text: withLeadingSpace(original) };
   } catch (error) {
-    log("MCP output error:", error);
-    return { text: original };
+    log("MCP V5.4.6 output error:", error);
+    return { text: withLeadingSpace(original) };
   }
 }
 
@@ -205,8 +237,8 @@ modifier(text)
 15. Select the `Library` tab on the left
 16. Delete all code within said tab
 17. DOWNLOAD the full Library code (hyperlink below) and open it in Notepad or Notepad ++
-- [Library code](./src/library.js)
-18. Copy the full code from the notepad, (Ctrl + A) -> (Ctrl + C) -> (Ctrl + V) is a shortcut, and paste into your empty `Library` tab
+- [Library code](./src-V5/library.js)
+18. Copy the full code from the notepad via by downloading or the 'view raw' format, (Ctrl + A) -> (Ctrl + C) -> (Ctrl + V) is a shortcut, and paste into your empty `Library` tab
 19. Click the big yellow `SAVE` button in the top right corner
 
 ### *That's it*
