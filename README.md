@@ -238,7 +238,8 @@ modifier(text)
 16. Delete all code within said tab
 17. DOWNLOAD the full Library code (hyperlink below) and open it in Notepad or Notepad ++
 - [Library code](./src-V5/library.js)
-18. Copy the full code from the notepad via by downloading or the 'view raw' format, (Ctrl + A) -> (Ctrl + C) -> (Ctrl + V) is a shortcut, and paste into your empty `Library` tab
+18. Copy the full code from the notepad via by downloading or the 'view raw' format 
+    (Ctrl + A) -> (Ctrl + C) -> (Ctrl + V) is a shortcut, and paste into your empty `Library` tab
 19. Click the big yellow `SAVE` button in the top right corner
 
 ### *That's it*
@@ -269,7 +270,7 @@ All adventures played from your scenario will now include Master Merged Script V
 - [Living Meters](https://discord.com/channels/903327676884979802/1534133778807652382)
 - [Story Card Extender (SCE)](https://discord.com/channels/903327676884979802/1498673595893682217)
 - [Dice Roll & Coin Toss](https://discord.com/channels/903327676884979802/1400616390389403709)
-- 
+ 
 <p align="center"><i>Top Image is from @dualvoidanima at giphy.com</i> </p>
 
 <p align="center"><i>Please show the original creators much love and appreciation</i> </p>
