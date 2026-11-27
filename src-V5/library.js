@@ -1,13 +1,13 @@
 /* ============================================================
-   MASTER SCRIPT V5.4.6 — QOL Update
+   MASTER SCRIPT V5.6.0 — QOL Update
    - Please Enjoy
    - Zoocata
    ============================================================ */
 
 const MCPV5_VERSION = 5;
-const MCPV5_SCHEMA_VERSION = 3;
-const MCPV5_BUILD_VERSION = "5.4.6";
-const MCPV5_PATCH = "5.4.6-visible-evidence";
+const MCPV5_SCHEMA_VERSION = 4;
+const MCPV5_BUILD_VERSION = "5.6.0";
+const MCPV5_PATCH = "5.6.0-clean-panel";
 const MCPV5_CARD_KEYS = "__MCP_EXACT_SCRIPT_COLLECTION__";
 const MCPV5_CARD_TITLE = "⚙️ Master Script Control Panel";
 const MCPV5_CARD_TYPE = "_MCP_V5_";
@@ -345,7 +345,7 @@ const MCPV5_TRANSACTION_DETECTORS = [
     name: "Inner Self thought formation",
     owner: "inner_self",
     active(tab, plan) {
-      return tab === "output" && MCPV5InnerSelfTaskActive(plan);
+      return false; // Mixed thought + story is parsed in the normal visible-story pipeline.
     }
   }
 ];
@@ -422,10 +422,11 @@ function MCPV5RestoreModuleGlobals(snapshot) {
     }
   }
 
-  for (let i = 0; i < MCPV5_KNOWN_MUTABLE_GLOBALS.length; i++) {
-    const key = MCPV5_KNOWN_MUTABLE_GLOBALS[i];
+  const restoreKeys = snapshot.fullScan ? [...snapshot.present] : MCPV5_KNOWN_MUTABLE_GLOBALS;
+  for (let i = 0; i < restoreKeys.length; i++) {
+    const key = restoreKeys[i];
     if (snapshot.present.has(key)) {
-      try { globalThis[key] = snapshot.values[key]; } catch {}
+      try { if(globalThis[key] !== snapshot.values[key]) globalThis[key] = snapshot.values[key]; } catch {}
     } else {
       try { delete globalThis[key]; } catch {}
     }
@@ -658,7 +659,7 @@ function MCPV5NormalizeSharedPersistentState() {
 }
 
 function MCPV5SnapshotModuleState(moduleId) {
-  const keys = MCPV5_MODULE_STATE_KEYS[moduleId] || [];
+  const keys = [...new Set((MCPV5_MODULE_STATE_KEYS[moduleId] || []).concat(Object.keys(state).filter(k => k !== "mcpCompatibilityHost" && k !== "mcpExactCollection")))];
   const records = Object.create(null);
   records.__presentKeys = Object.keys(state);
 
@@ -669,7 +670,7 @@ function MCPV5SnapshotModuleState(moduleId) {
       records[key] = { exists: false, ok: true, value: null };
       continue;
     }
-    const clone = MCPV5CloneStateValue(state[key], 900000);
+    const clone = MCPV5CloneStateValue(state[key], 1800000);
     records[key] = {
       exists: true,
       ok: clone.ok,
@@ -710,7 +711,10 @@ function MCPV5RestoreModuleState(snapshot) {
   }
 }
 
+let MCPV5_VALIDATED_ROOT = null;
 function MCPV5Root() {
+  if (state.mcpCompatibilityHost?.schemaVersion > MCPV5_SCHEMA_VERSION) throw new Error("Unsupported future MMS save schema; install a compatible build.");
+  if (state.mcpCompatibilityHost && state.mcpCompatibilityHost === MCPV5_VALIDATED_ROOT) return MCPV5_VALIDATED_ROOT;
   if (
     !state.mcpCompatibilityHost ||
     typeof state.mcpCompatibilityHost !== "object" ||
@@ -790,6 +794,8 @@ function MCPV5Root() {
     root.schemaVersion = 3;
   }
 
+  if (root.schemaVersion > MCPV5_SCHEMA_VERSION) throw new Error("Unsupported future MMS save schema; install a compatible build.");
+  if (root.schemaVersion < 4) { root.actionSchedule = null; root.transaction = null; }
   root.version = MCPV5_VERSION;
   root.schemaVersion = MCPV5_SCHEMA_VERSION;
   root.buildVersion = MCPV5_BUILD_VERSION;
@@ -846,6 +852,7 @@ function MCPV5Root() {
   ledger.currency = currencyClone.ok ? currencyClone.value : {};
 
   root.diagnostics = root.diagnostics.slice(-40);
+  MCPV5_VALIDATED_ROOT = root;
   return root;
 }
 
@@ -858,6 +865,10 @@ function MCPV5FindControlCardIndex() {
   ));
 }
 
+// Code-only compatibility and gameplay defaults. These settings are never
+// read from the MCP Story Card or inherited from its old saved settings.
+// Balanced + Automatic preserves cooperative execution without Strict-mode
+// observer suppression. Independent inventories avoid unsafe item mirroring.
 function MCPV5DefaultSettings() {
   return {
     compatibilityMode: "Balanced",
@@ -874,7 +885,9 @@ function MCPV5DefaultSettings() {
     workloadGuard: true,
     hookBudgetMs: 1450,
     hookSafetyMarginMs: 180,
-    diagnostics: false
+    diagnostics: false,
+    outcomeMode: "Cosmetic", resourcePolicy: "Strict", recallMode: "Balanced", cardMode: "Balanced",
+    cleanupMode: "Balanced", pacingProfile: "Balanced", inventoryMode: "Independent"
   };
 }
 
@@ -907,11 +920,7 @@ function MCPV5EnsureControlCard() {
   const card = storyCards[index];
 
   try { card.title = MCPV5_CARD_TITLE; } catch {}
-  try {
-    card.description = (
-      "Edit toggles in Entry. Balanced is recommended. Leave authorities on Automatic unless needed."
-    );
-  } catch {}
+  // Notes are maintained by the host status view.
 
   return card;
 }
@@ -944,7 +953,7 @@ function MCPV5ReadString(entry, label, fallback) {
 
 function MCPV5ReadInteger(entry, label, fallback, lower, upper) {
   const raw = MCPV5ReadString(entry, label, String(fallback));
-  const value = parseInt(String(raw).replace(/[^\d-]/g, ""), 10);
+  const value = /^-?\d+$/.test(String(raw).trim()) ? Number(raw) : NaN;
   if (!Number.isFinite(value)) return fallback;
   return Math.min(Math.max(lower, value), upper);
 }
@@ -1159,17 +1168,17 @@ function MCPV5ConflictStatus(plan) {
       MCPV5Name(plan.inventoryCardAuthority || plan.inventoryAuthority) + ")."
     );
     lines.push(
-      "Resolved: inventory changes are normalized into one capped action ledger."
+      "Inventory: independent unless explicit item mappings are enabled; audited in a capped ledger."
     );
   }
   if (npc.length > 1) {
     lines.push(
-      "Resolved: NPC facts, mind, and action use separate authorities."
+      "NPC facts, mind and action use capability authorities; private state remains independent."
     );
   }
   if (pacing.length > 1) {
     lines.push(
-      "Resolved: macro, scene, and relationship pacing use separate authorities."
+      "Pacing: macro, scene and relationship authorities are selected separately."
     );
   }
   if (outcome.length > 1) {
@@ -1186,134 +1195,19 @@ function MCPV5ConflictStatus(plan) {
 }
 
 function MCPV5CanonicalEntry(enabled, settings, plan, status) {
-  const LIMIT = MCPV5_CONTROL_ENTRY_LIMIT;
-  const enabledNames = [];
-  for (let i = 0; i < MCPV5_PROFILE_ORDER.length; i++) {
-    const id = MCPV5_PROFILE_ORDER[i];
-    if (enabled[id] === true) enabledNames.push(MCPV5_PROFILE_NAMES[id]);
-  }
-
-  const bool = value => value === true ? "true" : "false";
-
-  const prefixLines = [
-    "╔══════════════════════════════════════════════════════╗",
-    "║              MASTER SCRIPT CONTROL PANEL             ║",
-    "╚══════════════════════════════════════════════════════╝",
-    "Build 5.4.6  •  " + enabledNames.length + "/" + MCPV5_PROFILE_ORDER.length + " scripts enabled",
-    "",
-    "⚡ QUICK ACTIONS",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "# One-shot switches. They reset to false after being applied.",
-    "Enable All: false",
-    "Disable All: false",
-    "",
-    "🧩 SCRIPT TOGGLES",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "# CHARACTERS • MEMORY • CONTINUITY",
-    "Inner Self: " + bool(enabled.inner_self),
-    "Auto-Cards: " + bool(enabled.auto_cards),
-    "Living Characters: " + bool(enabled.living_characters),
-    "Character Continuity: " + bool(enabled.character_continuity),
-    "Slow Burn: " + bool(enabled.slow_burn),
-    "Information Firewall: " + bool(enabled.information_firewall),
-    "",
-    "# STORY • WORLD • PACING",
-    "Story Card Extension: " + bool(enabled.story_card_extension),
-    "Story Arc Engine: " + bool(enabled.story_arc_engine),
-    "Narrative Governor: " + bool(enabled.narrative_governor),
-    "",
-    "# GAMEPLAY • RESOURCES • INVENTORY",
-    "Living Meters: " + bool(enabled.living_meters),
-    "True Automatic Stats: " + bool(enabled.true_auto_stats),
-    "Stackable Inventory: " + bool(enabled.stackable_inventory),
-    "RealmHeart: " + bool(enabled.realmheart),
-    "",
-    "# OUTPUT CLEANUP • OUTCOME",
-    "# AR/USC-E clean prose. Dice/Coin are mutually arbitrated.",
-    "AR: " + bool(enabled.ar),
-    "USC-E: " + bool(enabled.usc_e),
-    "Dice Roll: " + bool(enabled.dice_roll),
-    "Coin Flip: " + bool(enabled.coin_flip),
-    "",
-    "⏱️ PERFORMANCE & TROUBLESHOOTING",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "# Defaults are safe for most adventures. Diagnostics adds host logging.",
-    "Hook Budget Milliseconds: " + Math.max(1, Number(settings.hookBudgetMs) || 1450),
-    "Hook Safety Margin Milliseconds: " + Math.max(0, Number(settings.hookSafetyMarginMs) || 180),
-    "Diagnostics: " + bool(settings.diagnostics),
-    "",
-    "📊 LIVE STATUS",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  const count = MCPV5_PROFILE_ORDER.filter(id => enabled[id]).length;
+  const groups = [
+    ["CHARACTERS", ["inner_self","auto_cards","living_characters","character_continuity","slow_burn","information_firewall"]],
+    ["WORLD & STORY", ["story_card_extension","story_arc_engine","narrative_governor"]],
+    ["GAMEPLAY", ["living_meters","true_auto_stats","stackable_inventory","realmheart"]],
+    ["OUTPUT", ["ar","usc_e","dice_roll","coin_flip"]]
   ];
-
-  const cleanOneLine = (value, fallback) => {
-    const clean = String(value === undefined || value === null ? fallback : value)
-      .replace(/[\r\n\t]+/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-    return clean || fallback;
-  };
-
-  let statusText = enabledNames.length
-    ? cleanOneLine(status, "Ready.")
-    : "No scripts enabled.";
-  let enabledText = enabledNames.length ? enabledNames.join(", ") : "None";
-
-  let planText = "No active compatibility plan.";
-  let checkText = "No active overlaps.";
-
-  if (plan && Array.isArray(plan.selected) && plan.selected.length) {
-    const summary = MCPV5PlanSummary(plan);
-    if (summary.length) planText = summary.join(" | ");
-    const conflicts = MCPV5ConflictStatus(plan);
-    if (conflicts.length) checkText = conflicts.join(" | ");
-  }
-
-  const buildTail = () => [
-    "Status: " + statusText,
-    "Enabled Scripts: " + enabledText,
-    "",
-    "CURRENT PLAN",
-    "• " + planText,
-    "",
-    "COMPATIBILITY CHECK",
-    "• " + checkText
-  ].join("\n");
-
-  const prefix = prefixLines.join("\n") + "\n";
-  let tail = buildTail();
-
-  if ((prefix + tail).length > LIMIT) {
-    const fixedTailChars = buildTail()
-      .length - statusText.length - enabledText.length - planText.length - checkText.length;
-    let room = Math.max(4, LIMIT - prefix.length - fixedTailChars);
-
-    const desired = [statusText, enabledText, planText, checkText];
-    const minimum = [18, 18, 18, 18];
-    const clipped = [];
-
-    for (let i = 0; i < desired.length; i++) {
-      const remainingMin = minimum.slice(i + 1).reduce((a, b) => a + b, 0);
-      const allowance = Math.max(minimum[i], room - remainingMin);
-      const value = desired[i];
-      if (value.length <= allowance) {
-        clipped.push(value);
-        room -= value.length;
-      } else {
-        const use = Math.max(4, allowance);
-        clipped.push(value.slice(0, use - 3).trimEnd() + "...");
-        room -= use;
-      }
-    }
-
-    statusText = clipped[0];
-    enabledText = clipped[1];
-    planText = clipped[2];
-    checkText = clipped[3];
-    tail = buildTail();
-  }
-
-  return (prefix + tail).slice(0, LIMIT);
+  const lines = ["╭── ◈ MASTER SCRIPT ◈ ──╮", "  V5.6.0  •  " + count + "/17 enabled", "╰────────────────────────╯", "Enable All: false", "Disable All: false", "Preset: Custom"];
+  for (const [name, ids] of groups) lines.push("", "◆ " + name, ...ids.map(id => MCPV5Name(id) + ": " + (enabled[id] === true)));
+  lines.push("", "◆ PERFORMANCE", "Workload Guard: " + settings.workloadGuard, "Hook Budget Milliseconds: " + settings.hookBudgetMs,
+    "Hook Safety Margin Milliseconds: " + settings.hookSafetyMarginMs, "Diagnostics: " + settings.diagnostics,
+    "", "◆ STATUS", count ? "Ready" : "No scripts enabled.", "More: Notes or /mms help");
+  return lines.join("\n").slice(0, MCPV5_CONTROL_ENTRY_LIMIT);
 }
 
 function MCPV5WriteControlCard(card, entry) {
@@ -1338,9 +1232,9 @@ function MCPV5SyncControls() {
   const card = MCPV5EnsureControlCard();
 
   if (!card) {
-    root.enabled = {};
-    root.status = "Control card unavailable.";
-    return MCPV5BuildPlan({}, MCPV5DefaultSettings());
+    root.status = "Control card unavailable; no modules run this hook.";
+    MCPV5_ACTIVE_PLAN=MCPV5BuildPlan({}, MCPV5DefaultSettings());
+    return MCPV5_ACTIVE_PLAN;
   }
 
   const entry = MCPV5SafeText(card.entry, MCPV5DefaultEntry());
@@ -1354,23 +1248,30 @@ function MCPV5SyncControls() {
       ? false
       : enableAll
       ? true
-      : MCPV5ReadBoolean(entry, MCPV5_PROFILE_NAMES[id], false);
+      : MCPV5ReadBoolean(entry, MCPV5_PROFILE_NAMES[id], root.enabled?.[id] === true);
   }
 
   const defaults = MCPV5DefaultSettings();
+  const preset = MCPV5NormalizeChoice(MCPV5ReadString(entry,"Preset","Custom"), ["Custom","Roleplay","RPG","Lightweight","All On","All Off"],"Custom");
+  const presets = {Roleplay:["inner_self","auto_cards","living_characters","character_continuity","slow_burn","information_firewall","story_card_extension","ar","usc_e"], RPG:["character_continuity","story_card_extension","living_meters","true_auto_stats","realmheart","dice_roll","ar"],Lightweight:["story_card_extension","ar","usc_e"],"All On":MCPV5_PROFILE_ORDER,"All Off":[]};
+  if (!enableAll && !disableAll && presets[preset]) for (const id of MCPV5_PROFILE_ORDER) enabled[id]=presets[preset].includes(id);
+  const prior = root.settings || {};
+  // Old panel settings are deliberately ignored, including stale saved values.
+  // Only performance and diagnostic settings remain player-editable.
   const settings = {
     ...defaults,
+    workloadGuard: MCPV5ReadBoolean(entry,"Workload Guard",true),
     hookBudgetMs: MCPV5ReadInteger(
       entry,
       "Hook Budget Milliseconds",
-      defaults.hookBudgetMs,
+      Number(prior.hookBudgetMs) || defaults.hookBudgetMs,
       500,
       1800
     ),
     hookSafetyMarginMs: MCPV5ReadInteger(
       entry,
       "Hook Safety Margin Milliseconds",
-      defaults.hookSafetyMarginMs,
+      Number(prior.hookSafetyMarginMs) || defaults.hookSafetyMarginMs,
       80,
       400
     ),
@@ -1387,8 +1288,12 @@ function MCPV5SyncControls() {
       )
     : "No scripts enabled.";
 
+  const previousEnabled = root.enabled || {};
   root.enabled = enabled;
   root.settings = settings;
+  MCPV6CleanupDisabled(previousEnabled, enabled);
+  const notes = ["MASTER SCRIPT V5.6.0", "Set Preset to Roleplay, RPG, Lightweight, All On or All Off; resets to Custom.", "Use /mms help for commands.", "", "LAST HOOK", JSON.stringify(root.lastRun || {}), "", "HEALTH", ...Object.entries(root.scheduler.heartbeat || {}).map(([id,b]) => MCPV5Name(id)+": runs "+b.runs+", deferred "+b.deferrals+", failures "+b.failures), "", "RECENT DIAGNOSTICS", ...(root.diagnostics || []).slice(-8).map(d=>d.kind+": "+d.data)].join("\n").slice(0,9000);
+  if (card.description !== notes) card.description = notes;
   root.status = status;
   root.planSummary = MCPV5PlanSummary(plan).slice(0, 16);
   root.conflictStatus = MCPV5ConflictStatus(plan).slice(0, 8);
@@ -1448,6 +1353,7 @@ function MCPV5PrepareInventoryCards(plan) {
   if (!plan.inventoryCardCooperative) {
     if (selectedOwners.length === 1) {
       const owner = selectedOwners[0];
+      for(const c of storyCards){if(!c||!MCPV5IsPlainInventoryKey(c.keys))continue;const type=String(c.type||"").toLowerCase();const inferred=type==="realmheart"?"realmheart":type==="list"&&String(c.entry||"").includes("## Wallet")&&String(c.entry||"").includes("## Inventory")?"stackable_inventory":"";if(inferred&&inferred!==owner)c.keys=MCPV5InventoryPhysicalKey(inferred,false);}
       const marked = storyCards.find(card => (
         card &&
         typeof card === "object" &&
@@ -1570,8 +1476,10 @@ function MCPV5HideFromStoryCardExtension(card) {
 
 function MCPV5CreateCardSandbox(moduleId) {
   const actualCards = MCPV5_NATIVE_STORY_CARDS;
-  const proxyCache = new Map();
-  const rawByProxy = new Map();
+  const proxyCache = new WeakMap();
+  const rawByProxy = new WeakMap();
+  let visibleCache = null;
+  let visibleSignature = "";
   const arrayTarget = [];
   const objectSnapshots = new Map();
   let arraySnapshot = null;
@@ -1599,6 +1507,7 @@ function MCPV5CreateCardSandbox(moduleId) {
   }
 
   function recordArray() {
+    visibleCache = null;
     if (!arraySnapshot) arraySnapshot = actualCards.slice();
   }
 
@@ -1611,7 +1520,9 @@ function MCPV5CreateCardSandbox(moduleId) {
     const snapshot = Object.create(null);
     const keys = Object.keys(card);
     for (let i = 0; i < keys.length; i++) {
-      snapshot[keys[i]] = card[keys[i]];
+      const v = card[keys[i]];
+      const copy = v && typeof v === "object" ? MCPV5CloneStateValue(v, 500000) : null;
+      snapshot[keys[i]] = copy && copy.ok ? copy.value : v;
     }
     objectSnapshots.set(card, snapshot);
   }
@@ -1627,14 +1538,16 @@ function MCPV5CreateCardSandbox(moduleId) {
 
   function isVisible(card) {
     if (!card || typeof card !== "object") return false;
+    if (card.keys === MCPV5_CARD_KEYS) return false;
+    if ((moduleId === "auto_cards" || moduleId === "inner_self") && MCPV5HideFromStoryCardExtension(card) && !/agent|configure\s*(?:inner self|auto-cards)|critical data|debug data|edit to enable/i.test(String(card.keys || "") + " " + String(card.title || ""))) return false;
     if (
       moduleId === "story_card_extension" &&
       MCPV5HideFromStoryCardExtension(card)
     ) return false;
     if ((moduleId === "auto_cards" || moduleId === "inner_self") &&
         MCPV5SAECard(card)) return false;
-    if (!isCooperative()) return true;
     const owner = MCPV5InventoryOwner(card.keys);
+    if (!isCooperative()) return !owner || (moduleIsInventoryOwner()?owner===moduleId:owner===visibleInventoryOwner());
     if (!owner) {
       return !MCPV5IsPlainInventoryKey(card.keys);
     }
@@ -1691,9 +1604,11 @@ function MCPV5CreateCardSandbox(moduleId) {
     const proxy = new Proxy(card, {
       get(target, property) {
         if (property === "keys") return logicalKeys(target);
+        if (target[property] && typeof target[property] === "object") recordObject(target);
         return target[property];
       },
       set(target, property, value) {
+        if (["keys", "title", "entry", "type"].includes(property)) visibleCache = null;
         recordObject(target);
         target[property] = property === "keys"
           ? translateKeys(value)
@@ -1701,11 +1616,13 @@ function MCPV5CreateCardSandbox(moduleId) {
         return true;
       },
       deleteProperty(target, property) {
+        visibleCache = null;
         recordObject(target);
         try { delete target[property]; } catch {}
         return true;
       },
       defineProperty(target, property, descriptor) {
+        visibleCache = null;
         recordObject(target);
         const next = Object.assign({}, descriptor);
         if (property === "keys" && "value" in next) {
@@ -1722,6 +1639,8 @@ function MCPV5CreateCardSandbox(moduleId) {
   }
 
   function visibleState() {
+    const sig = String(isCooperative()) + ":" + inventoryAuthority() + ":" + actualCards.length;
+    if (visibleCache && visibleSignature === sig) return visibleCache;
     const refs = [];
     const cards = [];
     const actualIndexes = [];
@@ -1734,7 +1653,8 @@ function MCPV5CreateCardSandbox(moduleId) {
       actualIndexes.push(i);
     }
     try { arrayTarget.length = cards.length; } catch {}
-    return { refs, cards, actualIndexes };
+    visibleSignature = sig;
+    return (visibleCache = { refs, cards, actualIndexes });
   }
 
   function normalizeIndex(value, length, allowEnd) {
@@ -1766,6 +1686,7 @@ function MCPV5CreateCardSandbox(moduleId) {
         );
     const items = Array.prototype.slice.call(arguments, 2)
       .map(normalizeInsertedCard);
+    if (items.some(item => !item || typeof item !== "object")) throw new TypeError("Story Cards must be objects");
     const removed = stateView.cards.slice(start, start + deleteCount);
 
     recordArray();
@@ -1777,10 +1698,12 @@ function MCPV5CreateCardSandbox(moduleId) {
       actualCards.splice(removalIndexes[i], 1);
     }
 
+    visibleCache = null;
     const refreshed = visibleState();
     const insertAt = physicalInsertIndex(start, refreshed);
     if (items.length) {
       actualCards.splice.apply(actualCards, [insertAt, 0].concat(items));
+      visibleCache = null;
     }
     return removed;
   }
@@ -1891,9 +1814,7 @@ function MCPV5CreateCardSandbox(moduleId) {
         if (wanted < now.cards.length) {
           spliceVisible(wanted, now.cards.length - wanted);
         } else {
-          while (visibleState().cards.length < wanted) {
-            spliceVisible(visibleState().cards.length, 0, undefined);
-          }
+          if (wanted !== now.cards.length) throw new RangeError("Sparse Story Card length growth is unsupported");
         }
         return true;
       }
@@ -1905,9 +1826,7 @@ function MCPV5CreateCardSandbox(moduleId) {
           recordArray();
           actualCards[now.actualIndexes[index]] = normalizeInsertedCard(value);
         } else {
-          while (visibleState().cards.length < index) {
-            spliceVisible(visibleState().cards.length, 0, undefined);
-          }
+          if (index !== now.cards.length || !value || typeof value !== "object") throw new RangeError("Sparse Story Card assignment is unsupported");
           spliceVisible(index, 0, value);
         }
         return true;
@@ -1981,6 +1900,7 @@ function MCPV5CreateCardSandbox(moduleId) {
     recordArray();
     const physicalKeys = translateKeys(keys);
     const extra = Array.prototype.slice.call(arguments, 3);
+    const priorCards = new Set(actualCards);
     const result = MCPV5_NATIVE_ADD_STORY_CARD.apply(
       null,
       [physicalKeys, MCPV5SafeText(entry, " "), type].concat(extra)
@@ -1997,10 +1917,13 @@ function MCPV5CreateCardSandbox(moduleId) {
     ) ? (rawByProxy.get(result) || result) : null;
     const actualIndex = returnedRaw
       ? actualCards.indexOf(returnedRaw)
-      : (Number.isInteger(result) ? result : -1);
+      : (Number.isInteger(result) && actualCards[result] ? result : actualCards.findIndex(card => !priorCards.has(card)));
     // These legacy modules immediately find newly created cards by
     // title. Preserve their intended titles if the runtime leaves them blank.
     const created = actualIndex >= 0 ? actualCards[actualIndex] : returnedRaw;
+    visibleCache = null;
+    if (created && typeof extra[0] === "string" && extra[0].length && !created.title) created.title = extra[0];
+    if (created && typeof extra[1] === "string" && !created.description) created.description = extra[1];
     if (created && !String(created.title || "").trim() &&
         (((moduleId === "auto_cards" || moduleId === "inner_self") && keys === "%@%") ||
          (moduleId === "story_arc_engine" && MCPV5SAECard(created)) ||
@@ -2075,8 +1998,10 @@ function MCPV5CreateCardSandbox(moduleId) {
       throw new Error("Story Card index does not exist");
     }
 
+    const target=actualCards[actualIndex];
+    if(target.keys===translateKeys(keys)&&target.entry===MCPV5SafeText(entry," ")&&target.type===type&&arguments.length===4)return undefined;
     recordArray();
-    recordObject(actualCards[actualIndex]);
+    recordObject(target);
     const extra = Array.prototype.slice.call(arguments, 4);
     return MCPV5_NATIVE_UPDATE_STORY_CARD.apply(
       null,
@@ -2172,6 +2097,7 @@ function MCPV5CreateCardSandbox(moduleId) {
   }
 
   function commit() {
+    visibleCache = null;
     arraySnapshot = null;
     objectSnapshots.clear();
   }
@@ -2223,7 +2149,7 @@ function MCPV5SnapshotSharedState() {
 
   return {
     memoryExists,
-    memory: memoryExists ? Object.assign({}, state.memory) : null,
+    memory: memoryExists ? (MCPV5CloneStateValue(state.memory,700000).value || Object.assign({},state.memory)) : null,
     messageExists: Object.prototype.hasOwnProperty.call(state, "message"),
     message: state.message
   };
@@ -2366,6 +2292,8 @@ const MCPV5_LM_FRONT_MEMORY_BEGIN = "<LM_FRONT_MEMORY>";
 const MCPV5_LM_FRONT_MEMORY_END = "</LM_FRONT_MEMORY>";
 const MCPV5_CC_FRONT_MEMORY_BEGIN = "<CC_FRONT_MEMORY>";
 const MCPV5_CC_FRONT_MEMORY_END = "</CC_FRONT_MEMORY>";
+const MCPV5_SIS_FRONT_MEMORY_BEGIN = "<MMS_SIS_GATE>";
+const MCPV5_SIS_FRONT_MEMORY_END = "</MMS_SIS_GATE>";
 
 function MCPV5StripOwnedFrontMemoryBlock(value, begin, end) {
   const source = String(value || "");
@@ -2394,7 +2322,7 @@ function MCPV5StripKnownOwnedFrontMemory(value) {
     ),
     MCPV5_CC_FRONT_MEMORY_BEGIN,
     MCPV5_CC_FRONT_MEMORY_END
-  ).trim();
+  ).replace(/<MMS_SIS_GATE>[\s\S]*?<\/MMS_SIS_GATE>/g, "").trim();
 }
 
 function MCPV5ComposeOwnedFrontMemory(baseValue, records, plan) {
@@ -2410,7 +2338,8 @@ function MCPV5ComposeOwnedFrontMemory(baseValue, records, plan) {
     MCPV5_CC_FRONT_MEMORY_END
   );
   let external = MCPV5StripKnownOwnedFrontMemory(source);
-  let handled = !!(lmBlock || ccBlock);
+  let sisBlock = MCPV5ExtractOwnedFrontMemoryBlock(source, MCPV5_SIS_FRONT_MEMORY_BEGIN, MCPV5_SIS_FRONT_MEMORY_END);
+  let handled = !!(lmBlock || ccBlock || sisBlock);
 
   const prepends = [];
   const appends = [];
@@ -2450,6 +2379,10 @@ function MCPV5ComposeOwnedFrontMemory(baseValue, records, plan) {
       }
     }
 
+    if (record.id === "stackable_inventory") {
+      const nextBlock = MCPV5ExtractOwnedFrontMemoryBlock(value, MCPV5_SIS_FRONT_MEMORY_BEGIN, MCPV5_SIS_FRONT_MEMORY_END);
+      if (nextBlock || sisBlock) { sisBlock = nextBlock; handled = true; }
+    }
     const externalValue = MCPV5StripKnownOwnedFrontMemory(value);
     const change = MCPV5ClassifySharedMemoryChange(
       MCPV5StripKnownOwnedFrontMemory(source),
@@ -2470,7 +2403,8 @@ function MCPV5ComposeOwnedFrontMemory(baseValue, records, plan) {
   }
 
   replacements.sort((a, b) => b.score - a.score);
-  if (replacements.length) external = replacements[0].text;
+  if (replacements.length && !external) external = replacements[0].text;
+  else if (replacements.length) MCPV5RecordDiagnostic("front-memory-replacement-blocked","Existing external Front Memory preserved.");
 
   const uniquePrepends = MCPV5UniqueStrings(prepends)
     .filter(value => !external.includes(value));
@@ -2485,7 +2419,7 @@ function MCPV5ComposeOwnedFrontMemory(baseValue, records, plan) {
       : uniqueAppends.join("\n\n");
   }
 
-  const parts = [external.trim(), lmBlock, ccBlock].filter(Boolean);
+  const parts = [external.trim(), lmBlock, ccBlock, sisBlock].filter(Boolean);
   return {
     handled,
     text: parts.join("\n\n")
@@ -2576,7 +2510,22 @@ function MCPV5CommitSharedState(base, records, plan) {
 
       const change = MCPV5ClassifySharedMemoryChange(baseValue, value);
       if (!change) continue;
+      if ((change.mode === "remove" || change.mode === "replace") && baseValue &&
+          !(field === "authorsNote" && records[i].id === "slow_burn")) {
+        MCPV5RecordDiagnostic("memory-replacement-blocked", records[i].id + " / " + field);
+        continue;
+      }
 
+      if (field === "authorsNote" && records[i].id === "slow_burn") {
+        // Only adopt the known Slow Burn markers, never the full replacement.
+        const markers = state.mcpSlowBurn?.markers || [];
+        const names = Object.values(state.mcpSlowBurn?.npcs || {}).map(v => v.name).filter(Boolean);
+        let clean=baseValue;
+        for(const name of names) clean=clean.replace(new RegExp("\\["+MCPV5EscapeRegExp(name)+"'s State:[^\\]\\r\\n]*\\]","g"),"");
+        const next = [clean.trim(),...markers].filter(Boolean).join("\n\n");
+        replacements.push({id:records[i].id,text:next,mode:"replace",score:10000});
+        continue;
+      }
       if (change.mode === "replace" || change.mode === "remove") {
         replacements.push({
           id: records[i].id || "",
@@ -2613,9 +2562,10 @@ function MCPV5CommitSharedState(base, records, plan) {
       const uniqueAppends = MCPV5UniqueStrings(appends)
         .filter(value => !merged.includes(value));
 
+      const usableCap=Math.max(0,cap-4);
       const prependBudget = uniquePrepends.length && uniqueAppends.length
-        ? Math.floor(cap * 0.4)
-        : cap;
+        ? Math.floor(usableCap * 0.4)
+        : usableCap;
       const prependText = uniquePrepends.length
         ? MCPV5TrimTextBoundary(
             uniquePrepends.join("\n\n"),
@@ -2624,7 +2574,7 @@ function MCPV5CommitSharedState(base, records, plan) {
           )
         : "";
 
-      const remaining = Math.max(0, cap - prependText.length);
+      const remaining = Math.max(0, usableCap - prependText.length);
       const appendText = uniqueAppends.length
         ? MCPV5TrimTextBoundary(
             uniqueAppends.join("\n\n"),
@@ -2641,17 +2591,15 @@ function MCPV5CommitSharedState(base, records, plan) {
       }
     }
 
-    merged = MCPV5DeduplicateMemoryField(field, merged);
+    if (merged === baseValue && !replacement) continue;
+    // Preserve user whitespace and distinct NPC markers. Deduplicate additions, not the entire note.
 
     // The broker may add no more than its exact field allocation. Existing
     // user content is not shortened merely because it already exceeds it.
     const maximum = Math.max(baseValue.length, baseValue.length + cap);
-    if (maximum > 0 && merged.length > maximum) {
-      merged = MCPV5TrimTextBoundary(
-        merged,
-        maximum,
-        field === "frontMemory"
-      );
+    if (maximum > 0 && merged.length > maximum && !(field === "authorsNote" && replacement?.id === "slow_burn")) {
+      if (baseValue && merged.includes(baseValue)) merged=baseValue;
+      else merged = MCPV5TrimTextBoundary(merged,maximum,field==="frontMemory");
     }
 
     if (merged !== baseValue || replacement) {
@@ -2751,7 +2699,7 @@ function MCPV5FitContext(candidate, before, limit) {
 
   // Never truncate AI Dungeon's original context. Only module additions may be
   // reduced; AI Dungeon remains responsible for trimming its own base context.
-  if (base.length >= budget) return base;
+  if (base.length >= budget) return MCPV6FitAtomic(next,base,budget) ?? base;
 
   const position = next.indexOf(base);
   if (position < 0) {
@@ -2759,7 +2707,7 @@ function MCPV5FitContext(candidate, before, limit) {
       "context-structural-overflow",
       "Rejected structural rewrite larger than info.maxChars."
     );
-    return base;
+    return MCPV6FitAtomic(next,base,budget) ?? base;
   }
 
   const prefix = next.slice(0, position);
@@ -2775,7 +2723,7 @@ function MCPV5FitContext(candidate, before, limit) {
   const fittedPrefix = MCPV5TrimTextBoundary(prefix, prefixCap, true);
   const fittedSuffix = MCPV5TrimTextBoundary(suffix, suffixCap, false);
 
-  return fittedPrefix + base + fittedSuffix;
+  return MCPV6FitAtomic(next,base,budget) ?? base;
 }
 
 function MCPV5ForceInnerSelfSettings(enableInnerSelf, enableAutoCards) {
@@ -2840,7 +2788,7 @@ function MCPV5RecordDiagnostic(kind, data) {
   root.diagnostics.push(row);
   root.diagnostics = root.diagnostics.slice(-30);
   if (root.settings && root.settings.diagnostics) {
-    log("MCP V5.3.10", row.kind, row.data);
+    log("MCP V5.6.0", row.kind, row.data);
   }
 }
 
@@ -3017,9 +2965,7 @@ function MCPV5RecordInventoryProposal(moduleId, before, after, plan) {
     root.inventoryLedger.recent = root.inventoryLedger.recent.slice(-20);
     return;
   }
-  const action = Number.isFinite(info && info.actionCount)
-    ? info.actionCount
-    : -1;
+  const action = root.actionSchedule?.action ?? (Number.isFinite(info && info.actionCount) ? info.actionCount : -1);
   const perOwner = moduleId === "true_auto_stats"
     ? MCPV5UniqueStrings(Object.keys(before.itemOwners || {}).concat(Object.keys(after.itemOwners || {})))
       .flatMap(owner => MCPV5InventoryMapDelta(
@@ -3054,9 +3000,9 @@ function MCPV5RecordInventoryProposal(moduleId, before, after, plan) {
 function MCPV5FinalizeInventoryLedger(plan) {
   if (!plan || !plan.cooperative) return;
   const ledger = MCPV5Root().inventoryLedger;
-  const action = Number.isFinite(info && info.actionCount) ? info.actionCount : -1;
+  const action = MCPV5Root().actionSchedule?.action ?? (Number.isFinite(info && info.actionCount) ? info.actionCount : -1);
   const proposals = ledger.pending.filter(row => row.action === action);
-  ledger.pending = ledger.pending.filter(row => row.action !== action);
+  ledger.pending = ledger.pending.filter(row => row.action > action).slice(-36);
 
   // A module has already committed its own state. Audit changes, never mirror
   // them: matching item or currency names are not proof of a shared owner.
@@ -3068,6 +3014,7 @@ function MCPV5FinalizeInventoryLedger(plan) {
           proposal.beforeHash, proposal.afterHash
         ]));
         if (ledger.events.some(event => event.id === id)) continue;
+        if(kind==="item")MCPV6ApplyMappedItem(plan,proposal,row,proposals);
         ledger.events.push({
           id, action, kind, key: row.key, name: row.name, delta: row.delta,
           owner: row.owner || "", before: row.before, after: row.after,
@@ -3094,6 +3041,8 @@ function MCPV5RecordInventoryAudit(moduleId, before, after, plan) {
 
 function MCPV5ExpectedTiming(tab, moduleId) {
   const root = MCPV5Root();
+  const order = tab === "input" ? MCPV5_INPUT_ORDER : tab === "context" ? MCPV5_CONTEXT_ORDER : MCPV5_OUTPUT_ORDER;
+  if (moduleId !== "information_firewall" && !order.includes(moduleId)) return 0;
   const measured = (
     root.timings &&
     root.timings[tab] &&
@@ -3132,7 +3081,7 @@ function MCPV5PlanSignature(plan, settings) {
     outcome: plan ? plan.outcomeRollAuthority : "",
     guard: settings ? settings.workloadGuard : false,
     budget: settings ? settings.hookBudgetMs : 0,
-    safety: settings ? settings.hookSafetyMarginMs : 0
+    safety: settings ? settings.hookSafetyMarginMs : 0, settings
   }));
 }
 
@@ -3193,6 +3142,7 @@ function MCPV5CommandHint(value, plan) {
     }
     if (effective.auto_cards === true) return "auto_cards";
   }
+  if (effective.stackable_inventory===true && /^\/(?:take|collect|drop|give|throw|use|undo)(?:\s|$)/i.test(clean)) return "stackable_inventory";
   if (effective.realmheart === true &&
       MCPV5LooksLikeRealmHeartSlashInput(value)) return "realmheart";
   // /help, /inventory and user-defined meter commands can be shared. Do not
@@ -3270,10 +3220,10 @@ function MCPV5RealmHeartReplyForAction(root, schedule) {
 
 function MCPV5BuildActionSchedule(plan, settings, inputText) {
   const root = MCPV5Root();
-  const eligible = MCPV5EligibleModules(plan);
+  const eligible = MCPV5EligibleModules(plan).filter(id=>!root.optionalPaused||!["auto_cards","story_card_extension","ar","usc_e"].includes(id));
   // RealmHeart advances world time and recurring bills; unlike a lightweight
   // observer it must be scheduled on every ordinary narrative lifecycle.
-  const fixedOutput = eligible.filter(id => id === "realmheart");
+  const fixedOutput = eligible.filter(id => ["realmheart","living_meters","true_auto_stats","stackable_inventory"].includes(id));
   const fixedOutputSet = new Set(fixedOutput);
   const ordinary = eligible.filter(id => !fixedOutputSet.has(id));
   const cursor = ordinary.length
@@ -3290,7 +3240,8 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
       Number.isFinite(heartbeat[id].deferStreak)
       ? Math.min(100, heartbeat[id].deferStreak) : 0
   }));
-  aged.sort((a, b) => b.streak - a.streak || a.index - b.index);
+  const priority = id => ["living_meters","true_auto_stats","stackable_inventory","realmheart"].includes(id) ? 0 : ["character_continuity","information_firewall","inner_self","living_characters","slow_burn"].includes(id) ? 1 : ["story_arc_engine","narrative_governor","story_card_extension"].includes(id) ? 2 : 3;
+  aged.sort((a,b)=>priority(a.id)-priority(b.id)||b.streak-a.streak||a.index-b.index);
   const isDecoration = id => ["ar", "usc_e", "dice_roll", "coin_flip"].includes(id);
   const prioritized = aged.filter(row => !isDecoration(row.id))
     .concat(aged.filter(row => isDecoration(row.id))).map(row => row.id);
@@ -3405,6 +3356,8 @@ function MCPV5BuildActionSchedule(plan, settings, inputText) {
   const action = Number.isFinite(info && info.actionCount)
     ? info.actionCount
     : -1;
+  // Recompute after mandatory command promotion.
+  for (const tab of ["input","context","output"]) projectedTotals[tab] = selected.reduce((sum,id)=>sum+MCPV5ExpectedTiming(tab,id),0);
   return {
     version: 3,
     action,
@@ -3471,6 +3424,7 @@ function MCPV5ActiveTransaction(tab, plan) {
     ? info.actionCount
     : -1;
   const stored = root.transaction;
+  if (state.vars?.awaitingGate && state.vars?.mmsGateId && plan?.effective?.stackable_inventory) return null;
 
   if (
     stored &&
@@ -3498,6 +3452,7 @@ function MCPV5ActiveTransaction(tab, plan) {
     root.transaction = null;
   }
 
+  if (tab === "output" && !MCPV6_DETECT_CONTEXT_TASK) return null;
   for (let i = 0; i < MCPV5_TRANSACTION_DETECTORS.length; i++) {
     const detector = MCPV5_TRANSACTION_DETECTORS[i];
     try {
@@ -3766,7 +3721,17 @@ function MCPV5ComposeContextProposals(baseText, proposals, plan, limit) {
   if (uniqueSuffixes.length) {
     out = out + "\n\n" + uniqueSuffixes.join("\n\n");
   }
-  return MCPV5FitContext(out, base, limit);
+  const budget = Math.min(Number.isFinite(info?.maxChars)?info.maxChars:Infinity,Number.isFinite(limit)?limit:Infinity);
+  if (out.length<=budget) return out;
+  // Keep full structural edits only if they fit; prioritize complete contributions.
+  let result = chosenBase.length<=budget ? chosenBase : base;
+  for (const p of additive.sort((a,b)=>b.score-a.score)) {
+    const next=[p.analysis.prefix.trim(),result,p.analysis.suffix.trim()].filter(Boolean).join("\n\n");
+    const fitted=next.length<=budget?next:MCPV6FitAtomic(next,result,budget);
+    if(fitted!==null) result=fitted;
+    else MCPV5RecordDiagnostic("context-contribution-deferred",p.id);
+  }
+  return result;
 }
 
 function MCPV5PreferFreshSpotlight(eligible, recentOwner) {
@@ -4907,27 +4872,7 @@ function MCPV5Create_inner_package() {
               }
               remaining--;
 
-              const lower = actionText.toLowerCase();
-
-              for (let [a, n] = [0, config.agents.length]; a < n; a++) {
-                  const agentLower = config.agents[a].toLowerCase();
-
-                  for (
-                      let p = lower.indexOf(agentLower);
-                      (p !== -1);
-                      p = lower.indexOf(agentLower, p + 1)
-                  ) {
-
-                      if ([((0 < p) ? lower.charCodeAt(p - 1) : 0), (
-                          ((p + agentLower.length) < lower.length)
-                          ? lower.charCodeAt(p + agentLower.length) : 0
-                      )].every(c => ((c < 97) || (122 < c)))) {
-
-                          possibilities.push(config.agents[a]);
-                          break;
-                      }
-                  }
-              }
+              for(const name of config.agents)if(MCPV6NameMention(actionText,name))possibilities.push(name);
           }
           if (possibilities.length === 0) {
 
@@ -4945,8 +4890,12 @@ function MCPV5Create_inner_package() {
                   ? state.informationFirewall : null;
               const sceneNames = firewall && Array.isArray(firewall.present)
                 ? new Set(firewall.present.map(name => String(name).toLowerCase())) : null;
-              const onScene = sceneNames ? possibilities.filter(name => sceneNames.has(name.toLowerCase())) : [];
-              const pool = onScene.length ? onScene : possibilities;
+              const manual = new Set((MCPV5Root().manualCast||[]).map(n=>n.toLowerCase()));
+              const onScene = possibilities.filter(name => manual.has(name.toLowerCase()) || sceneNames?.has(name.toLowerCase()));
+              const candidates=onScene.length?onScene:possibilities;
+              const recentThoughts=MCPV5Root().thoughtSpotlight||{};
+              const fresh=candidates.filter(n=>!Number.isFinite(recentThoughts[n.toLowerCase()])||(info?.actionCount??0)-recentThoughts[n.toLowerCase()]>=3);
+              const pool=fresh.length?fresh:candidates;
               const n = pool.length;
               const total = (n * (n + 1)) / 2;
               for (let [i, r] = [0, Math.random() * total]; i < n; i++) {
@@ -5930,6 +5879,12 @@ function MCPV5Create_inner_package() {
       }
 
       text = text.replace(/[\u200B-\u200D]+/g, "");
+      const expectedThought = typeof IS.agent === "string" && IS.agent.trim().length > 0;
+      const validThought = /^\s*[({\[]\s*(?:(?:delete|forget|remove)\s+[A-Za-z0-9_]+|[A-Za-z0-9_]+\s*=\s*(?:`[^`\r\n]{1,600}`|[A-Za-z0-9_]+))\s*[)}\]]/.exec(text);
+      if (!expectedThought || !validThought) { IS.agent = ""; return; }
+      const protectedNarrative = text.slice(validThought[0].length);
+      // Only the authorized leading envelope participates in the legacy parser.
+      text = validThought[0];
 
       if (!/[()\[\]{}]/.test(text) && ((
           /^\s*(?:del(?:et(?:e[ds]?|ing))?|for(?:get(?:s|ting)?|got(?:ten)?)|remov(?:e[ds]?|ing))(?:[\s_]*(?:key(?:_name)?|thought|memory|unwanted(?:_key)?))?[\s=:]*[a-z0-9A-Z]*_+[a-z0-9A-Z]/i
@@ -6269,7 +6224,7 @@ function MCPV5Create_inner_package() {
 
                       && (last < existing.length)
 
-                      && (existing.indexOf(thought) !== -1)
+                      && (existing.indexOf(thought) !== -1 || MCPV6ThoughtSimilarity(existing.slice(existing.indexOf("→")+1),thought)>=0.88)
                   ) {
 
                       continue interpreter;
@@ -6351,6 +6306,7 @@ function MCPV5Create_inner_package() {
           .replace(/\n\n\n+/g, "\n\n")
       );
 
+      text = protectedNarrative;
       if (text === "") {
 
           text = (IS.encoding === "") ? "\u200B" : IS.encoding;
@@ -6380,8 +6336,10 @@ function MCPV5Create_inner_package() {
       }
 
       IS.hash = hash;
+      const host=MCPV5Root();host.thoughtSpotlight ||= {};host.thoughtSpotlight[agent.name.toLowerCase()]=info?.actionCount??0;
+          if(Object.keys(host.thoughtSpotlight).length>80){host.thoughtSpotlight=Object.fromEntries(Object.entries(host.thoughtSpotlight).sort((a,b)=>b[1]-a[1]).slice(0,80));}
 
-      IS.encoding = "";
+          IS.encoding = "";
 
       for (const operation of operations) {
 
@@ -6783,7 +6741,7 @@ function MCPV5Create_inner_package() {
                                   );
                               })
                               .join("\n")
-                          ) + (right !== "") ? ("\n\n" + right) : "");
+                          ) + (right !== "" ? ("\n\n" + right) : ""));
                       })
 
                       .replace(/(?:\s*>>>[\s\S]*?<<<\s*)+/g, "\n\n")
@@ -8840,10 +8798,10 @@ function MCPV5Create_inner_package() {
                       const entryPlaceholderPattern = /(?:[%\$]+\s*|[%\$]*){+\s*entry\s*}+/gi;
                       if (entryPlaceholderPattern.test(AC.generation.workpiece.prompt)) {
 
-                          return AC.generation.workpiece.prompt.replace(entryPlaceholderPattern, partialEntry);
+                          return MCPV6CardPrompt(AC.generation.workpiece.prompt.replace(entryPlaceholderPattern, partialEntry));
                       } else {
 
-                          return AC.generation.workpiece.prompt.trimEnd() + "\n\n" + partialEntry;
+                          return MCPV6CardPrompt(AC.generation.workpiece.prompt.trimEnd() + "\n\n" + partialEntry);
                       }
                   })();
                   isGenerating = true;
@@ -8878,9 +8836,8 @@ function MCPV5Create_inner_package() {
                   const turnRange = boundInteger(1, maxTurn - minTurn);
                   const recencyExponent = Math.log10(turnRange) + 1.85;
 
-                  AC.database.titles.candidates.sort((a, b) => {
-                      return relevanceScore(b) - relevanceScore(a);
-                  });
+                  const scores = new Map(AC.database.titles.candidates.map(c => [c,relevanceScore(c)]));
+                  AC.database.titles.candidates.sort((a,b)=>scores.get(b)-scores.get(a));
                   function relevanceScore(candidate) {
 
                       return candidate.slice(1).reduce((sum, turn) => {
@@ -9260,35 +9217,12 @@ function MCPV5Create_inner_package() {
               if (cleanA === cleanB) {
                   return 1;
               }
-              // Compute the Levenshtein distance
-              const [lengthA, lengthB] = [cleanA, cleanB].map(str => str.length);
-              // I love DP ❤️ (dynamic programming)
-              const dp = Array(lengthA + 1).fill(null).map(() => Array(lengthB + 1).fill(0));
-              for (let i = 0; i <= lengthA; i++) {
-                  dp[i][0] = i;
-              }
-              for (let j = 0; j <= lengthB; j++) {
-                  dp[0][j] = j;
-              }
-              for (let i = 1; i <= lengthA; i++) {
-                  for (let j = 1; j <= lengthB; j++) {
-                      if (cleanA[i - 1] === cleanB[j - 1]) {
-                          // No cost if chars match, swipe right 😎
-                          dp[i][j] = dp[i - 1][j - 1];
-                      } else {
-                          dp[i][j] = Math.min(
-                              // Deletion
-                              dp[i - 1][j] + 1,
-                              // Insertion
-                              dp[i][j - 1] + 1,
-                              // Substitution
-                              dp[i - 1][j - 1] + 1
-                          );
-                      }
-                  }
-              }
-              // Convert distance to similarity score (1 - (distance / maxLength))
-              return 1 - (dp[lengthA][lengthB] / Math.max(lengthA, lengthB));
+              // Rolling rows: exact Levenshtein distance, O(min(m,n)) memory.
+              const a=cleanA, b=cleanB;
+              let prev=new Uint16Array(b.length+1), row=new Uint16Array(b.length+1);
+              for(let j=0;j<=b.length;j++) prev[j]=j;
+              for(let i=1;i<=a.length;i++) { row[0]=i; for(let j=1;j<=b.length;j++) row[j]=Math.min(prev[j]+1,row[j-1]+1,prev[j-1]+(a[i-1]!==b[j-1])); [prev,row]=[row,prev]; }
+              return 1-prev[b.length]/Math.max(a.length,b.length,1);
           }
           function splitBySentences(prose) {
               // Don't split sentences on honorifics or abbreviations such as "Mr.", "Mrs.", "etc."
@@ -12569,7 +12503,7 @@ function MCPV5Create_living_characters() {
 
       const names = npcRoster();
       for (let i = 0; i < names.length; i++) {
-        if (names[i] && containsWholeWord(recent, names[i])) found.push(names[i]);
+        if (names[i] && (MCPV6NameMention(recent,names[i]) || (MCPV5Root().manualCast||[]).some(n=>n.toLowerCase()===names[i].toLowerCase()))) found.push(names[i]);
       }
 
       if (p && found.indexOf(p) === -1 && containsWholeWord(recent, p)) found.push(p);
@@ -14078,7 +14012,7 @@ function MCPV5Create_living_characters() {
       const pKey = LC.protagonist ? cleanName(LC.protagonist).toLowerCase() : "";
       return roster.filter(function(n) {
         if (pKey && LC.protagonistAlwaysPresent && cleanName(n).toLowerCase() === pKey) return true;
-        return containsWholeWord(text, n);
+        return MCPV6NameMention(text,n) || (MCPV5Root().manualCast||[]).some(v=>v.toLowerCase()===n.toLowerCase());
       });
     }
 
@@ -14091,7 +14025,7 @@ function MCPV5Create_living_characters() {
       const turn = (ensureState().turn) || 0;
       if ((turn - (ts.lastThoughtTurn || 0)) < TC.interval) return "";
       if (randomInt(100) >= TC.chance) return "";
-      const cands = thoughtCandidates(TC, contextText);
+      const cands = thoughtCandidates(TC, contextText).filter(n=>n.toLowerCase()!==String(state.InnerSelf?.agent||"").trim().toLowerCase());
       if (!cands.length) return "";
       const name = choose(cands);
       ts.pendingChar = name;
@@ -14460,7 +14394,8 @@ function MCPV5Create_true_auto_stats() {
       text = feedStrgToContext(text);
 
       text = removeAngleText(text);
-
+      const pending = (state.playerList||[]).filter(p=>state.askEnergyCost?.[p]===true && state.players?.[p]?.talents?.name?.length);
+      if (pending.length) text += "\n\nFor each pending talent, output a separate line [TAS_COST:player:talent:integer] (1–10000), then continue the story. Targets: " + pending.map(p=>p+":"+state.players[p].talents.name.slice(-1)[0]).join("; ");
     }
 
     return text;
@@ -18005,7 +17940,7 @@ function MCPV5Create_true_auto_stats() {
 
   function statUp(plr, statName, incAmt) {
 
-    if (typeof incAmt !== "number") {
+    if (typeof incAmt !== "number" || !Number.isFinite(incAmt)) {
       incAmt = 0;
     }
     incAmt = Number(incAmt);
@@ -18040,6 +17975,7 @@ function MCPV5Create_true_auto_stats() {
         state.players[plr].stats[statName] = state.players[plr].stats[maxStatName];
       }
 
+      if (MCPV5Root().settings.resourcePolicy !== "Legacy") state.players[plr].stats[statName] = Math.max(0, state.players[plr].stats[statName]);
       const statSC = storyCards.find(sc => sc.title === `${plr} Stats`);
 
       if (incAmt >= 0) { sign = "⬆️" }
@@ -18961,30 +18897,18 @@ function MCPV5Create_true_auto_stats() {
     state.playerList.forEach(plr => {
       if (state.askEnergyCost[plr] == true) {
 
-        let numbers = text.match(/\d+/g);
-        log("numbers: " + numbers);
-
-        let arrEnergyValue = numbers ? numbers.map(Number) : [];
-
-        if (arrEnergyValue.length > 1) {
-          arrEnergyValue = arrEnergyValue.filter(value => value != 100);
-        }
-        log("arrEnergyValue: " + arrEnergyValue);
-
-        highestEnergyValue = arrEnergyValue.length > 0 ? Math.max(...arrEnergyValue) : null;
-        log("highestEnergyValue: " + highestEnergyValue);
-
-        if (highestEnergyValue !== null && highestEnergyValue > 0 && onePlayerFlagger()) {
-          state.players[plr].talents.cost[state.players[plr].talents.cost.length - 1] = highestEnergyValue;
-          log("state.players[plr].talents.cost(AI) after learning: " + state.players[plr].talents.cost);
-        }
-        else {
-
-          randEpCost = randomInt(5, 50 + (state.players[plr].stats.lvl * 0.1));
-          state.players[plr].talents.cost[state.players[plr].talents.cost.length - 1] = randEpCost;
-          log("randEpCost: " + randEpCost);
-
-          text = "\"" + state.players[plr].talents.name[state.players[plr].talents.name.length - 1] + "\" will cost " + state.players[plr].talents.cost[state.players[plr].talents.cost.length - 1] + " energy to use. " + text;
+        const pending = state.players[plr].talents;
+        const ix = pending.cost.length - 1;
+        const tag = "[TAS_COST:" + plr + ":" + pending.name[ix] + ":";
+        const rows = String(text).split(/\r?\n/);
+        const match = rows.map(line=>line.trim()).find(line=>line.startsWith(tag)&&/^\d+\]$/.test(line.slice(tag.length)));
+        const amount = match ? Number(match.slice(tag.length,-1)) : NaN;
+        if (Number.isSafeInteger(amount) && amount>=1 && amount<=10000) {
+          pending.cost[ix]=amount;
+          text=rows.filter(line=>line.trim()!==match).join("\n");
+        } else {
+          pending.cost[ix]=Math.max(1,Number(pending.cost[ix])||10);
+          text = "\"" + pending.name[ix] + "\" will cost " + pending.cost[ix] + " energy to use. " + text;
         }
 
         statUp(plr, "intl", randomFloat(0.01, 3));
@@ -19273,7 +19197,9 @@ function MCPV5Create_true_auto_stats() {
 
     if (state.players[plr].talents.name[index]) {
 
-      energyCost = state.players[plr].talents.cost[index];
+      energyCost = Number(state.players[plr].talents.cost[index]);
+      if (!Number.isFinite(energyCost) || energyCost < 0) return " Talent cost is invalid.";
+      if (MCPV5Root().settings.resourcePolicy !== "Legacy" && Number(state.players[plr].stats.ep) < energyCost) return " Not enough energy to use this talent.";
 
       statUp(plr, "ep", -1 * energyCost);
       storeStatsToSC();
@@ -19338,7 +19264,9 @@ function MCPV5Create_true_auto_stats() {
 
   function executeskill(plr, fullSkillFlag, index) {
     skillFlavorText = "";
-    manaCost = state.players[plr].skills.cost[index];
+    manaCost = Number(state.players[plr].skills.cost[index]);
+    if (!Number.isFinite(manaCost) || manaCost < 0) return " Skill cost is invalid.";
+    if (MCPV5Root().settings.resourcePolicy !== "Legacy" && Number(state.players[plr].stats.mp) < manaCost) return " Not enough mana to use this skill.";
 
     statUp(plr, "mp", manaCost * -1);
 
@@ -21175,20 +21103,8 @@ function MCPV5Create_story_arc_engine() {
   }
 
   function logContextToSettingsSC(text){
-    // Fetch the sc
     const settingsSC = storyCards.find(sc => sc.title === "Story Arc Settings");
-
-    // Trim notes on char limit to prevent memory overfill
-    if(settingsSC.description.length > 3000){
-      halfIndex = Math.floor(settingsSC.description.length / 2);
-      settingsSC.description = settingsSC.description.slice(0, halfIndex);
-
-      console.log("Trimming settingsSC description to prevent memory overload.");
-    }
-
-    // Log to setting sc notes
-    settingsSC.description = `Context Log ${state.turnNum_SAE} | ${text}\n` + settingsSC.description;
-
+    if (settingsSC && MCPV5Root().settings.diagnostics) settingsSC.description = ("Context Log " + state.turnNum_SAE + " | " + String(text).slice(0,600) + "\n" + String(settingsSC.description||"")).slice(0,3000);
     return text;
   }
 
@@ -21226,8 +21142,10 @@ function MCPV5Create_story_arc_engine() {
       // Fetch the sc and log the previous arc in sc notes
       const arcSC = storyCards.find(sc => sc.title === "Current Story Arc");
 
-      // Get first plot element to be removed and log to sc description
+      // Require explicit completion evidence; absence of evidence keeps the beat.
       match = state.storyArc.match(/^1\.\s.*$/m);
+      const recent=(Array.isArray(history)?history.slice(-6):[]).map(a=>a?.text||a?.rawText||"").join(" ");
+      if(!match || !MCPV6ArcCompleted(match[0],recent))return;
       if(match){
         arcSC.description = `Log ${state.turnNum_SAE} | Plot Element Removed:\n${match[0]}\n` + arcSC.description;
       }
@@ -21312,8 +21230,8 @@ function MCPV5Create_narrative_governor() {
         state.threshholdModelIncreaseTemperature = 3
         state.threshholdModelDecreaseTemperature = 3
 
-        state.maximumTemperature = 12
-        state.trueMaximumTemperature = 15
+        state.maximumTemperature = ({"Slice of Life":6,"Slow Narrative":9,"Balanced":12,"Action":14,"Psychological":10})[MCPV5Root().settings.pacingProfile] ?? 12
+        state.trueMaximumTemperature = Math.min(15,state.maximumTemperature+3)
 
         state.minimumTemperature = 1
         state.trueMinimumTemperature = 1
@@ -21325,7 +21243,7 @@ function MCPV5Create_narrative_governor() {
         state.cooldownTimer = 5
         state.cooldownRate = 2
 
-        state.randomExplosionChance = 3
+        state.randomExplosionChance = ({"Slice of Life":0,"Slow Narrative":0,"Balanced":3,"Action":6,"Psychological":1})[MCPV5Root().settings.pacingProfile] ?? 3
         state.randomExplosionHeatIncreaseValue = 5
         state.randomExplosionTemperatureIncreaseValue = 2
 
@@ -21350,7 +21268,7 @@ function MCPV5Create_narrative_governor() {
           if (state.storyTemperature == undefined){
             state.storyTemperature = state.initialTemperatureValue
           }
-          const lowerText = text.toLowerCase()
+          const lowerText = MCPV6PacingEvidence(text).toLowerCase()
           const dialogue = /["“][^"”]*["”]/g;
           const words = lowerText.replace(dialogue, " ").split(/\s+/)
           let conflictCount = 0
@@ -21379,7 +21297,7 @@ function MCPV5Create_narrative_governor() {
             }
 
             if (calmingCount > 0) {
-              state.heat -= conflictCount * state.playerDecreaseHeatImpact
+              state.heat -= calmingCount * state.playerDecreaseHeatImpact
               if (calmingCount >= state.threshholdPlayerDecreaseTemperature){
                 state.storyTemperature -= calmingCount * state.playerDecreaseTemperatureImpact
                 log(`Detected ${calmingCount} calming words (Player). Decreasing heat & temperature.`)
@@ -21600,7 +21518,9 @@ function MCPV5Create_narrative_governor() {
               (state.storyTemperature >= 8 ? "high" : state.storyTemperature >= 4 ? "moderate" : "low") +
               ". Let the existing story arc guide larger plot changes."
             : note;
-          text = text + "\n\n" + guidance
+          const profile = MCPV5Root().settings.pacingProfile;
+          const direction = {"Slice of Life":"Favor ordinary activity and low-stakes interactions.","Slow Narrative":"Develop tension slowly and allow quiet scenes.","Action":"Favor active challenges appropriate to the established situation.","Psychological":"Favor believable interpersonal stakes and internal tension; do not force combat."}[profile] || "";
+          text = text + "\n\n" + [guidance,direction].filter(Boolean).join(" ")
           return { text }
         }
 
@@ -21659,7 +21579,7 @@ function MCPV5Create_narrative_governor() {
         ];
 
         const modifier = (text) => {
-          const lowerText = text.toLowerCase()
+          const lowerText = MCPV6PacingEvidence(text).toLowerCase()
           const dialogue = /["“][^"”]*["”]/g;
           const words = lowerText.replace(dialogue, " ").split(/\s+/)
           let conflictCount = 0
@@ -21791,7 +21711,8 @@ function MCPV5Create_stackable_inventory() {
     const key = String(currency || "").trim();
     const delta = Number(amount || 0);
     if (!key || !Number.isFinite(delta)) return { ok:false, newAmount: walletAmount(currency) };
-    const next = (w[key] || 0) + delta;
+    const next = Number(w[key] || 0) + delta;
+    if (!Number.isFinite(next) || Math.abs(next)>Number.MAX_SAFE_INTEGER || next<0) return {ok:false,newAmount:walletAmount(currency)};
     w[key] = next;
     return { ok:true, newAmount: next };
   }
@@ -22420,7 +22341,7 @@ function MCPV5Create_stackable_inventory() {
     state.vars.gateKind = "inv";
     state.vars.awaitingGate = true;
     state.vars.lastGateVerdict = null;
-    state.memory.frontMemory = prompt;
+    MCPV6StartGate(prompt);
   }
 
   function startMoneyGate(){
@@ -22443,7 +22364,7 @@ function MCPV5Create_stackable_inventory() {
     state.vars.gateKind = "wallet";
     state.vars.awaitingGate = true;
     state.vars.lastGateVerdict = null;
-    state.memory.frontMemory = prompt;
+    MCPV6StartGate(prompt);
   }
 
   function clearUnifiedGate(){
@@ -22451,10 +22372,12 @@ function MCPV5Create_stackable_inventory() {
     state.vars.gateKind = null;
     state.vars.lastGateVerdict = null;
     state.vars.awaitingGate = false;
+    state.vars.mmsGateId = "";
+    state.vars.mmsGateDelivered = "";
   }
 
   function removeGateText() {
-    if (state?.memory) state.memory.frontMemory = "";
+    MCPV6ClearGateMemory();
   }
 
   function SIS_onInput(text) {
@@ -22491,8 +22414,8 @@ function MCPV5Create_stackable_inventory() {
               if (r?.ok && typeof rebuildInventoryCardFromState === "function") {
                 rebuildInventoryCardFromState();
               }
-              recordInventoryAction("wallet_add", p.currency, p.amount, "collect");
-              const msg = `You collected ${p.amount} ${p.currency}.`;
+              if (r?.ok) recordInventoryAction("wallet_add", p.currency, p.amount, "collect");
+              const msg = r?.ok ? `You collected ${p.amount} ${p.currency}.` : "Wallet transaction rejected: invalid balance.";
               text = msg + (text ? `\n\n${text}` : "");
             } else {
               const msg = `You failed to collect ${p.amount} ${p.currency}.`;
@@ -22531,7 +22454,7 @@ function MCPV5Create_stackable_inventory() {
       }
     } catch {}
 
-    text = String(text || "").replace(/^\s*(APPROVE|REJECT)\s*$/gim, "").trim();
+    text = String(text || "");
 
     return text;
   }
@@ -22568,7 +22491,8 @@ function MCPV5Create_stackable_inventory() {
       return (function () {
         const modifier = (text) => {
 
-          return { text, stop }
+          const packet = MCPV6GatePacket();
+          return { text: packet && !text.includes(packet) ? text + "\n\n" + packet : text, stop }
         }
 
         return modifier(text);
@@ -22584,14 +22508,19 @@ function MCPV5Create_stackable_inventory() {
             const pending = !!(state.vars.awaitingGate || state.vars.awaitingMoneyGate || state.vars.awaitingInvGate);
             if (!pending) return;
 
-            const rxVerdict = /^\s*(APPROVE|REJECT)\s*$/im;
+            const token = state.vars.mmsGateId;
+            const rxVerdict = token ? new RegExp("^\\s*(APPROVE|REJECT)\\s+" + token + "\\s*$", "im") : /^\s*(APPROVE|REJECT)\s*$/im;
             const m = String(text || "").match(rxVerdict);
-            if (!m) return;
-
+            if (!m || (token && state.vars.mmsGateDelivered !== token)) {
+              text=String(text||"").replace(/^\s*(?:APPROVE|REJECT)(?:\s+G[0-9a-z]+X[0-9a-z]+)?\s*$/gim, "").trim();
+              MCPV6CancelGate("Inventory request canceled: no valid matching approval. You can retry the command.");
+              return;
+            }
+            text = String(text).replace(rxVerdict, "").trim();
             state.vars.lastGateVerdict = m[1].toUpperCase();
             state.vars.awaitingGate = false;
 
-            if (state?.memory) state.memory.frontMemory = "";
+            MCPV6ClearGateMemory();
           } catch {}
         })();
 
@@ -22608,7 +22537,7 @@ function MCPV5Create_stackable_inventory() {
     return { text: MCPV5SafeText(globalThis.text, "\u200B") };
   }
 
-  return { run };
+  return { run, refreshInventory: rebuildInventoryCardFromState };
 }
 
 function MCPV5Create_realmheart() {
@@ -23669,8 +23598,6 @@ if(lo.startsWith("/ubis ")||lo.startsWith("/rh ")){var rest=(lo.startsWith("/rh 
   lines.push("[Realmheart] Unknown. Type /help for commands.");return{handled:true,lines:lines};}
 return{handled:false,lines:[]};}
 
-onLibrary_UBIS();
-
   onLibrary_UBIS();
 
   function run(tab) {
@@ -23716,7 +23643,7 @@ onLibrary_UBIS();
     return { text: MCPV5SafeText(globalThis.text, "\u200B") };
   }
 
-  return { run };
+  return { run, refreshInventory: ()=>{if(state.ubis?.cardConfig?.masterEnabled && state.ubis.cardConfig["Inventory"])ubisWriteCard("Inventory",ubisInventoryCardBody(state.ubis));} };
 }
 
 function MCPV5Create_character_continuity() {
@@ -25020,6 +24947,7 @@ function characterContinuityRun(hook, incomingText, filterStory) {
     const current = cards[index] || card;
     const logicalTitle = line(intendedTitle || titleOf(current), 220);
     if (!logicalTitle) return null;
+    if (current.entry===entry && current.keys===managedCardKey(logicalTitle) && current.type===settings.CARD_TYPE && current.title===logicalTitle) return current;
     return updateCardAt(
       index,
       managedCardKey(logicalTitle),
@@ -46484,7 +46412,7 @@ const RM = (function () {
       if (RM_CONFIG.scanOutput && out.trim()) {
         // Retries reuse cached outputs, so the same text can arrive twice.
         // Hashing it stops a retry from applying every trigger a second time.
-        const h = hash32(out);
+        const h = hash32(String(info?.actionCount ?? -1) + ":" + out);
         if (h !== s.outHash) {
           s.outHash = h;
           scan(s, out, "output");
@@ -47169,7 +47097,7 @@ const DEFAULT_STOP_WORDS = new Set([
 
 function simpleTokenize(text, extraStopWords = []) {
     if (!text || typeof text !== 'string') return [];
-    let words = text.toLowerCase().replace(/[^a-z0-9а-яё]/gi, ' ').split(/\s+/);
+    let words = text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, ' ').split(/\s+/);
     let allStopWords = new Set(DEFAULT_STOP_WORDS);
     for (let w of extraStopWords) {
         allStopWords.add(w.toLowerCase());
@@ -47334,7 +47262,7 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
         state.__sceRecallSignature = currentSignature;
         console.log("[SCE] Rebuilt card bags with IDF. Cards:", regularCards.length);
     } else {
-        if (!state.__sceIdfMap) {
+        if (!state.__sceIdfMap || typeof state.__sceIdfMap.get !== "function") {
             let { bags, idfMap } = buildCardBags(regularCards, customStop);
             state.__sceCardBags = bags;
             state.__sceIdfMap = idfMap;
@@ -47345,6 +47273,9 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
     decayRate = Math.min(1.0, Math.max(0.0, decayRate));
     let threshold = config.contextRecallThreshold !== undefined ? config.contextRecallThreshold : 0.001;
     let maxCards = config.contextRecallMaxCards || 1;
+    const mode=MCPV5Root().settings.recallMode;
+    if(mode==="Conservative"){threshold*=1.5;maxCards=Math.max(1,Math.ceil(maxCards/2));}
+    if(mode==="Expansive"){threshold*=0.75;maxCards=Math.min(20,maxCards+2);}
     let contextWindow = config.contextWindowChars || 3000;
 
     function buildWeightMap(txt) {
@@ -47388,7 +47319,7 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
             if (!bag || bag.tokens.length === 0) continue;
             let score = cardCoverageScore(bag.tokens, bag.norm, weightMapClean, state.__sceIdfMap);
             if (score >= threshold) {
-                let weight = getCardWeight(card);
+                let weight = getCardWeight(card)*MCPV6RecallBoost(card);
                 singles.push({
                     type: 'single',
                     card: card,
@@ -47408,7 +47339,7 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
 
             let hierarchyScore = hierarchySimilarity(hierarchy, weightMapRaw, customStop, state);
             if (hierarchyScore >= threshold) {
-                let weight = getCardWeight(card);
+                let weight = getCardWeight(card)*MCPV6RecallBoost(card);
                 hierarchies.push({
                     type: 'hierarchy',
                     hierarchy: hierarchy,
@@ -47448,7 +47379,7 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
             if (!bag || bag.tokens.length === 0) continue;
             let score = cardCoverageScore(bag.tokens, bag.norm, weightMapClean, state.__sceIdfMap);
             if (score >= threshold) {
-                let weight = getCardWeight(card);
+                let weight = getCardWeight(card)*MCPV6RecallBoost(card);
                 let weightedScore = score * weight;
                 if (!firstIteration) {
                     weightedScore *= cascadeMultiplier;
@@ -47474,7 +47405,7 @@ function selectRecallCandidates(text, allCards, regularCards, config) {
 
             let hierarchyScore = hierarchySimilarity(hierarchy, weightMapRaw, customStop, state);
             if (hierarchyScore >= threshold) {
-                let weight = getCardWeight(card);
+                let weight = getCardWeight(card)*MCPV6RecallBoost(card);
                 let weightedScore = hierarchyScore * weight;
                 if (!firstIteration) {
                     weightedScore *= cascadeMultiplier;
@@ -47783,14 +47714,15 @@ function StoryCardExtensionContext(text) {
         : [];
     eventHost.sceEventCooldown = recentEvents;
     if (state.currentEvent.duration > 0) {
-        if (state.currentEvent.text) {
+        if (state.currentEvent.text && !(state.currentEvent.duration===1 && MCPV5Root().sceDeliveredEvent?.title===state.currentEvent.title && MCPV5Root().sceDeliveredEvent.resolved && !state.isRetry)) {
             let eventTitle = state.currentEvent.title;
             if (!usedCardTitles.has(eventTitle)) {
                 newText = newText + '\n\n' + state.currentEvent.text;
                 usedCardTitles.add(eventTitle);
             }
         }
-        if (!state.isRetry) {
+        if (MCPV5Root().sceDeliveredEvent && MCPV5Root().sceDeliveredEvent.title===state.currentEvent.title && MCPV5Root().sceDeliveredEvent.resolved && !state.isRetry) {
+            MCPV5Root().sceDeliveredEvent=null;
             state.currentEvent.duration--;
             if (state.currentEvent.duration === 0) {
                 if (eventAction >= 0 && state.currentEvent.title) {
@@ -47862,7 +47794,7 @@ function MCPV5Create_ar() {
         maxReferenceChars: 3200,
         maxReferences: 18,
         maxProcessChars: 18000,
-        debug: false
+        debug: MCPV5Root().settings.diagnostics===true
       }
 
       if (original.length > CFG.maxProcessChars) {
@@ -48410,7 +48342,7 @@ function MCPV5Create_ar() {
           if (
             tokens.length <= 6 &&
             shared >= 2 &&
-            coverage >= 0.82
+            coverage >= (MCPV5Root().settings.cleanupMode==="Aggressive"?0.75:0.82)
           ) {
             return {
               remove: true,
@@ -48561,6 +48493,7 @@ function MCPV5Create_ar() {
       // Layers 2-4: dialogue lifts, paraphrases, fact inventories
       // ------------------------------------------------------------
 
+      if(MCPV5Root().settings.cleanupMode==="Conservative")return {text:working.trim()?working:original};
       const segments = splitQuotedSegments(working)
 
       let semanticRemoved = 0
@@ -48765,9 +48698,7 @@ function MCPV5Create_ar() {
         .trim()
 
       // Output hook must never return empty text.
-      if (!filtered) {
-        filtered = "…"
-      }
+      if (!filtered) filtered = original;
 
       if (
         CFG.debug &&
@@ -49178,9 +49109,8 @@ function MCPV5Create_usc_e() {
       const kept = [];
 
       for (const sentence of sentences) {
-        if (aggressiveRegex && aggressiveRegex.test(sentence)) {
-          continue;
-        }
+        const mode=MCPV5Root().settings.cleanupMode;
+        if (mode!=="Conservative" && aggressiveRegex && aggressiveRegex.test(sentence) && (mode==="Aggressive" || !/["“”]/.test(sentence))) continue;
 
         kept.push(sentence);
       }
@@ -49188,10 +49118,10 @@ function MCPV5Create_usc_e() {
       let result = kept.join("");
 
       if (preciseRegex) {
-        result = result.replace(preciseRegex, "");
+        if(MCPV5Root().settings.cleanupMode==="Aggressive")result=result.replace(preciseRegex,"");
+        else result=result.split(/(["“][^"”]*["”])/g).map((part,i)=>i%2?part:part.replace(preciseRegex,(m,offset,whole)=>{const before=whole[offset-1],after=whole[offset+m.length];return before&&/\p{L}/u.test(before)||after&&/\p{L}/u.test(after)?m:"";})).join("");
       }
-
-      result = result.replace(/\s+([,.;!?])/g, "$1");
+      result = result.replace(/[ \t]{2,}/g," ").replace(/[ \t]+([,.;!?])/g, "$1").replace(/,\s*,/g,",").replace(/([.!?])\s*[,;]+/g,"$1");
 
       if (result !== text && MCPV5Root().settings.diagnostics === true) {
         MCPV5RecordDiagnostic("usc-e-cleanup", "Output changed by " +
@@ -49244,205 +49174,39 @@ function MCPV5Create_usc_e() {
 }
 
 function MCPV5Create_slow_burn() {
-/**
- * SLOWBURN Evolution Engine
- * Centralized logic for NPC personality tracking and Author's Note management.
- */
-function SLOWBURN(type, textString = "") {
-  // 1. INITIALIZE STATE & DEFAULT SETTINGS
-  if (!state.npc) state.npc = { name: "Companion", level: 0 };
-  let gainRate = 0.2;
-  let drainRate = 0.5;
-  let currentInfo = "Normal behavior.";
-  let bestMatchThreshold = -1;
-
-  // 2. MULTI-CARD DATABASE SCAN
-  storyCards.forEach(card => {
-    if (card.entry.includes("Evolution Stages")) {
-      // Discover Metadata (Name and Rates)
-      const nMatch = card.entry.match(/Character Name:\s*(.*)/i);
-      const gMatch = card.entry.match(/Gain Rate:\s*([\d.]+)/i);
-      const dMatch = card.entry.match(/Drain Rate:\s*([\d.]+)/i);
-      
-      if (nMatch) state.npc.name = nMatch[1].trim();
-      if (gMatch) gainRate = parseFloat(gMatch[1]);
-      if (dMatch) drainRate = parseFloat(dMatch[1]);
-
-      // Discover Current Evolution Stage
-      const lines = card.entry.split('\n');
-      lines.forEach(line => {
-        const match = line.match(/^(\d+):\s*(.*)/);
-        if (match) {
-          const threshold = parseInt(match[1]);
-          if (state.npc.level >= threshold && threshold > bestMatchThreshold) {
-            bestMatchThreshold = threshold;
-            currentInfo = match[2].trim();
-          }
-        }
-      });
-    }
-  });
-
-  // 3. SCORING LOGIC (Only runs during Output)
-  // Scoring only triggers if 'textString' is provided (the AI's response)
-  if (type === "output" && textString) {
-    const companion = escapeSlowBurnRegExp(state.npc.name);
-    const subject = new RegExp("^(?:then\\s+)?" + companion + "(?![\\p{L}\\p{N}_'-])", "iu");
-    const relevant = (String(textString).slice(0, 10000).match(/[^.!?\n]+/g) || [])
-      .map(sentence => sentence.trim()).filter(sentence =>
-        subject.test(sentence) && /\b(?:you|your)\b/i.test(sentence) &&
-        !/\b(?:not|never|no|cannot|without|could|would|might)\b|n['’]t\b/i.test(sentence));
-    if (relevant.length) {
-      const pos = ["nod", "agree", "thank", "polite", "helpful", "share", "listen", "patience", "respect", "kindly", "calm", "pleasant", "thoughtful", "admire", "honest", "cooperate", "assist", "welcome", "comfort", "reassure", "friendly", "softly", "laugh", "chuckled", "curious", "interest", "civility", "courteous", "stable", "blush", "smile", "yield", "soften", "lean", "whisper", "tremble", "warm", "accept", "nuzzle", "giggle", "sigh", "purr", "moan", "relax", "melt", "cuddle", "hug", "kiss", "blossom", "trust", "eager", "comply", "obey", "shiver", "stroke", "caress", "devotion", "flutter", "glow", "radiate"];
-      const neg = ["recoil", "cold", "stern", "angry", "refuse", "snap", "distant", "harsh", "glare", "tense", "shove", "push", "slap", "hiss", "growl", "sneer", "scowl", "scoff", "resist", "struggle", "flinch", "avoid", "ignore", "disdain", "disgust", "revolt", "cringe", "stiffen", "withdraw", "shout", "yell", "threaten", "spite", "bitter", "rude", "insult"];
-
-      let change = 0;
-      // Unique Word Check: .includes() only checks if the word exists once in the string,
-      // preventing "sigh sigh sigh" from being counted multiple times.
-      const words = new Set((relevant.join(" ").toLowerCase().match(/\b[a-z]+\b/g) || []));
-      const used = word => words.has(word) || words.has(word + "s") ||
-        words.has(word + "ed") || (word.endsWith("e") && words.has(word + "d"));
-      pos.forEach(word => { if (used(word) && Number.isFinite(gainRate)) change += gainRate; });
-      neg.forEach(word => { if (used(word) && Number.isFinite(drainRate)) change -= drainRate; });
-      
-      state.npc.level = Math.max(0, Math.min(100, state.npc.level + change));
-    }
-  }
-
-  // 4. SMART AUTHOR'S NOTE INJECTION (End of Note)
-  const evoString = `[${state.npc.name}'s State: ${currentInfo} (${state.npc.level.toFixed(1)}/100)]`;
-  let note = state.memory.authorsNote || "";
-  const evoRegex = /\[.*?'s State:.*?\]|\[EVO:.*?\]/g;
-
-  if (evoRegex.test(note)) {
-    note = note.replace(evoRegex, "").trim();
-  }
-  state.memory.authorsNote = (note + " " + evoString).trim();
-}
-
-  function escapeSlowBurnRegExp(value) {
-    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  function slowBurnStore() {
-    if (
-      !state.mcpSlowBurn ||
-      typeof state.mcpSlowBurn !== "object" ||
-      Array.isArray(state.mcpSlowBurn)
-    ) {
-      let migrated = null;
-      if (
-        state.npc &&
-        typeof state.npc === "object" &&
-        !Array.isArray(state.npc) &&
-        typeof state.npc.name === "string" &&
-        Number.isFinite(Number(state.npc.level)) &&
-        Object.keys(state.npc).every(key => key === "name" || key === "level")
-      ) {
-        migrated = {
-          name: String(state.npc.name || "Companion"),
-          level: Math.max(0, Math.min(100, Number(state.npc.level) || 0))
-        };
-      }
-      state.mcpSlowBurn = {
-        version: 1,
-        npc: migrated || { name: "Companion", level: 0 },
-        marker: ""
-      };
-    }
-    if (
-      !state.mcpSlowBurn.npc ||
-      typeof state.mcpSlowBurn.npc !== "object" ||
-      Array.isArray(state.mcpSlowBurn.npc)
-    ) {
-      state.mcpSlowBurn.npc = { name: "Companion", level: 0 };
-    }
-    return state.mcpSlowBurn;
-  }
-
   function run(tab) {
-    const currentText = MCPV5SafeText(globalThis.text, "\u200B");
-    if (tab !== "input" && tab !== "output") return { text: currentText };
-
-    const store = slowBurnStore();
-    const hadNpc = Object.prototype.hasOwnProperty.call(state, "npc");
-    const priorNpc = state.npc;
-    if (!state.memory || typeof state.memory !== "object" || Array.isArray(state.memory)) {
-      state.memory = {};
-    }
-    const priorNote = typeof state.memory.authorsNote === "string"
-      ? state.memory.authorsNote
-      : "";
-    const priorMarker = typeof store.marker === "string" ? store.marker : "";
-
-    try {
-      state.npc = {
-        name: typeof store.npc.name === "string" && store.npc.name.trim()
-          ? store.npc.name
-          : "Companion",
-        level: Math.max(0, Math.min(100, Number(store.npc.level) || 0))
-      };
-
-      if (tab === "input") SLOWBURN("input");
-      else SLOWBURN("output", currentText);
-
-      store.npc = {
-        name: typeof state.npc.name === "string" && state.npc.name.trim()
-          ? state.npc.name
-          : "Companion",
-        level: Math.max(0, Math.min(100, Number(state.npc.level) || 0))
-      };
-
-      const producedNote = typeof state.memory.authorsNote === "string"
-        ? state.memory.authorsNote
-        : "";
-      const markers = producedNote.match(/\[[^\]\r\n]*?'s State:[^\]\r\n]*\]/g) || [];
-      const newMarker = markers.length ? markers[markers.length - 1] : "";
-
-      let cleanNote = priorNote;
-      if (priorMarker) {
-        cleanNote = cleanNote.replace(
-          new RegExp(escapeSlowBurnRegExp(priorMarker), "g"),
-          ""
-        );
-      } else if (newMarker && store.npc.name) {
-        cleanNote = cleanNote.replace(
-          new RegExp(
-            "\\[" + escapeSlowBurnRegExp(store.npc.name) +
-            "'s State:[^\\]\\r\\n]*\\]",
-            "g"
-          ),
-          ""
-        );
+    const text = MCPV5SafeText(globalThis.text," ");
+    if (!state.mcpSlowBurn || typeof state.mcpSlowBurn!=="object") state.mcpSlowBurn={version:2,npcs:{},marker:""};
+    const store=state.mcpSlowBurn;
+    const old=store.npc || state.npc;
+    if (!store.npcs || typeof store.npcs!=="object") store.npcs={};
+    if (old && old.name && Number.isFinite(Number(old.level)) && !store.npcs[String(old.name).toLowerCase()]) store.npcs[String(old.name).toLowerCase()]={name:old.name,level:Math.max(0,Math.min(100,Number(old.level)))};
+    store.version=2;
+    const entries=[]; const seen=new Set();
+    for (const card of storyCards) {
+      const e=String(card.entry||""); if (!e.includes("Evolution Stages")) continue;
+      const name=(e.match(/^Character Name:\s*(.+)$/im)||[])[1]?.trim(); if(!name || name.length>80) continue;
+      const key=name.toLowerCase(); if(seen.has(key)||["__proto__","constructor","prototype"].includes(key))continue;seen.add(key);
+      const v=store.npcs[key] || (store.npcs[key]={name,level:0});
+      const rate=(label,d)=>{const m=e.match(new RegExp("^"+label+":\\s*([0-9.]+)","im"));const n=m?Number(m[1]):d;return Number.isFinite(n)?Math.min(100,Math.max(0,n)):d;};
+      if(tab==="output") {
+        const re=new RegExp("^(?:then\\s+)?"+MCPV5EscapeRegExp(name)+"(?![\\p{L}\\p{N}_'-])","iu");
+        const sentences=(text.slice(0,12000).match(/[^.!?\n]+/g)||[]).map(x=>x.trim()).filter(x=>re.test(x)&&/\b(?:you|your)\b/i.test(x)&&!/\b(?:not|never|cannot|would|might|could)\b|n['’]t\b/i.test(x));
+        let delta=0;for(const line of sentences){if(/\b(?:trusts?|thanks?|helps?|supports?|protects?|comforts?|reassures?|confides?|hugs?|kisses?|accepts?|respects?)\b/i.test(line))delta+=rate("Gain Rate",0.2);if(/\b(?:rejects?|insults?|threatens?|betrays?|avoids?|refuses?|shoves?|withdraws?)\b/i.test(line))delta-=rate("Drain Rate",0.5);}
+        const cap=rate("Max Change Per Turn",5);v.level=Math.max(0,Math.min(100,(Number(v.level)||0)+Math.max(-cap,Math.min(cap,delta))));
       }
-      cleanNote = cleanNote
-        .replace(/[ \t]+\n/g, "\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-
-      const role = MCPV5CapabilityRole(
-        "slow_burn",
-        "relationshipPacing",
-        MCPV5_ACTIVE_PLAN
-      );
-      const publish = role !== "observer";
-      state.memory.authorsNote = (
-        publish && newMarker
-          ? [cleanNote, newMarker].filter(Boolean).join("\n\n")
-          : cleanNote
-      ).trim();
-      store.marker = publish ? newMarker : "";
-
-      return { text: currentText };
-    } finally {
-      if (hadNpc) state.npc = priorNpc;
-      else {
-        try { delete state.npc; } catch {}
-      }
+      let stage="Normal behavior.", best=-1;for(const line of e.split("\n")){const m=line.match(/^\s*(\d+):\s*(.*)/);if(m&&+m[1]<=v.level&&+m[1]>best){best=+m[1];stage=m[2];}}
+      entries.push("["+name+"'s State: "+stage.slice(0,300)+" ("+v.level.toFixed(1)+"/100)]");
     }
+    state.memory ||= {}; let note=String(state.memory.authorsNote||"");
+    for(const marker of [store.marker,...(store.markers||[])]) if(marker)note=note.split(marker).join("").trim();
+    for(const name of seen){const re=new RegExp("\\["+MCPV5EscapeRegExp(store.npcs[name].name)+"'s State:[^\\]\\r\\n]*\\]","g");note=note.replace(re,"").trim();}
+    store.markers=MCPV5CapabilityRole("slow_burn","relationshipPacing",MCPV5_ACTIVE_PLAN)==="observer"?[]:entries.slice(0,16);
+    store.marker=store.markers.join("\n"); if(entries.length) store.npc={...store.npcs[[...seen][0]]};
+    state.memory.authorsNote=[note,store.marker].filter(Boolean).join("\n\n");
+    return {text};
   }
-
-  return { run };
+  return {run};
 }
 
 function MCPV5Create_dice_roll() {
@@ -49468,7 +49232,7 @@ const diceResults = [
 "[🎲 Dice Roll: Critical Success!]",
 "[🎲 Dice Roll: Critical Success!]"
 ];
-const outcome = diceResults[Math.floor(Math.random() * diceResults.length)];
+const outcome = diceResults[Math.floor(MCPV6OutcomeRandom() * diceResults.length)];
 modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
 } else if (
 (tryMatch = modifiedText.match(/(You (clumsily|tentatively|doubtfully|hesitantly|haphazardly) (try|attempt|cast|attack|shoot|throw|brace yourself)[^.?!]*[.?!])/))
@@ -49484,7 +49248,7 @@ const diceResults = [
 "[🎲 Dice Roll: Critical Failure!]",
 "[🎲 Dice Roll: Critical Failure!]"
 ];
-const outcome = diceResults[Math.floor(Math.random() * diceResults.length)];
+const outcome = diceResults[Math.floor(MCPV6OutcomeRandom() * diceResults.length)];
 modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
 } else if (
 (tryMatch = modifiedText.match(/(You (try|tried|attempt|attempted|attempts|cast|casted|attack|attacked|shoot|shot|shoots|fired|fires|threw|throw|braced|braces|brace yourself)[^.?!]*[.?!])/))
@@ -49499,7 +49263,7 @@ const diceResults = [
 "[🎲 Dice Roll: Critical Success!]",
 "[🎲 Dice Roll: Critical Failure!]"
 ];
-const outcome = diceResults[Math.floor(Math.random() * diceResults.length)];
+const outcome = diceResults[Math.floor(MCPV6OutcomeRandom() * diceResults.length)];
 modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
 } else if (
 (tryMatch = modifiedText.match(/(He (try|tries|tried|attempt|attempted|attempts|cast|casts|casted|attack|attacks|attacked|shoot|shot|shoots|fired|fires|threw|throws|braced|braces|braced himself)[^.?!]*[.?!])/))
@@ -49514,7 +49278,7 @@ const diceResults = [
 "[🎲 Dice Roll: Critical Success!]",
 "[🎲 Dice Roll: Critical Failure!]"
 ];
-const outcome = diceResults[Math.floor(Math.random() * diceResults.length)];
+const outcome = diceResults[Math.floor(MCPV6OutcomeRandom() * diceResults.length)];
 modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
 } else if (
 (tryMatch = modifiedText.match(/(She (try|tries|tried|attempt|attempted|attempts|cast|casts|casted|attack|attacks|attacked|shoot|shot|shoots|fired|fires|threw|throws|braced|braces|braced himself)[^.?!]*[.?!])/))
@@ -49529,7 +49293,7 @@ const diceResults = [
 "[🎲 Dice Roll: Critical Success!]",
 "[🎲 Dice Roll: Critical Failure!]"
 ];
-const outcome = diceResults[Math.floor(Math.random() * diceResults.length)];
+const outcome = diceResults[Math.floor(MCPV6OutcomeRandom() * diceResults.length)];
 modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
 } else if (
 (tryMatch = modifiedText.match(/(They (try|tries|tried|attempt|attempted|attempts|cast|casts|casted|attack|attacks|attacked|shoot|shot|fired|fires|threw|throws|braced|braces|braced themself)[^.?!]*[.?!])/))
@@ -49544,7 +49308,7 @@ const diceResults = [
 "[🎲 Dice Roll: Critical Success!]",
 "[🎲 Dice Roll: Critical Failure!]"
 ];
-const outcome = diceResults[Math.floor(Math.random() * diceResults.length)];
+const outcome = diceResults[Math.floor(MCPV6OutcomeRandom() * diceResults.length)];
 modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
 }
 text = modifiedText; // ✅ Ensure final text includes all changes
@@ -49554,7 +49318,7 @@ return { text }
 
   function run(tab) {
     const currentText = MCPV5SafeText(globalThis.text, "\u200B");
-    if (tab !== "output") return { text: currentText };
+    if (tab !== "output" || MCPV5Root().settings.outcomeMode === "Mechanical") return { text: currentText };
     const result = modifier(currentText);
     return (
       result &&
@@ -49585,7 +49349,7 @@ function MCPV5Create_coin_flip() {
       "[🪙 Coin Flip: Critical Failure!]",
       "[🪙 Coin Flip: Critical Failure!]"
     ];
-    const outcome = CoinResults[Math.floor(Math.random() * CoinResults.length)];
+    const outcome = CoinResults[Math.floor(MCPV6OutcomeRandom() * CoinResults.length)];
     modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
   } else if (
     (tryMatch = modifiedText.match(/(You (clumsily|tentatively|doubtfully|hesitantly|haphazardly) (try|attempt|cast|attack|shoot|throw|brace yourself)[^.?!]*[.?!])/))
@@ -49598,7 +49362,7 @@ function MCPV5Create_coin_flip() {
       "[🪙 Coin Flip: Critical Failure!]",
       "[🪙 Coin Flip: Critical Failure!]"
     ];
-    const outcome = CoinResults[Math.floor(Math.random() * CoinResults.length)];
+    const outcome = CoinResults[Math.floor(MCPV6OutcomeRandom() * CoinResults.length)];
     modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
   } else if (
     (tryMatch = modifiedText.match(/(You (try|attempt|cast|attack|shoot|throw|brace yourself)[^.?!]*[.?!])/))
@@ -49607,7 +49371,7 @@ function MCPV5Create_coin_flip() {
       "[🪙 Coin Flip: Critical Success!]",
       "[🪙 Coin Flip: Critical Failure!]"
     ];
-    const outcome = CoinResults[Math.floor(Math.random() * CoinResults.length)];
+    const outcome = CoinResults[Math.floor(MCPV6OutcomeRandom() * CoinResults.length)];
     modifiedText = modifiedText.replace(tryMatch[0], `${tryMatch[0].trim()} ${outcome}`);
   }
   text = modifiedText; // ✅ Ensure final text includes all changes
@@ -49618,7 +49382,7 @@ function MCPV5Create_coin_flip() {
 
   function run(tab) {
     const currentText = MCPV5SafeText(globalThis.text, "\u200B");
-    if (tab !== "output") return { text: currentText };
+    if (tab !== "output" || MCPV5Root().settings.outcomeMode === "Mechanical") return { text: currentText };
     const result = modifier(currentText);
     return (
       result &&
@@ -49713,7 +49477,7 @@ function MCPV5Create_information_firewall() {
 
   function normalizeName(name) {
     name = String(name || "").replace(/[^A-Za-z0-9 _'-]/g, "").replace(/\s+/g, " ").trim();
-    if (!name || STOP_NAMES[name]) return "";
+    if (!name || STOP_NAMES[name] || /^(?:true|false|automatic|none|null|custom|enabled|disabled|settings|configuration|player|character|npc)$/i.test(name)) return "";
     if (name.length < 2 || name.length > 32) return "";
     return name.charAt(0).toUpperCase() + name.slice(1);
   }
@@ -49754,7 +49518,8 @@ function MCPV5Create_information_firewall() {
     var keys = String((card && card.keys) || "");
     var match = /\b(?:Name|Character|NPC)\s*:\s*([A-Z][A-Za-z0-9 _'-]{1,31})/i.exec(entry);
     if (match) out.push(match[1]);
-    if (keys) out = out.concat(splitRosterNames(keys));
+    if (!out.length && card.title) out.push(card.title);
+    if (!out.length && keys) out.push(keys.split(",")[0]);
     return uniq(out);
   }
 
@@ -49766,6 +49531,7 @@ function MCPV5Create_information_firewall() {
         var card = cards[i] || {};
         var type = String(card.type || "");
         var entry = String(card.entry || "").slice(0, 5000);
+        if (MCPV5HideFromStoryCardExtension(card)) continue;
         found = found.concat(extractRosterMarkers(entry));
         if (/character|npc|cast|roster/i.test(type)) found = found.concat(extractCharacterCardName(card));
       }
@@ -49773,7 +49539,10 @@ function MCPV5Create_information_firewall() {
     if (typeof info !== "undefined" && info && info.characterNames && info.characterNames.length) {
       found = found.concat(info.characterNames);
     }
+    const shared=MCPV5Root().characterRegistry || {};
+    found=found.concat(Object.values(shared).map(v=>v.name));
     if (found.length) addKnownCharacters(mem, found);
+    const manual=MCPV5Root().manualCast || [];if(manual.length)addPresent(mem,manual);
   }
 
   function addPresent(mem, names) {
@@ -49791,8 +49560,9 @@ function MCPV5Create_information_firewall() {
     for (var i = 0; i < roster.length; i++) {
       var name = normalizeName(roster[i]);
       if (!name) continue;
-      var re = new RegExp("(^|[^A-Za-z0-9_'-])" + escapeRegExp(name) + "([^A-Za-z0-9_'-]|$)", "i");
-      if (re.test(textBlock)) out.push(name);
+      const rec=MCPV5Root().characterRegistry?.[name.toLowerCase()];
+      const forms=[name,...(rec?.aliases||[])];
+      if(forms.some(form=>new RegExp("(?:^|[^\\p{L}\\p{N}_'-])"+escapeRegExp(form)+"(?=$|[^\\p{L}\\p{N}_'-])","iu").test(textBlock)))out.push(name);
     }
     return uniq(out);
   }
@@ -50022,6 +49792,7 @@ function MCPV5Create_information_firewall() {
           "(?=[\\s,.!?\"“:]|$)", "i").test(tail)) : "";
       return { name, recipient, tail };
     }
+    for(const name of names){const m=new RegExp('^["“]([\\s\\S]{1,800})["”],?\\s*'+escapeRegExp(name)+'\\s+(?:says?|said|asks?|asked|whispers?|replies?|replied)\\b','i').exec(line);if(m)return {name,recipient:"",tail:m[1]};}
     return null;
   }
 
@@ -50148,7 +49919,7 @@ function MCPV5Create_information_firewall() {
         for (var uc = Math.max(0, unknownConversations.length - 6); uc < unknownConversations.length; uc++) {
           blocked.push(unknownConversations[uc].topics && unknownConversations[uc].topics.length ? unknownConversations[uc].topics.join("/") : unknownConversations[uc].text);
         }
-        lines.push(name + " must NOT reference these unwitnessed conversation topics: " + blocked.join("; ") + ".");
+        lines.push(name + " must not refer to private conversations unless listed among known conversations.");
       }
 
       var known = knownFactsForName(mem, name);
@@ -50162,7 +49933,7 @@ function MCPV5Create_information_firewall() {
       if (unknown.length) {
         var topics = [];
         for (var u = Math.max(0, unknown.length - 8); u < unknown.length; u++) topics.push(unknown[u].topic);
-        lines.push(name + " must NOT know or comment on: " + topics.join("; ") + ".");
+        lines.push(name + " must not know undisclosed facts beyond their established knowledge.");
       }
     }
 
@@ -50189,6 +49960,13 @@ function MCPV5Create_information_firewall() {
 
     const mem = getStateRoot();
     if (!mem) return { text: original };
+    const deferred=(MCPV5Root().eventJournal||[]).filter(row=>row.type==="narrative"&&row.firewallEnabled&&!row.firewallReconciled&&!row.processed?.includes("information_firewall")).slice(-6);
+    for(const row of deferred){
+      if(row.input&&!row.inputProcessed?.includes("information_firewall")&&!/^\s*>?\s*\//.test(row.input)) processInput(mem,row.input);
+      for(const sentence of splitSentences(row.evidence).slice(0,32))isUnauthorizedSentence(mem,sentence);
+      processOutputScene(mem,row.evidence);row.firewallReconciled=true;
+    }
+    if(deferred.length)MCPV5RecordDiagnostic("firewall-evidence-reconciled",String(deferred.length)+" prior narrative events");
 
     if (tab === "input") {
       const action = Number.isFinite(info && info.actionCount) ? info.actionCount : -1;
@@ -50392,9 +50170,15 @@ function MCPV5RunProfile(id, tab, incomingText, plan, filterStory) {
   const oldUpdate = globalThis.updateStoryCard;
   const oldRemove = globalThis.removeStoryCard;
   const globalSnapshot = MCPV5SnapshotModuleGlobals(
-    !!(root.settings && root.settings.diagnostics)
+    true
   );
   const stateSnapshot = MCPV5SnapshotModuleState(id);
+  const sharedSnapshot = MCPV5SnapshotSharedState();
+  let committed = false;
+  if((MCPV5_MODULE_STATE_KEYS[id]||[]).some(k=>stateSnapshot[k]?.exists&&!stateSnapshot[k]?.ok)) {
+    MCPV5RecordDiagnostic("module-state-too-large",MCPV5Name(id)+": state could not be safely snapshotted; module withheld.");
+    return {text:original,__mcpOk:false};
+  }
   const tracksInventory = (
     id === "true_auto_stats" ||
     id === "stackable_inventory" ||
@@ -50482,6 +50266,7 @@ function MCPV5RunProfile(id, tab, incomingText, plan, filterStory) {
 
       MCPV5StoreModuleGlobals(id);
       sandbox.commit();
+      committed = true;
       if (tracksInventory) {
         MCPV5RecordInventoryAudit(
           id,
@@ -50514,9 +50299,16 @@ function MCPV5RunProfile(id, tab, incomingText, plan, filterStory) {
       MCPV5Name(id) + " / " + tab + " / " +
       String(error && error.message ? error.message : error)
     );
-    log("MCP V5.4.3 module error:", MCPV5Name(id), tab, error);
+    log("MCP V5.6.0 module error:", MCPV5Name(id), tab, error);
     return { text: original, __mcpOk: false };
   } finally {
+    if (!committed) {
+      try { sandbox.rollback(); } catch {}
+      MCPV5RestoreModuleState(stateSnapshot);
+      MCPV5RestoreSharedState(sharedSnapshot);
+      delete MCPV5_MODULE_CACHE[MCPV5FactoryKey(id)];
+      delete MCPV5_MODULE_GLOBAL_VAULT[MCPV5ModuleVaultKey(id)];
+    }
     MCPV5RestoreModuleGlobals(globalSnapshot);
     try { globalThis.storyCards = oldStoryCards; } catch {}
     try { globalThis.addStoryCard = oldAdd; } catch {}
@@ -50574,7 +50366,7 @@ function MCPV5TrackActionHealth(tab, plan, schedule, ran, failed, skipped, elaps
   const measured = Math.min(60000, Math.max(0, Number(elapsedMs) || 0));
   perf.peakMs = Math.max(0, Math.min(60000, perf.peakMs || 0), measured);
   perf.lastMs = measured;
-  if (tab === "output" && perf.lastAction !== action) {
+  if (perf.lastAction !== action || perf.lastTab !== tab) {
     const settings = root.settings || MCPV5DefaultSettings();
     if (measured > settings.hookBudgetMs) {
       perf.overruns = Math.min(1000000, (perf.overruns || 0) + 1);
@@ -50584,6 +50376,7 @@ function MCPV5TrackActionHealth(tab, plan, schedule, ran, failed, skipped, elaps
       }
     }
     perf.lastAction = action;
+    perf.lastTab = tab;
   }
 }
 
@@ -50612,10 +50405,13 @@ function MCPV5ExecutionOrder(tab, plan, schedule) {
   );
 
   const out = [];
+  const gatePending=!!(plan.effective.stackable_inventory&&state.vars?.awaitingGate&&state.vars?.mmsGateId);
   for (let i = 0; i < base.length; i++) {
     const id = base[i];
     if (!plan.effective || plan.effective[id] !== true) continue;
     if (!allowed.has(id)) continue;
+    if(gatePending&&tab!=="input"&&["inner_self","auto_cards","story_arc_engine","living_characters","character_continuity"].includes(id))continue;
+    if(plan.authorityEnforcement==="Strict" && !schedule?.commandHint && !schedule?.commandOwner){const caps=MCPV5ModuleCapabilities(id);if(caps.length && caps.every(c=>MCPV5CapabilityRole(id,c,plan)==="observer"))continue;}
 
     // Auto-Cards runs through Inner Self when Inner Self is active,
     // including Stackable Inventory's original bundled dependency.
@@ -50637,6 +50433,7 @@ function MCPV5ExecutionOrder(tab, plan, schedule) {
 
 function MCPV5ApplyOutputGuard(id, candidate, before, original) {
   if (!MCPV5HasVisibleText(candidate)) {
+    if (/^\s*(?:[({\[]\s*(?:[a-z0-9_]+\s*=|delete\s+)|(?:APPROVE|REJECT)(?:\s+[a-z0-9]+)?\s*$)/i.test(before)) return "[Task completed without narrative.]";
     if (MCPV5HasVisibleText(before)) {
       MCPV5RecordDiagnostic(
         "blank-output-blocked",
@@ -50664,10 +50461,11 @@ function MCPV5CleanupRemovedModulesOnce() {
   }
 }
 
-function MCPV5Run(tab, incomingText) {
+function MCPV6RunCore(tab, incomingText) {
+  const hookStart = Date.now();
   const original = MCPV5SafeText(incomingText, "\u200B");
   MCPV5CleanupRemovedModulesOnce();
-  const plan = MCPV5SyncControls();
+  const plan = MCPV5_ACTIVE_PLAN || MCPV5SyncControls();
 
   if (
     !plan ||
@@ -50689,13 +50487,13 @@ function MCPV5Run(tab, incomingText) {
   );
   if (plan.effective.auto_cards === true) MCPV5CancelSAECardCompression();
   const firewallId = "information_firewall";
-  const order = MCPV5ExecutionOrder(tab, plan, schedule).filter(id => id !== firewallId);
+  const order = MCPV5ExecutionOrder(tab, plan, schedule).filter(id => id !== firewallId && !(tab==="output" && root.blockedTask?.owner===id && Math.abs((info?.actionCount??-1)-root.blockedTask.action)<=1));
   if (tab === "input" && MCPV5CommandAmbiguous(original, plan)) {
     MCPV5RecordDiagnostic("ambiguous-command",
       "Original module handlers will resolve " + original.slice(0, 60));
   }
   let transaction = MCPV5ActiveTransaction(tab, plan);
-  const startedAt = Date.now();
+  const startedAt = hookStart;
 
   const sharedBase = plan.cooperative
     ? MCPV5SnapshotSharedState()
@@ -50703,9 +50501,14 @@ function MCPV5Run(tab, incomingText) {
   const sharedRecords = [];
   const ran = [];
   const failed = [];
+  const runtimeDeferred = [];
   let stopped = false;
 
   function execute(id, inputText, filterStory) {
+    const essential = ["true_auto_stats","living_meters","stackable_inventory","realmheart"].includes(id) || (transaction && transaction.owner===id) || schedule.commandHint===id || schedule.commandOwner===id;
+    if (!essential && plan.cooperative && settings.workloadGuard && Date.now()-startedAt+MCPV5ExpectedTiming(tab,id)>settings.hookBudgetMs-settings.hookSafetyMarginMs) {
+      runtimeDeferred.push(id); return {text:inputText,__mcpOk:false};
+    }
     if (plan.cooperative && sharedBase) {
       MCPV5RestoreSharedState(sharedBase);
     }
@@ -50734,6 +50537,8 @@ function MCPV5Run(tab, incomingText) {
 
   let current = original;
   let firewallRan = false;
+  let taskCandidate = null;
+  let deliveredTask = false;
 
   function runFirewall() {
     if (firewallRan || stopped || transaction || schedule.commandOwner ||
@@ -50741,8 +50546,12 @@ function MCPV5Run(tab, incomingText) {
     const actionText = tab === "input" ? original : schedule.inputText;
     if (/^\s*(?:>\s*)?(?:(?:[^\n,]{1,60}\s+says?,\s*["“]?)|["“])?\//i.test(actionText || "")) return;
     firewallRan = true;
-    const result = execute(firewallId, tab === "input" ? original : current);
-    if (result && result.__mcpOk === true && tab !== "input") {
+    let firewallBase=tab==="input"?original:current;
+    if(tab==="context"&&Number.isFinite(info?.maxChars)&&(state.informationFirewall?.present?.length||root.manualCast?.length)&&info.maxChars-current.length<600){
+      const pad=" ".repeat(600);const fitted=MCPV6FitAtomic(current+pad,current,info.maxChars);if(fitted!==null&&fitted.endsWith(pad))firewallBase=fitted.slice(0,-600);
+    }
+    const result = execute(firewallId, firewallBase);
+    if (result && result.__mcpOk === true && tab !== "input" && (tab!=="context"||result.text!==firewallBase||firewallBase===current)) {
       current = MCPV5SafeText(result.text, current);
     }
   }
@@ -50787,7 +50596,9 @@ function MCPV5Run(tab, incomingText) {
             original
           );
         } else if (tab === "context") {
-          candidate = MCPV5FitContext(candidate, before);
+          const active = MCPV6DetectContextTask(plan);
+          if (active && active.owner===id) {transaction=active;taskCandidate=candidate;const fitted=MCPV6FitAtomic(candidate,before);deliveredTask=fitted!==null;candidate=fitted??before;}
+          else candidate = MCPV5FitContext(candidate, before);
         }
 
         current = MCPV5SafeText(candidate, before);
@@ -50898,7 +50709,8 @@ function MCPV5Run(tab, incomingText) {
         result.__mcpOk === true &&
         typeof result.text === "string"
       ) {
-        current = MCPV5FitContext(result.text, original);
+        taskCandidate = result.text;
+        const fitted=MCPV6FitAtomic(result.text,original);deliveredTask=fitted!==null;current=fitted??original;
         stopped = result.stop === true;
       }
     } else {
@@ -50915,7 +50727,7 @@ function MCPV5Run(tab, incomingText) {
           result.__mcpOk === true &&
           typeof result.text === "string"
         ) {
-          const startedTask = MCPV5ActiveTransaction("output", plan);
+          const startedTask = MCPV6DetectContextTask(plan);
           if (
             startedTask &&
             (
@@ -50927,6 +50739,7 @@ function MCPV5Run(tab, incomingText) {
             )
           ) {
             exclusiveTaskText = result.text;
+            taskCandidate = result.text;
             transaction = startedTask;
             if (result.stop === true) stopped = true;
             break;
@@ -50952,7 +50765,8 @@ function MCPV5Run(tab, incomingText) {
         }
       }
 
-      current = exclusiveTaskText !== null
+      if(exclusiveTaskText!==null && transaction){const fitted=MCPV6FitAtomic(exclusiveTaskText,original);deliveredTask=fitted!==null;current=fitted??original;}
+      else current = exclusiveTaskText !== null
         ? MCPV5FitContext(exclusiveTaskText, original)
         : MCPV5ComposeContextProposals(
             original,
@@ -51011,13 +50825,13 @@ function MCPV5Run(tab, incomingText) {
       }
     } else {
       const protocolSet = new Set([
-        "inner_self",
+        "stackable_inventory", "inner_self",
         "auto_cards",
         "living_characters",
         "story_arc_engine",
         "character_continuity"
       ]);
-      const protocol = order.filter(id => protocolSet.has(id) && id !== "character_continuity");
+      const protocol = order.filter(id => protocolSet.has(id) && id !== "character_continuity").sort((a,b)=>(a==="stackable_inventory"?-1:0)-(b==="stackable_inventory"?-1:0));
       if (order.includes("character_continuity")) protocol.push("character_continuity");
       const finalFilterOrder = ["ar", "usc_e"].filter(id => order.includes(id));
       const finalFilterSet = new Set(finalFilterOrder);
@@ -51186,7 +51000,7 @@ function MCPV5Run(tab, incomingText) {
         gambleRecord.action === schedule.action &&
         gambleRecord.signature === schedule.signature
       );
-      if (!stopped && outcomeRollId && !realmheartGambleTurn &&
+      if (!stopped && outcomeRollId && settings.outcomeMode!=="Mechanical" && !realmheartGambleTurn &&
           (!settings.workloadGuard ||
            Date.now() - startedAt + MCPV5ExpectedTiming("output", outcomeRollId) <=
              settings.hookBudgetMs - settings.hookSafetyMarginMs)) {
@@ -51227,6 +51041,7 @@ function MCPV5Run(tab, incomingText) {
     MCPV5TrackSharedMemoryOwnership(sharedBase, sharedRecords);
   }
 
+  if(tab==="input")schedule.inputProcessed=ran.slice(0,17);
   MCPV5MarkScheduleStage(schedule, tab);
 
   const transactionDeferred = transaction
@@ -51234,11 +51049,30 @@ function MCPV5Run(tab, incomingText) {
     : [];
   const skipped = MCPV5UniqueStrings(
     (schedule.skipped || [])
-      .concat(transactionDeferred)
+      .concat(transactionDeferred,runtimeDeferred)
       .filter(id => !transaction || id !== transaction.owner)
   );
 
-  if (transaction && tab === "context") {
+  if (tab === "context") {
+    const evt=state.mcpStoryCardExtension?.currentEvent;
+    if(evt?.text && current.includes(evt.text) && !transaction && !schedule.commandOwner) root.sceDeliveredEvent={title:evt.title,action:info?.actionCount??-1,resolved:false};
+    if(state.livingThoughts?.pendingChar && !current.includes("<LC_PRIVATE>"))state.livingThoughts.pendingChar="";
+    if (state.InnerSelf?.agent?.trim() && !/(?:SHORT TASK \(REQUIRED\)|THOUGHT-WRITING FORMAT|CHOOSE ONLY ONE FORM)/i.test(current)) state.InnerSelf.agent="";
+    if (state.vars?.awaitingGate && transaction) MCPV6CancelGate("Inventory request canceled: another model task owns this generation.");
+    if (state.vars?.awaitingGate) {
+      const packet=MCPV6GatePacket();
+      if(packet && current.includes(packet)) state.vars.mmsGateDelivered=state.vars.mmsGateId;
+      else if(packet && String(current).length+packet.length+2<=(Number(info?.maxChars)||Infinity)) {current += "\n\n"+packet;state.vars.mmsGateDelivered=state.vars.mmsGateId;}
+      else if(state.vars.mmsGateId) MCPV6CancelGate("Inventory request canceled: insufficient context space.");
+    }
+    if (transaction && (!taskCandidate || !deliveredTask || current === original || !ran.includes(transaction.owner))) {
+      root.blockedTask={owner:transaction.owner,action:info?.actionCount??-1};
+      MCPV6CancelTask(transaction.owner, "Task context not delivered intact");
+      transaction=null;
+      current=original;
+    }
+  }
+  if (transaction && tab === "context" && !stopped) {
     MCPV5RegisterTransaction(transaction, tab);
   } else if (tab === "output") {
     if (transaction) MCPV5ClearTransaction(transaction.owner);
@@ -51269,7 +51103,7 @@ function MCPV5Run(tab, incomingText) {
   };
 
   const finalText = tab === "output" && !MCPV5HasVisibleText(current)
-    ? original
+    ? MCPV5ApplyOutputGuard("host",current,original,original)
     : MCPV5SafeText(current, original);
 
   MCPV5TrackActionHealth(
@@ -51284,8 +51118,226 @@ function MCPV5Run(tab, incomingText) {
     : { text: String(finalText) };
 }
 
+// V5.6 integration services. Persistent fields are additive and bounded.
+function MCPV6GatePacket() {
+  const v=state.vars;
+  if(!v?.awaitingGate || !v.mmsGateId) return "";
+  return String(v.mmsGatePacket||"");
+}
+function MCPV6ClearGateMemory() {
+  if(state.memory && typeof state.memory.frontMemory==="string") state.memory.frontMemory=MCPV5StripOwnedFrontMemoryBlock(state.memory.frontMemory,MCPV5_SIS_FRONT_MEMORY_BEGIN,MCPV5_SIS_FRONT_MEMORY_END);
+}
+function MCPV6StartGate(prompt) {
+  state.memory ||= {};
+  const v=state.vars;
+  const serial=(Number(v.mmsGateSerial)||0)+1;v.mmsGateSerial=serial;
+  v.mmsGateId="G"+Math.max(0,Number(info?.actionCount)||0).toString(36)+"X"+serial.toString(36);
+  v.mmsGateDelivered="";
+  const packet=MCPV5_SIS_FRONT_MEMORY_BEGIN+"\n"+String(prompt).replace("APPROVE or REJECT","APPROVE "+v.mmsGateId+" or REJECT "+v.mmsGateId)+"\n"+MCPV5_SIS_FRONT_MEMORY_END;
+  v.mmsGatePacket=packet;
+  MCPV6ClearGateMemory();
+  state.memory.frontMemory=[state.memory.frontMemory,packet].filter(Boolean).join("\n\n");
+}
+function MCPV6CancelGate(reason) {
+  if(state.vars) Object.assign(state.vars,{awaitingGate:false,awaitingInvGate:false,awaitingMoneyGate:false,gateKind:null,lastGateVerdict:null,pendingAdd:null,pendingCollect:null,mmsGateId:"",mmsGateDelivered:"",mmsGatePacket:""});
+  MCPV6ClearGateMemory();
+  if(reason) state.message=reason;
+}
+function MCPV6CancelTask(owner,reason) {
+  const root=MCPV5Root(); root.transaction=null;
+  if(owner==="inner_self" || owner==="auto_cards") {
+    if(state.InnerSelf) {state.InnerSelf.agent="";if(state.InnerSelf.AC)state.InnerSelf.AC.event=false;}
+    const ac=MCPV5AutoCardsState();
+    if(ac?.generation) {const w=ac.generation.workpiece;if(w?.title && Array.isArray(ac.generation.pending) && !ac.generation.pending.some(p=>p.title===w.title)) ac.generation.pending.unshift(w);ac.generation.pending=Array.isArray(ac.generation.pending)?ac.generation.pending.slice(0,40):[];ac.generation.workpiece={};ac.generation.completed=0;}
+    if(ac?.compression) Object.assign(ac.compression,{completed:0,titleKey:"",vanityTitle:"",lastConstructIndex:-1,oldMemoryBank:[],newMemoryBank:[]});
+  }
+  if(owner==="story_arc_engine") {state.saveOutput=false;state.unlockFeedAIPrompt=false;}
+  if(owner==="stackable_inventory") MCPV6CancelGate(reason);
+  if(reason) MCPV5RecordDiagnostic("task-canceled",owner+": "+reason);
+}
+function MCPV6CleanupDisabled(previous,next) {
+  if(previous.stackable_inventory && !next.stackable_inventory) MCPV6CancelGate();
+  if(previous.slow_burn && !next.slow_burn && state.memory && state.mcpSlowBurn) {
+    let note=String(state.memory.authorsNote||"");for(const marker of [state.mcpSlowBurn.marker,...(state.mcpSlowBurn.markers||[])])if(marker)note=note.split(marker).join("");state.memory.authorsNote=note.trim();
+  }
+  for(const [id,b,e] of [["living_meters",MCPV5_LM_FRONT_MEMORY_BEGIN,MCPV5_LM_FRONT_MEMORY_END],["character_continuity",MCPV5_CC_FRONT_MEMORY_BEGIN,MCPV5_CC_FRONT_MEMORY_END]])if(previous[id]&&!next[id]&&state.memory)state.memory.frontMemory=MCPV5StripOwnedFrontMemoryBlock(state.memory.frontMemory,b,e);
+  const root=MCPV5Root();if(root.transaction && !next[root.transaction.owner])MCPV6CancelTask(root.transaction.owner,"Module disabled");
+}
+function MCPV6CardPrompt(prompt) {
+  const mode=MCPV5Root().settings.cardMode;
+  if(mode==="Grounded") return String(prompt).replace(/^- Create new information based on the context and story direction\s*$/gm,"- Record only facts explicitly established in the story.")+"\nDo not invent new facts; uncertain details must be omitted.";
+  if(mode==="Balanced") return String(prompt)+"\nPreserve established facts. Only infer details strongly supported by the story; do not invent major history.";
+  return prompt;
+}
+function MCPV6EventKey(tab,original) {
+  const h=Array.isArray(history)?history.slice(-4).map(a=>[a?.id??null,a?.type??null,MCPV5HashString(a?.text??a?.rawText??"")]):[];
+  return MCPV5HashString(JSON.stringify([tab,info?.actionCount??-1,h,original]));
+}
+function MCPV6ControlCommand(raw,root) {
+  const clean=String(raw).replace(/^\s*>?\s*(?:you\s+say,?\s*["“]?)?/i,"").trim().replace(/["”]$/,""),m=/^\/mms\s+(\S+)(?:\s+(.*))?$/i.exec(clean);if(!m)return null;
+  const cmd=m[1].toLowerCase(),arg=String(m[2]||"").trim();
+  if(cmd==="help")return "MMS 5.6.0: /mms status | errors | conflicts | performance | cancel | recover | pause | resume | profile Roleplay/RPG/Lightweight/All On/All Off | cast NAME | uncast NAME | advance arc"+(root.settings.inventoryMode==="Mapped"?" | map-item SIS item | RealmHeart item | unmap-item SIS item | RealmHeart item":"");
+  if(cmd==="status")return (root.planSummary||[]).join("\n")+"\n"+JSON.stringify(root.lastRun||{}).slice(0,700);
+  if(cmd==="errors")return (root.diagnostics||[]).slice(-10).map(d=>d.kind+": "+d.data).join("\n")||"No recorded diagnostics.";
+  if(cmd==="conflicts")return (root.conflictStatus||[]).join("\n");
+  if(cmd==="performance")return JSON.stringify({performance:root.performance||{},timings:root.timings||{},heartbeat:root.scheduler.heartbeat||{} }).slice(0,1100);
+  if(cmd==="cancel"||cmd==="recover") {if(root.transaction)MCPV6CancelTask(root.transaction.owner,"Canceled by player");MCPV6CancelGate();if(cmd==="recover"){root.actionSchedule=null;root.replay={};root.scheduler.actionCursor=0;root.controlTurn=null;}return "Pending tasks canceled. Persistent character and gameplay data retained.";}
+  if(cmd==="pause"||cmd==="resume") {root.optionalPaused=cmd==="pause";return "Optional processing "+(root.optionalPaused?"paused.":"resumed.");}
+  if(cmd==="profile"){const card=MCPV5EnsureControlCard();const chosen=MCPV5NormalizeChoice(arg,["Roleplay","RPG","Lightweight","All On","All Off"],"");if(!chosen||!card)return "Unknown profile.";card.entry=card.entry.replace(/^Preset:.*$/m,"Preset: "+chosen);MCPV5SyncControls();return "Applied "+chosen+" profile.";}
+  if(cmd==="map-item"||cmd==="unmap-item") {if(cmd==="map-item"&&root.settings.inventoryMode!=="Mapped")return "Inventory mapping is disabled by the code defaults; inventories remain independent.";const parts=arg.split("|").map(x=>x.trim());if(parts.length!==2||parts.some(x=>!x||x.length>55||/[\r\n:]/.test(x)||/^(?:__proto__|constructor|prototype)$/i.test(x)))return "Use /mms map-item SIS item | RealmHeart item. Requires code-level Mapped inventory mode.";root.inventoryMappings=Array.isArray(root.inventoryMappings)?root.inventoryMappings:[];root.inventoryMappings=root.inventoryMappings.filter(x=>x.sis.toLowerCase()!==parts[0].toLowerCase()&&x.rh.toLowerCase()!==parts[1].toLowerCase());if(cmd==="map-item")root.inventoryMappings.push({sis:parts[0],rh:parts[1]});root.inventoryMappings=root.inventoryMappings.slice(-40);return "Item mapping "+(cmd==="map-item"?"saved":"removed")+". Existing quantities are unchanged.";}
+  if(cmd==="cast"||cmd==="uncast") {if(!arg||arg.length>80)return "Enter a character name (up to 80 characters).";root.manualCast=Array.isArray(root.manualCast)?root.manualCast:[];root.manualCast=root.manualCast.filter(n=>n.toLowerCase()!==arg.toLowerCase());if(cmd==="cast")root.manualCast.push(arg);root.manualCast=root.manualCast.slice(-32);return "Scene cast: "+(root.manualCast.join(", ")||"none manually set");}
+  if(cmd==="advance"&&arg.toLowerCase()==="arc") {const card=MCPV5_NATIVE_STORY_CARDS.find(c=>MCPV5SAECard(c)==="current story arc");if(!card)return "No current Story Arc card.";const lines=String(card.entry||"").split("\n");const ix=lines.findIndex(l=>/^\s*\d+\.\s/.test(l));if(ix<0)return "No numbered plot beat found.";lines.splice(ix,1);card.entry=lines.map((line,i)=>/^\s*\d+\.\s/.test(line)?line.replace(/^\s*\d+\./,String(lines.slice(0,i+1).filter(l=>/^\s*\d+\.\s/.test(l)).length)+"."):line).join("\n");state.storyArc=card.entry;return "Advanced the current arc by one numbered beat.";}
+  return "Unknown MMS command. Use /mms help.";
+}
+function MCPV6Registry(root,text) {
+  const registry=root.characterRegistry&&typeof root.characterRegistry==="object"?root.characterRegistry:{};
+  const put=(name,aliases)=>{name=String(name||"").trim();const key=name.toLowerCase();if(!name||name.length>80||["__proto__","constructor","prototype","true","false","automatic"].includes(key))return;const record=Object.prototype.hasOwnProperty.call(registry,key)&&registry[key]&&typeof registry[key]==="object"?registry[key]:{name,aliases:[],lastSeen:-1};record.aliases=[...new Set([...(record.aliases||[]),...(aliases||[])].filter(a=>typeof a==="string"&&a.trim()&&a.length<=80&&!/^(?:true|false|none|you|he|she|they|character|npc|person|a|the)$/i.test(a.trim())))].slice(0,12);if([name,...record.aliases].some(a=>new RegExp("(?:^|[^\\p{L}\\p{N}_])"+MCPV5EscapeRegExp(a)+"(?=$|[^\\p{L}\\p{N}_])","iu").test(text)))record.lastSeen=Number(info?.actionCount)||0;registry[key]=record;};
+  for(const c of MCPV5_NATIVE_STORY_CARDS.slice(0,600)) {if(!c||MCPV5HideFromStoryCardExtension(c)||!/^(character|npc|person|cast)$/i.test(String(c.type||"")))continue;const name=(String(c.entry||"").match(/^\s*(?:Name|Character Name|NPC):\s*([^\n,]+)/im)||[])[1]||c.title||String(c.keys||"").split(",")[0];put(name,String(c.keys||"").split(",").map(a=>a.trim()));}
+  for(const name of [...(Array.isArray(info?.characterNames)?info.characterNames:[]),...(root.manualCast||[]),...(state.informationFirewall?.knownCharacters||[])])put(name,[]);
+  const entries=Object.entries(registry).sort((a,b)=>b[1].lastSeen-a[1].lastSeen).slice(0,160);root.characterRegistry=Object.fromEntries(entries);
+}
+function MCPV6MechanicalOutcome(root,plan,input) {
+  if(root.settings.outcomeMode!=="Mechanical"||!plan.outcomeRollAuthority||!input||/^\s*>?\s*\//.test(input))return null;
+  if(!/\b(?:try|attempt|cast|attack|shoot|throw|brace|lockpick|sneak|persuade)\b/i.test(input))return null;
+  const key=MCPV5HashString(JSON.stringify([info?.actionCount??-1,input]));
+  if(root.mechanicalRoll?.key===key)return root.mechanicalRoll;
+  const roll=1+Math.floor(Math.random()*20);const coin=plan.outcomeRollAuthority==="coin_flip";
+  return (root.mechanicalRoll={key,roll,action:info?.actionCount??-1,authority:plan.outcomeRollAuthority,result:coin?(roll>=11?"Success":"Failure"):roll===20?"Critical success":roll===1?"Critical failure":roll>=12?"Success":roll>=8?"Partial success":"Failure"});
+}
+let MCPV6_DETECT_CONTEXT_TASK=false;
+function MCPV6DetectContextTask(plan){MCPV6_DETECT_CONTEXT_TASK=true;try{return MCPV5ActiveTransaction("output",plan);}finally{MCPV6_DETECT_CONTEXT_TASK=false;}}
+function MCPV6FitAtomic(candidate,base,cap) {
+  const budget=Number.isFinite(cap)?cap:Number(info?.maxChars)||Infinity;
+  candidate=String(candidate||"");base=String(base||"");if(candidate.length<=budget)return candidate;
+  // Only remove oldest Recent Story material with known section boundaries.
+  // Never trim arbitrary prompt content or newer narrative to squeeze in an instruction.
+  const heading=/(?:^|\n)Recent Story:\s*\n?/i.exec(base);if(!heading)return null;
+  const start=heading.index+heading[0].length;
+  const tail=base.slice(start);const endMarker=/(?:\n\s*(?:\[Author's note:|Author's Note:|Plot Essentials:|AI Instructions:|World Lore:|<SYSTEM>|<CC_FRONT_MEMORY>|<LM_FRONT_MEMORY>|<MMS_SIS_GATE>))/i.exec(tail);
+  const storyEnd=endMarker?start+endMarker.index:base.length;
+  const story=base.slice(start,storyEnd);
+  if(!story||story.length<=1200)return null;
+  const need=candidate.length-budget;const max=Math.min(Math.floor(story.length*0.22),story.length-1200);
+  if(need>max||!candidate.includes(story))return null;
+  let cut=need;const at=story.slice(cut,Math.min(max,cut+200)).search(/\n|[.!?]\s/);if(at>=0)cut+=at+1;
+  if(cut>max)return null;
+  const shortened=candidate.replace(story,story.slice(cut).trimStart());return shortened.length<=budget?shortened:null;
+}
+function MCPV6PacingEvidence(text){return String(text||"").split(/(?<=[.!?])\s+|\n/).filter(s=>!/(?:\b(?:remembered|recalled|years ago|used to|once|had been|in the past|would|might|could|never|not|no longer)\b)/i.test(s)).join(" ");}
+function MCPV6ArcCompleted(beat,text){
+  if(!/\b(?:completed|finished|resolved|discovered|defeated|found|secured|succeeded|uncovered|rescued|recovered|arrived|obtained|returned)\b/i.test(text))return false;
+  const stop=new Set(["the","and","with","from","that","into","their","must","will","then","about","this","they","your","have","when"]);
+  const tokens=[...new Set(String(beat).toLowerCase().match(/\p{L}{4,}/gu)||[])].filter(w=>!stop.has(w));if(tokens.length<2)return false;
+  const sentences=String(text||"").split(/(?<=[.!?])\s+|\n/).filter(x=>!/\b(?:not|never|might|could|would|attempt|try|plan|hope)\b/i.test(x)&&/\b(?:completed|finished|resolved|discovered|defeated|found|secured|succeeded|uncovered|rescued|recovered|arrived|obtained|returned)\b/i.test(x));
+  return sentences.some(x=>tokens.filter(w=>x.toLowerCase().includes(w)).length>=Math.max(2,Math.ceil(tokens.length*.7)));
+}
+function MCPV6RecallBoost(card){const reg=MCPV5Root().characterRegistry||{};const name=String(card?.title||"").trim().toLowerCase();const rec=reg[name];if(!rec)return 1;const manual=(MCPV5Root().manualCast||[]).some(n=>n.toLowerCase()===name);const recency=Math.max(0,1-Math.max(0,(info?.actionCount??0)-rec.lastSeen)/20);return 1+(manual?0.3:0)+recency*0.2;}
+function MCPV6OutcomeRandom(){const root=MCPV5Root();const a=root.actionSchedule?.action??info?.actionCount??-1;return (parseInt(MCPV5HashString(JSON.stringify([a,root.actionSchedule?.inputText||"",root.actionSchedule?.signature||""])),16)>>>0)/4294967296;}
+function MCPV6ApplyMappedItem(plan,proposal,row,all) {
+  const root=MCPV5Root();if(root.settings.inventoryMode!=="Mapped"||!plan.effective.stackable_inventory||!plan.effective.realmheart||!state.vars||!state.ubis||!Array.isArray(state.vars.inventory)||!state.ubis.inventory||proposal.module!==plan.inventoryAuthority||!["stackable_inventory","realmheart"].includes(proposal.module))return;
+  const source=proposal.module, peer=source==="stackable_inventory"?"realmheart":"stackable_inventory";
+  for(const mapping of root.inventoryMappings||[]){const from=source==="stackable_inventory"?mapping.sis:mapping.rh,to=peer==="stackable_inventory"?mapping.sis:mapping.rh;if(String(row.name).toLowerCase()!==from.toLowerCase())continue;
+    if(all.some(p=>p.module===peer&&(p.items||[]).some(x=>String(x.name).toLowerCase()===to.toLowerCase()))){MCPV5RecordDiagnostic("mapped-item-conflict",from+" / "+to+" changed independently; no mirroring");continue;}
+    const factory=MCPV5_MODULE_CACHE[MCPV5FactoryKey(peer)];if(!factory?.refreshInventory){MCPV5RecordDiagnostic("mapped-item-deferred","Peer unavailable: "+peer);continue;}
+    const same=n=>String(n).toLowerCase()===to.toLowerCase();const inv=state.vars.inventory,rh=state.ubis.inventory;const old=peer==="stackable_inventory"?inv.slice():{...rh};const cardSandbox=MCPV5_CARD_SANDBOXES[peer];
+    try{if(peer==="stackable_inventory"){const have=inv.filter(same).length,target=have+row.delta;if(!Number.isSafeInteger(target)||target<0||target>99)throw Error("mapped quantity out of range");state.vars.inventory=inv.filter(n=>!same(n)).concat(Array(target).fill(to));}
+      else{const k=Object.keys(rh).find(same)||to;const target=Number(rh[k]||0)+row.delta;if(!Number.isSafeInteger(target)||target<0||target>999999)throw Error("mapped quantity out of range");if(target===0)delete rh[k];else rh[k]=target;}
+      factory.refreshInventory();if(cardSandbox&&!cardSandbox.makeCloneSafe())throw Error("card validation failed");cardSandbox?.commit();MCPV5RecordDiagnostic("mapped-item-sync",from+" → "+to+": "+row.delta);
+    }catch(e){if(peer==="stackable_inventory")state.vars.inventory=old;else state.ubis.inventory=old;try{cardSandbox?.rollback();}catch{}MCPV5RecordDiagnostic("mapped-item-rejected",String(e.message||e));}
+  }
+}
+
+
+function MCPV6NameMention(text,name){
+  const root=MCPV5Root(),key=String(name||"").toLowerCase();
+  let rec=root.characterRegistry?.[key];
+  if(!rec){const matches=Object.values(root.characterRegistry||{}).filter(v=>v?.aliases?.some(a=>String(a).toLowerCase()===key));if(matches.length===1)rec=matches[0];}
+  const forms=[String(name||""),rec?.name,...(rec?.aliases||[])].filter(Boolean);
+  return forms.some(form=>new RegExp("(?:^|[^\\p{L}\\p{N}_])"+MCPV5EscapeRegExp(form)+"(?=$|[^\\p{L}\\p{N}_])","iu").test(String(text||"")));
+}
+function MCPV6ThoughtSimilarity(a,b){const words=v=>new Set(String(v||"").toLowerCase().match(/\p{L}{3,}/gu)||[]);const x=words(a),y=words(b);if(x.size<3||y.size<3)return 0;let common=0;for(const w of x)if(y.has(w))common++;return common/(x.size+y.size-common);}
+function MCPV6RetryKey(plan,settings){return MCPV5HashString(JSON.stringify([info?.actionCount??-1,(Array.isArray(history)?history.slice(-6):[]).map(a=>[a?.id??null,a?.type??null,MCPV5HashString(a?.text??a?.rawText??"")]),MCPV5PlanSignature(plan,settings)]));}
+function MCPV6RetrySnapshot(){
+  const data={};for(const k of Object.keys(state))if(k!=="mcpCompatibilityHost"&&k!=="mcpExactCollection")data[k]=state[k];
+  const cards=MCPV5_NATIVE_STORY_CARDS.filter(c=>c&&c.keys!==MCPV5_CARD_KEYS);
+  const json=MCPV5CloneStateValue({data,cards},120000);return json.ok?json.value:null;
+}
+function MCPV6RetryDeckSignature(cards){return JSON.stringify((cards||[]).map(c=>c.id??[c.keys,c.type,c.title]));}
+function MCPV6CaptureRetry(root){
+  const snap=MCPV6RetrySnapshot();if(!snap)return null;
+  const host=MCPV5CloneStateValue({schedule:root.actionSchedule,ledger:root.inventoryLedger,mechanicalRoll:root.mechanicalRoll,sceDeliveredEvent:root.sceDeliveredEvent,thoughtSpotlight:root.thoughtSpotlight},45000);
+  return host.ok?{snap,host:host.value}:null;
+}
+function MCPV6CommitRetry(root,key,raw,before){
+  const after=MCPV6RetrySnapshot();if(!after||MCPV6RetryDeckSignature(after.cards)!==MCPV6RetryDeckSignature(before.snap.cards)){root.retryCheckpoint=null;return;}
+  root.retryCheckpoint={key,rawHash:MCPV5HashString(raw),postHash:MCPV5HashString(JSON.stringify(after)),before};
+}
+function MCPV6RestoreRetry(root,key,raw){
+  const cp=root.retryCheckpoint;if(!cp||cp.key!==key||cp.rawHash===MCPV5HashString(raw))return false;
+  const now=MCPV6RetrySnapshot();if(!now||MCPV5HashString(JSON.stringify(now))!==cp.postHash||MCPV6RetryDeckSignature(now.cards)!==MCPV6RetryDeckSignature(cp.before.snap.cards)){MCPV5RecordDiagnostic("retry-reconcile-skipped","State or Story Cards changed since previous response.");root.retryCheckpoint=null;return false;}
+  const before=cp.before.snap;const physical=MCPV5_NATIVE_STORY_CARDS.filter(c=>c&&c.keys!==MCPV5_CARD_KEYS);
+  // Only restore in-place when the exact deck identities and post-state still match.
+  for(const k of Object.keys(state))if(k!=="mcpCompatibilityHost"&&k!=="mcpExactCollection"&&!Object.prototype.hasOwnProperty.call(before.data,k))delete state[k];
+  for(const k of Object.keys(before.data))state[k]=before.data[k];
+  for(let i=0;i<physical.length;i++){const c=physical[i],v=before.cards[i];for(const k of Object.keys(c))if(!Object.prototype.hasOwnProperty.call(v,k))delete c[k];Object.assign(c,v);}
+  const h=cp.before.host;root.actionSchedule=h.schedule;root.inventoryLedger=h.ledger;root.mechanicalRoll=h.mechanicalRoll;root.sceDeliveredEvent=h.sceDeliveredEvent;root.thoughtSpotlight=h.thoughtSpotlight;
+  if(root.eventJournal?.length)root.eventJournal.pop();root.retryCheckpoint=null;MCPV5RecordDiagnostic("retry-reconciled","Restored unchanged pre-response state for a replacement output.");return true;
+}
+
+function MCPV5Run(tab,incomingText) {
+  const original=MCPV5SafeText(incomingText,"\u200B");const started=Date.now();
+  let root=MCPV5Root();
+  // The configuration is synchronized before replay checks, so edits still apply.
+  const plan=MCPV5SyncControls();root=MCPV5Root();
+  const key=MCPV6EventKey(tab,original)+":"+MCPV5PlanSignature(plan,root.settings);
+  const cached=root.replay?.[tab];
+  if(cached?.key===key && typeof cached.text==="string") return cached.stop?{text:cached.text,stop:true}:{text:cached.text};
+  if(tab==="input") {
+    root.controlTurn=null;root.blockedTask=null;root.retryCheckpoint=null;
+    if(state.vars?.awaitingGate && !state.vars.mmsGateId){MCPV6CancelGate("Canceled legacy unbound inventory request; please reissue it.");}
+    if(state.vars?.awaitingGate && state.vars.mmsGateId && /^\s*(?:>\s*you\s*)?\//i.test(original)) MCPV6CancelGate("Previous inventory request canceled before new command.");
+    const reply=MCPV6ControlCommand(original,root);
+    if(reply!==null){state.message=reply;root.controlTurn={action:info?.actionCount??-1,reply};root.replay ||= {};root.replay.input={key,text:original,stop:false};return {text:original};}
+    MCPV6Registry(root,original.slice(0,12000));
+    if(!MCPV6MechanicalOutcome(root,plan,original))root.mechanicalRoll=null;
+  }
+  if(tab!=="input"&&root.controlTurn && Math.abs((info?.actionCount??-1)-root.controlTurn.action)<=1) {
+    if(tab==="context")return {text:original,stop:true};
+    const reply=root.controlTurn.reply;root.controlTurn=null;return {text:reply};
+  }
+  const retryKey=tab==="output"?MCPV6RetryKey(plan,root.settings):"";
+  let retryBefore=null;
+  if(tab==="output" && plan.selected.length && !root.transaction && !root.actionSchedule?.controlOutput){
+    MCPV6RestoreRetry(root,retryKey,original);
+    retryBefore=MCPV6CaptureRetry(root);
+  }
+  const result=MCPV6RunCore(tab,original);root=MCPV5Root();
+  if(tab==="output"&&plan.effective.true_auto_stats){for(const c of MCPV5_NATIVE_STORY_CARDS){if(c&&/ (?:Stats|Talents|Skills|Inventory|Modifiers|Storage)$/.test(String(c.title||""))&&/player/i.test(String(c.type||""))&&typeof c.description==="string"&&c.description.length>9500){const lines=c.description.split("\n");let used=0;const retained=[];for(const l of lines){if(!/^Log \d+\s*\|/.test(l)||used+l.length<8500){retained.push(l);used+=l.length+1;}}c.description=retained.join("\n");}}}
+  if(tab==="context"&&plan.effective.usc_e&&!root.transaction&&!root.actionSchedule?.commandOwner&&!result.stop){
+    const config=MCPV5_NATIVE_STORY_CARDS.find(c=>c?.keys==="[CONFIG] Banned words");
+    if(config){const values=String(config.entry||"").split("\n").filter(l=>l.trim()&&!/^[#{}]/.test(l.trim())).flatMap(l=>l.split(",")).map(v=>v.trim()).filter(v=>v&&v.length<=70).slice(0,8);if(values.length){const block="[Style: avoid these overused phrases when possible: "+values.join("; ")+"]";if(result.text.length+block.length+2<=(Number(info?.maxChars)||Infinity))result.text+="\n\n"+block;}}
+  }
+  if(tab==="context"&&root.settings.outcomeMode==="Mechanical"&&root.mechanicalRoll&&Math.abs((info?.actionCount??-1)-root.mechanicalRoll.action)<=1&&!root.transaction&&!root.actionSchedule?.commandOwner) {
+    const packet="[MMS outcome: "+root.mechanicalRoll.result+". Narrate the attempted action consistently with this determined outcome.]";
+    const fitted=MCPV6FitAtomic(result.text+"\n\n"+packet,result.text);
+    if(fitted!==null){result.text=fitted;root.mechanicalRoll.delivered=true;}else{root.mechanicalRoll.delivered=false;MCPV5RecordDiagnostic("mechanical-roll-deferred","No safe context space for outcome instruction.");}
+  }
+  if(tab==="output") {
+    MCPV6Registry(root,result.text.slice(0,12000));
+    const run=root.lastRun||{};if(root.sceDeliveredEvent&&!run.transaction&&!run.commandOwner&&Math.abs((info?.actionCount??-1)-root.sceDeliveredEvent.action)<=1)root.sceDeliveredEvent.resolved=true;root.eventJournal=Array.isArray(root.eventJournal)?root.eventJournal:[];
+    root.eventJournal.push({key,action:info?.actionCount??-1,type:run.transaction?"task":run.commandOwner&&run.commandOwner!=="stackable_inventory"?"command":"narrative",processed:run.ran||[],deferred:run.skipped||[],evidence:String(result.text).slice(0,1600),input:String(root.actionSchedule?.inputText||"").slice(0,800),inputProcessed:root.actionSchedule?.inputProcessed||[],firewallEnabled:plan.effective.information_firewall===true});root.eventJournal=root.eventJournal.slice(-24);
+    if(retryBefore && !run.transaction && (!run.commandOwner || run.commandOwner==="stackable_inventory"))MCPV6CommitRetry(root,retryKey,original,retryBefore);
+    else root.retryCheckpoint=null;
+  }
+  root.replay ||= {}; if(result.text.length<=50000)root.replay[tab]={key,text:result.text,stop:tab==="context"&&result.stop===true};
+  if(root.lastRun)root.lastRun.totalMs=Date.now()-started;
+  if(tab!=="context")delete result.stop;
+  return result;
+}
+
+
 try {
   MCPV5SyncControls();
 } catch (error) {
-  log("MCP V5.4.6 initialization error:", error);
+  log("MCP V5.6.0 initialization error:", error);
 }
