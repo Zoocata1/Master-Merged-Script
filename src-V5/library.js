@@ -48743,7 +48743,7 @@ function MCPV5Create_ar() {
           .map((piece) => piece.raw)
           .join("")
 
-        if (!kept.trim()) continue
+        if (!kept.trim() && segment.kind === "quote") continue
 
         if (segment.kind === "quote") {
           filtered +=
