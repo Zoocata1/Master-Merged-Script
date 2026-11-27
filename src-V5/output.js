@@ -1,4 +1,4 @@
-// MASTER SCRIPT V5.4.6 — Output
+// MASTER SCRIPT V5.6.0 — Output
 const modifier = (text) => {
   const original = (
     typeof text === "string" && text.length
@@ -9,7 +9,7 @@ const modifier = (text) => {
     const safe = (
       typeof value === "string" && value.length
     ) ? value : original;
-    return safe.startsWith(" ") ? safe : ` ${safe}`;
+    return /^\s/.test(safe) ? safe : ` ${safe}`;
   };
 
   try {
@@ -21,13 +21,11 @@ const modifier = (text) => {
       result.text.length
     ) {
       const finalText = withLeadingSpace(String(result.text));
-      return result.stop === true
-        ? { text: finalText, stop: true }
-        : { text: finalText };
+      return { text: finalText };
     }
     return { text: withLeadingSpace(original) };
   } catch (error) {
-    log("MCP V5.4.6 output error:", error);
+    log("MCP V5.6.0 output error:", error);
     return { text: withLeadingSpace(original) };
   }
 }
